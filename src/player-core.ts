@@ -295,3 +295,109 @@ export function activeTimestampIndex(stamps: Timestamp[], current: number): numb
   }
   return idx;
 }
+
+// ---------------------------------------------------------------------------
+// Livestream (play-003)
+//
+// A "live" source is a file still being written on disk: bytes keep arriving and
+// the playable region grows over time. The UI feeds those growing bytes into a
+// MediaSource (see main.ts); this module owns the *decisions* about the moving
+// live window so they can be unit-tested without a real stream.
+//
+// The model: `available` is how many seconds of media have actually been written
+// (the buffered end). We deliberately hold the playhead a `delay` (~5s) behind
+// that write head — the "live edge" — so playback never runs into not-yet-written
+// bytes and stalls. A viewer may seek/track back anywhere in [0, liveEdge] but
+// cannot fast-forward past the live edge while the stream is still live. Once the
+// stream completes it behaves like an ordinary file: the whole thing is seekable.
+// ---------------------------------------------------------------------------
+
+/** How far behind the write head the live edge sits, in seconds. */
+export const LIVE_DELAY_SECONDS = 5;
+
+/**
+ * Tolerance, in seconds, for "close enough to the live edge to count as caught
+ * up". Keeps the FF gate and the LIVE indicator from flickering as `available`
+ * grows fractionally between polls.
+ */
+export const LIVE_EDGE_EPSILON = 0.75;
+
+/** A snapshot of the moving live window the UI hands to these helpers. */
+export interface LiveWindow {
+  /** Seconds of media written so far (the buffered end of the growing file). */
+  available: number;
+  /** Safety delay the live edge is held behind the write head. */
+  delay: number;
+  /** True while the file is still being written; false once it has finalized. */
+  live: boolean;
+}
+
+/** Build a LiveWindow with the default delay. */
+export function createLiveWindow(available = 0, live = true): LiveWindow {
+  return { available, delay: LIVE_DELAY_SECONDS, live };
+}
+
+/**
+ * The furthest playable / seekable point. While live this is `available - delay`
+ * (never below 0); once the stream has finalized the whole of `available` is
+ * reachable.
+ */
+export function liveEdge(w: LiveWindow): number {
+  if (!w.live) return w.available;
+  return Math.max(0, w.available - w.delay);
+}
+
+/** Clamp a requested seek target into the live window [0, liveEdge]. */
+export function clampToLiveWindow(target: number, w: LiveWindow): number {
+  return clamp(target, 0, liveEdge(w));
+}
+
+/**
+ * Live-aware skip: move by `delta` seconds, clamped to [0, liveEdge] rather than
+ * to a fixed duration (which is unknown for a growing stream). Tracking back
+ * always works; fast-forward stops at the live edge.
+ */
+export function skipLive(currentTime: number, delta: number, w: LiveWindow): number {
+  return clampToLiveWindow(currentTime + delta, w);
+}
+
+/**
+ * Whether the playhead has caught up to the live edge. Only meaningful while the
+ * stream is live; a finalized stream is never "caught up" (it is just a file).
+ */
+export function isCaughtUp(
+  currentTime: number,
+  w: LiveWindow,
+  epsilon: number = LIVE_EDGE_EPSILON,
+): boolean {
+  if (!w.live) return false;
+  return currentTime >= liveEdge(w) - epsilon;
+}
+
+/**
+ * Whether fast-forward is allowed. Always allowed for a finalized stream; while
+ * live it is blocked once the viewer has caught up to the live edge.
+ */
+export function canFastForwardLive(
+  currentTime: number,
+  w: LiveWindow,
+  epsilon: number = LIVE_EDGE_EPSILON,
+): boolean {
+  if (!w.live) return true;
+  return !isCaughtUp(currentTime, w, epsilon);
+}
+
+/** How many seconds the playhead is behind the live edge (never negative). */
+export function behindLive(currentTime: number, w: LiveWindow): number {
+  return Math.max(0, liveEdge(w) - currentTime);
+}
+
+/**
+ * Playhead position as a 0..1 fraction of the live window for the scrubber. The
+ * window spans [0, available] so the trailing `delay` shows as a small gap on the
+ * right between the playhead's reachable edge and the very live tip.
+ */
+export function liveProgressFraction(currentTime: number, w: LiveWindow): number {
+  if (w.available <= 0) return 0;
+  return clamp(currentTime / w.available, 0, 1);
+}

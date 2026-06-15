@@ -26,8 +26,17 @@ import {
   previousTimestamp,
   nextTimestamp,
   activeTimestampIndex,
+  createLiveWindow,
+  liveEdge,
+  clampToLiveWindow,
+  skipLive,
+  isCaughtUp,
+  canFastForwardLive,
+  behindLive,
+  liveProgressFraction,
   PLAYBACK_RATES,
   SKIP_SECONDS,
+  LIVE_DELAY_SECONDS,
   type PlayerState,
 } from "./player-core";
 
@@ -285,5 +294,72 @@ describe("timestamps — markers + navigation", () => {
     expect(activeTimestampIndex(stamps, 5)).toBe(0);
     expect(activeTimestampIndex(stamps, 30)).toBe(1);
     expect(activeTimestampIndex(stamps, 999)).toBe(2);
+  });
+});
+
+describe("livestream — live window", () => {
+  it("createLiveWindow uses the default delay and is live by default", () => {
+    const w = createLiveWindow(30);
+    expect(w).toEqual({ available: 30, delay: LIVE_DELAY_SECONDS, live: true });
+    expect(createLiveWindow().available).toBe(0);
+    expect(createLiveWindow(10, false).live).toBe(false);
+  });
+
+  it("liveEdge holds the edge `delay` seconds behind the write head", () => {
+    expect(liveEdge(createLiveWindow(30))).toBe(30 - LIVE_DELAY_SECONDS);
+    expect(liveEdge(createLiveWindow(12))).toBe(7);
+  });
+
+  it("liveEdge never goes below zero before enough is written", () => {
+    expect(liveEdge(createLiveWindow(3))).toBe(0);
+    expect(liveEdge(createLiveWindow(0))).toBe(0);
+  });
+
+  it("a finalized stream exposes its whole length as the edge", () => {
+    expect(liveEdge(createLiveWindow(30, false))).toBe(30);
+  });
+
+  it("clampToLiveWindow keeps seeks inside [0, liveEdge]", () => {
+    const w = createLiveWindow(30); // edge = 25
+    expect(clampToLiveWindow(10, w)).toBe(10);
+    expect(clampToLiveWindow(-5, w)).toBe(0);
+    expect(clampToLiveWindow(40, w)).toBe(25); // cannot pass the live edge
+  });
+
+  it("skipLive tracks back freely but fast-forward stops at the live edge", () => {
+    const w = createLiveWindow(30); // edge = 25
+    expect(skipLive(10, 10, w)).toBe(20);
+    expect(skipLive(20, 10, w)).toBe(25); // clamped to the edge, not 30
+    expect(skipLive(4, -10, w)).toBe(0); // clamped to start
+  });
+
+  it("isCaughtUp is true only at/after the live edge while live", () => {
+    const w = createLiveWindow(30); // edge = 25
+    expect(isCaughtUp(10, w)).toBe(false);
+    expect(isCaughtUp(25, w)).toBe(true);
+    expect(isCaughtUp(24.9, w)).toBe(true); // within the epsilon tolerance
+    expect(isCaughtUp(25, createLiveWindow(30, false))).toBe(false); // finalized: never "live"
+  });
+
+  it("canFastForwardLive gates FF on the live edge but never blocks a finished stream", () => {
+    const w = createLiveWindow(30); // edge = 25
+    expect(canFastForwardLive(10, w)).toBe(true);
+    expect(canFastForwardLive(25, w)).toBe(false);
+    expect(canFastForwardLive(25, createLiveWindow(30, false))).toBe(true);
+  });
+
+  it("behindLive reports the gap back to the live edge", () => {
+    const w = createLiveWindow(30); // edge = 25
+    expect(behindLive(10, w)).toBe(15);
+    expect(behindLive(25, w)).toBe(0);
+    expect(behindLive(30, w)).toBe(0); // never negative
+  });
+
+  it("liveProgressFraction maps the playhead onto the [0, available] window", () => {
+    const w = createLiveWindow(40);
+    expect(liveProgressFraction(10, w)).toBeCloseTo(0.25);
+    expect(liveProgressFraction(0, w)).toBe(0);
+    expect(liveProgressFraction(80, w)).toBe(1); // clamped
+    expect(liveProgressFraction(10, createLiveWindow(0))).toBe(0); // nothing written yet
   });
 });

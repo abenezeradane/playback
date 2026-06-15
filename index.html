@@ -66,6 +66,8 @@
               </div>
               <!-- Timestamp markers (play-002) are injected here, on top of the bar. -->
               <div id="markers" class="scrubber__markers"></div>
+              <!-- Live edge tick (play-003): where the reachable "live" point sits. -->
+              <div id="live-edge" class="scrubber__live-edge" aria-hidden="true" hidden></div>
             </div>
 
             <div class="controls__row">
@@ -97,6 +99,16 @@
                 </div>
 
                 <span id="time" class="time">0:00&nbsp;/&nbsp;0:00</span>
+
+                <!-- Livestream indicator (play-003): click / press L to jump to live. -->
+                <button
+                  id="live-badge"
+                  class="live-badge"
+                  type="button"
+                  title="Jump to live (L)"
+                  data-caught="false"
+                  hidden
+                >&#9679; LIVE</button>
               </div>
 
               <div class="controls__group">

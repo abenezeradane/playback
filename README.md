@@ -22,9 +22,17 @@ frontend (TypeScript + Vite) driving an HTML5 `<video>` element.
   of `HH:MM:SS Title` lines, and the player draws a clickable marker per
   timestamp on the scrubber. Click a marker (or a row in the list) to jump there;
   press `A` / `D` to jump to the previous / next timestamp.
+- **Livestream playback** — open a file that is still being written and Playback
+  tails it in real time (via MediaSource), holding a ~5 second live delay. You
+  can track back and fast-forward through everything written so far, but
+  fast-forward stops at the live edge once you catch up. A **LIVE** badge shows
+  how far behind live you are; press `L` (or click the badge) to jump to live.
+  When the file finishes writing it becomes an ordinary, fully-seekable file.
 
 Supported containers/codecs depend on the system WebView2 (Windows) /
 WebKitGTK / WKWebView: MP4 (H.264/AAC), WebM, and Ogg are the safe set.
+Livestream playback feeds a MediaSource, so the growing file must be a
+fragmented MP4 (fMP4) or WebM.
 
 ## Project layout
 
@@ -35,8 +43,11 @@ WebKitGTK / WKWebView: MP4 (H.264/AAC), WebM, and Ogg are the safe set.
 | `src/player-core.test.ts` | Vitest suite for the core logic. |
 | `src/main.ts` | Wires the DOM + Tauri APIs + `<video>` to `player-core`. |
 | `src/styles.css` | Dark "editorial" styling (see `DESIGN.md`). |
-| `src-tauri/` | Rust/Tauri 2.0 shell (dialog plugin, asset protocol). |
+| `src-tauri/` | Rust/Tauri 2.0 shell (dialog plugin, asset protocol, livestream byte-streaming commands). |
 | `samples/sample.mp4` | A 30-second test clip with an on-screen timecode. |
+| `samples/live-source.mp4` | Fragmented (fMP4) build of the clip, for the livestream smoke. |
+| `scripts/live-writer.mjs` | Writes a file in real time to simulate a live capture. |
+| `scripts/smoke-*.ps1` | Visual end-to-end smoke tests (play-001/002/003). |
 
 ## Prerequisites
 
