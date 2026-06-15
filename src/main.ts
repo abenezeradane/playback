@@ -105,6 +105,9 @@ const tsList = $<HTMLUListElement>("timestamps-list");
 const tsCount = $<HTMLSpanElement>("timestamps-count");
 const markerFlash = $<HTMLDivElement>("marker-flash");
 const markerFlashText = $<HTMLSpanElement>("marker-flash-text");
+const nowChapter = $<HTMLDivElement>("now-chapter");
+const nowChapterTime = $<HTMLSpanElement>("now-chapter-time");
+const nowChapterLabel = $<HTMLSpanElement>("now-chapter-label");
 
 // ---------------------------------------------------------------------------
 // State
@@ -439,8 +442,10 @@ function renderTimestamps(): void {
 
 /** Toggle the `data-active` flag on the marker + row for the current chapter. */
 function updateActiveTimestamp(): void {
-  if (timestamps.length === 0) return;
-  const idx = activeTimestampIndex(timestamps, state.currentTime);
+  const idx = timestamps.length === 0 ? -1 : activeTimestampIndex(timestamps, state.currentTime);
+  // Keep the chrome's "now playing chapter" label in sync (cheap; only writes on
+  // change), even when the highlight short-circuits below or all are removed.
+  updateNowChapter(idx);
   if (idx === activeTsIndex) return;
   if (activeTsIndex >= 0) {
     markerEls[activeTsIndex]?.removeAttribute("data-active");
@@ -451,6 +456,20 @@ function updateActiveTimestamp(): void {
     listEls[idx]?.setAttribute("data-active", "true");
   }
   activeTsIndex = idx;
+}
+
+/** Show the active chapter's time + title in the control chrome, or hide it. */
+function updateNowChapter(idx: number): void {
+  if (idx < 0) {
+    if (!nowChapter.hidden) nowChapter.hidden = true;
+    return;
+  }
+  const ts = timestamps[idx];
+  if (nowChapter.hidden || nowChapterLabel.textContent !== ts.title) {
+    nowChapterTime.textContent = formatTime(ts.time);
+    nowChapterLabel.textContent = ts.title;
+    nowChapter.hidden = false;
+  }
 }
 
 /** Seek to a timestamp and surface its title briefly. */

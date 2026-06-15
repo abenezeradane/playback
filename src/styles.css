@@ -640,6 +640,44 @@ body {
   pointer-events: none;
 }
 
+/* Current-chapter indicator (play-002): the active timestamp, shown with the
+   chrome. Lives inside .controls so it fades together with the rest of the UI. */
+.now-chapter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  max-width: 60%;
+  padding: 5px 13px 5px 11px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-glass);
+  border: 1px solid var(--border-glass);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.now-chapter .ic {
+  width: 15px;
+  height: 15px;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+.now-chapter__time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.now-chapter__label {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Fade the whole player chrome together when idle. */
 .stage[data-idle="true"] .overlay-top,
 .stage[data-idle="true"] .scrim {

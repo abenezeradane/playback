@@ -109,6 +109,13 @@
 
         <!-- Bottom control bar -->
         <div id="controls" class="controls" data-visible="true">
+          <!-- Current chapter (play-002): the active timestamp, shown with the chrome. -->
+          <div id="now-chapter" class="now-chapter" aria-live="polite" hidden>
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12H3" /><path d="M16 6H3" /><path d="M12 18H3" /><path d="m16 12 5 3-5 3z" /></svg>
+            <span id="now-chapter-time" class="now-chapter__time"></span>
+            <span id="now-chapter-label" class="now-chapter__label"></span>
+          </div>
+
           <!-- Scrubber -->
           <div class="scrubber">
             <div class="scrubber__track" aria-hidden="true">
