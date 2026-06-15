@@ -64,28 +64,33 @@ const stage = $<HTMLElement>("stage");
 const video = $<HTMLVideoElement>("video");
 const controls = $<HTMLDivElement>("controls");
 const centerToggle = $<HTMLDivElement>("center-toggle");
-const centerIcon = $<HTMLSpanElement>("center-icon");
 
 const btnOpen = $<HTMLButtonElement>("btn-open");
 const btnOpenTop = $<HTMLButtonElement>("btn-open-top");
+const btnBack = $<HTMLButtonElement>("btn-back");
 const btnPlay = $<HTMLButtonElement>("btn-play");
-const playGlyph = $<HTMLSpanElement>("play-glyph");
 const btnRewind = $<HTMLButtonElement>("btn-rewind");
 const btnForward = $<HTMLButtonElement>("btn-forward");
 const btnMute = $<HTMLButtonElement>("btn-mute");
-const muteGlyph = $<HTMLSpanElement>("mute-glyph");
 const btnRate = $<HTMLButtonElement>("btn-rate");
 const btnFs = $<HTMLButtonElement>("btn-fs");
+const btnKeys = $<HTMLButtonElement>("btn-keys");
 const seek = $<HTMLInputElement>("seek");
 const volume = $<HTMLInputElement>("volume");
 const progress = $<HTMLDivElement>("progress");
 const buffered = $<HTMLDivElement>("buffered");
-const timeLabel = $<HTMLSpanElement>("time");
+const timeLabel = $<HTMLElement>("time");
 const titleLabel = $<HTMLSpanElement>("title-label");
+const subtitleLabel = $<HTMLSpanElement>("subtitle-label");
 
 // Livestream (play-003)
 const liveBadge = $<HTMLButtonElement>("live-badge");
+const btnGoLive = $<HTMLButtonElement>("btn-golive");
 const liveEdgeTick = $<HTMLDivElement>("live-edge");
+
+// Keyboard shortcuts overlay (frame 05)
+const shortcutsOverlay = $<HTMLDivElement>("shortcuts-overlay");
+const btnKeysClose = $<HTMLButtonElement>("btn-keys-close");
 
 // Timestamps (play-002)
 const markersLayer = $<HTMLDivElement>("markers");
@@ -97,11 +102,6 @@ const tsList = $<HTMLUListElement>("timestamps-list");
 const tsCount = $<HTMLParagraphElement>("timestamps-count");
 const markerFlash = $<HTMLDivElement>("marker-flash");
 const markerFlashText = $<HTMLSpanElement>("marker-flash-text");
-
-const PLAY_GLYPH = "▶"; // ▶
-const PAUSE_GLYPH = "⏸"; // ⏸
-const VOLUME_GLYPH = "🔊"; // 🔊
-const MUTE_GLYPH = "🔇"; // 🔇
 
 // ---------------------------------------------------------------------------
 // State
@@ -148,9 +148,9 @@ function applyAudioToVideo(): void {
 // Rendering
 // ---------------------------------------------------------------------------
 function render(): void {
-  // Play / pause glyphs
-  playGlyph.textContent = state.isPlaying ? PAUSE_GLYPH : PLAY_GLYPH;
-  centerIcon.textContent = state.isPlaying ? PLAY_GLYPH : PAUSE_GLYPH;
+  // Play / pause icon state (CSS swaps the glyph for the data attribute).
+  btnPlay.dataset.playing = String(state.isPlaying);
+  centerToggle.dataset.playing = String(state.isPlaying);
 
   const w = activeLiveWindow();
   if (w) {
@@ -161,7 +161,7 @@ function render(): void {
       seek.value = String(timeToSlider(state.currentTime, state.duration, 1000));
     }
     progress.style.width = `${progressFraction(state) * 100}%`;
-    timeLabel.innerHTML = `${formatTime(state.currentTime)}&nbsp;/&nbsp;${formatTime(state.duration)}`;
+    timeLabel.innerHTML = `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-tot">${formatTime(state.duration)}</span>`;
 
     // Buffered indicator
     if (video.buffered.length > 0 && state.duration > 0) {
@@ -171,6 +171,7 @@ function render(): void {
 
     // Live chrome only applies in live mode.
     if (!liveBadge.hidden) liveBadge.hidden = true;
+    if (!btnGoLive.hidden) btnGoLive.hidden = true;
     if (!liveEdgeTick.hidden) liveEdgeTick.hidden = true;
     if (btnForward.disabled) btnForward.disabled = false;
   }
@@ -178,7 +179,7 @@ function render(): void {
   // Volume + mute
   const audible = effectiveVolume(state);
   volume.value = String(Math.round(audible * 100));
-  muteGlyph.textContent = audible === 0 ? MUTE_GLYPH : VOLUME_GLYPH;
+  btnMute.dataset.muted = String(audible === 0);
 
   // Rate
   btnRate.textContent = `${state.rate}×`;
@@ -205,15 +206,15 @@ function renderLive(w: LiveWindow): void {
 
   // Time reads as "position / LIVE", with how far behind when not caught up.
   timeLabel.innerHTML = caught
-    ? `${formatTime(state.currentTime)}&nbsp;/&nbsp;LIVE`
-    : `${formatTime(state.currentTime)}&nbsp;/&nbsp;LIVE&nbsp;(−${behind}s)`;
+    ? `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-live">LIVE</span>`
+    : `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-live">LIVE <em>−${behind}s</em></span>`;
 
-  // LIVE badge: bright when caught up, dim while behind; click jumps to live.
+  // LIVE status badge (top overlay); pulses once caught up to the edge.
   liveBadge.hidden = false;
   liveBadge.dataset.caught = String(caught);
-  liveBadge.textContent = caught ? "● LIVE" : `● GO LIVE`;
 
-  // Cannot fast-forward past the live edge once caught up.
+  // "GO LIVE" action appears only while behind; fast-forward is gated at the edge.
+  btnGoLive.hidden = caught;
   btnForward.disabled = caught;
 }
 
@@ -351,10 +352,7 @@ function renderTimestamps(): void {
   listEls = [];
   activeTsIndex = -1;
 
-  tsCount.textContent =
-    timestamps.length === 0
-      ? "No timestamps yet."
-      : `${timestamps.length} timestamp${timestamps.length === 1 ? "" : "s"}`;
+  tsCount.textContent = String(timestamps.length);
 
   timestamps.forEach((ts) => {
     // Scrubber marker (a clickable tick on top of the bar).
@@ -454,6 +452,33 @@ function setPanelOpen(open: boolean): void {
 
 function togglePanel(): void {
   setPanelOpen(tsPanel.dataset.open !== "true");
+}
+
+/** Back button: tear down the current video and return to the home screen. */
+function goHome(): void {
+  video.pause();
+  stopLive();
+  stopGrowthWatch();
+  setPanelOpen(false);
+  setShortcutsOpen(false);
+  video.removeAttribute("src");
+  video.load();
+  state = createInitialState();
+  app.dataset.state = "empty";
+  stage.hidden = true;
+  emptyState.hidden = false;
+  emptyError.hidden = true;
+  document.title = "Playback";
+}
+
+// --- Keyboard shortcuts overlay (frame 05) ---
+function setShortcutsOpen(open: boolean): void {
+  shortcutsOverlay.dataset.open = String(open);
+  shortcutsOverlay.setAttribute("aria-hidden", String(!open));
+}
+
+function toggleShortcuts(): void {
+  setShortcutsOpen(shortcutsOverlay.dataset.open !== "true");
 }
 
 // ---------------------------------------------------------------------------
@@ -993,6 +1018,7 @@ function stopLive(): void {
   app.dataset.live = "false";
   btnForward.disabled = false;
   liveBadge.hidden = true;
+  btnGoLive.hidden = true;
 }
 
 /** The live window if (and only if) a stream is still being written, else null. */
@@ -1089,6 +1115,12 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+/** The immediate parent folder name, shown as the player subtitle. */
+function parentDir(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.length >= 2 ? parts[parts.length - 2] : "";
+}
+
 function showError(message: string): void {
   emptyError.textContent = message;
   emptyError.hidden = false;
@@ -1107,7 +1139,7 @@ async function loadFromPath(path: string): Promise<void> {
     // Otherwise play normally, but watch in the background: if the file turns out
     // to be growing (a recording in progress), auto-upgrade to live playback.
     const { convertFileSrc } = await import("@tauri-apps/api/core");
-    loadSrc(convertFileSrc(path), basename(path));
+    loadSrc(convertFileSrc(path), basename(path), parentDir(path));
     if (status && !status.complete) startGrowthWatch(path, status.size);
   } catch (err) {
     showError(`Could not open the file: ${String(err)}`);
@@ -1115,12 +1147,13 @@ async function loadFromPath(path: string): Promise<void> {
 }
 
 /** Load a media file from an already-resolved URL (asset:// or blob:). */
-function loadSrc(src: string, title: string): void {
+function loadSrc(src: string, title: string, subtitle = ""): void {
   stopLive(); // leaving any previous livestream behind
   // Note: a growth watch may be (re)started by the caller after this returns.
   emptyError.hidden = true;
   video.src = src;
   titleLabel.textContent = title;
+  subtitleLabel.textContent = subtitle;
   document.title = `${title} — Playback`;
   app.dataset.state = "playing";
   emptyState.hidden = true;
@@ -1145,6 +1178,7 @@ async function loadLiveFromPath(path: string, autoLive = false): Promise<void> {
   emptyError.hidden = true;
   const title = basename(path);
   titleLabel.textContent = title;
+  subtitleLabel.textContent = "Live recording";
   document.title = `${title} — Playback (live)`;
   app.dataset.state = "playing";
   app.dataset.live = "true";
@@ -1224,6 +1258,15 @@ function wireControls(): void {
   btnMute.addEventListener("click", doToggleMute);
   btnRate.addEventListener("click", doCycleRate);
   btnFs.addEventListener("click", () => void doToggleFullscreen());
+  btnBack.addEventListener("click", goHome);
+  btnGoLive.addEventListener("click", doJumpToLive);
+
+  // Keyboard shortcuts overlay (frame 05)
+  btnKeys.addEventListener("click", toggleShortcuts);
+  btnKeysClose.addEventListener("click", () => setShortcutsOpen(false));
+  shortcutsOverlay.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).dataset.close) setShortcutsOpen(false);
+  });
 
   // Timestamps panel (play-002)
   btnTimestamps.addEventListener("click", togglePanel);
@@ -1358,7 +1401,12 @@ function wireKeyboard(): void {
           togglePanel();
         }
         break;
+      case "?":
+        e.preventDefault();
+        toggleShortcuts();
+        break;
       case "Escape":
+        setShortcutsOpen(false);
         setPanelOpen(false);
         break;
       default:

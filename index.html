@@ -4,134 +4,180 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
     <title>Playback</title>
   </head>
   <body>
-    <div id="app" class="app" data-state="empty">
-      <!-- Title / drag bar -->
-      <header class="titlebar" data-tauri-drag-region>
-        <div class="titlebar__brand" data-tauri-drag-region>
-          <span class="titlebar__glyph" aria-hidden="true">&#9654;</span>
-          <span class="titlebar__name">Playback</span>
-        </div>
-        <button id="btn-open-top" class="pill pill--ghost" type="button">Open file&hellip;</button>
-      </header>
+    <div id="app" class="app" data-state="empty" data-live="false">
+      <!-- ===================== HOME / EMPTY STATE (frame 01) ===================== -->
+      <section id="empty-state" class="home">
+        <div class="home__ambient" aria-hidden="true"></div>
+        <div class="home__glow" aria-hidden="true"></div>
 
-      <!-- Empty state: shown before a video is loaded -->
-      <section id="empty-state" class="empty">
-        <div class="empty__inner">
-          <h1 class="empty__title">Watch anything.</h1>
-          <p class="empty__sub">
-            Open a video file to start playback. Drag &amp; drop a file anywhere,
-            or use the button below.
-          </p>
-          <button id="btn-open" class="pill pill--primary" type="button">Open a video</button>
-          <p id="empty-error" class="empty__error" role="alert" hidden></p>
+        <!-- Left nav rail -->
+        <nav class="rail" aria-label="Library navigation">
+          <div class="rail__brand" title="Playback" aria-hidden="true">
+            <svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4" /></svg>
+          </div>
+          <div class="rail__items" aria-hidden="true">
+            <div class="rail__btn" data-active="true" title="Home">
+              <svg class="ic" viewBox="0 0 24 24"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M9 22V12h6v10" /></svg>
+            </div>
+            <div class="rail__btn" title="Library">
+              <svg class="ic" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M7 3v18" /><path d="M3 7.5h4" /><path d="M3 12h18" /><path d="M3 16.5h4" /><path d="M17 3v18" /><path d="M17 7.5h4" /><path d="M17 16.5h4" /></svg>
+            </div>
+            <div class="rail__btn" title="Recent">
+              <svg class="ic" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><path d="M12 7v5l4 2" /></svg>
+            </div>
+            <div class="rail__btn" title="Settings">
+              <svg class="ic" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></svg>
+            </div>
+          </div>
+          <div class="rail__avatar" title="Account" aria-hidden="true">A</div>
+        </nav>
+
+        <!-- Main home column -->
+        <div class="home__main">
+          <header class="home__top" data-tauri-drag-region>
+            <div class="home__greet">
+              <h1 class="home__title">Welcome back</h1>
+              <p class="home__sub">Open a video, or drop one anywhere to start watching.</p>
+            </div>
+            <div class="home__actions">
+              <div class="searchbar" aria-hidden="true">
+                <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+                <span class="searchbar__ph">Search your library</span>
+              </div>
+              <button id="btn-open-top" class="pill pill--ghost" type="button">Open file&hellip;</button>
+            </div>
+          </header>
+
+          <div class="home__hero">
+            <div class="hero">
+              <div class="hero__icon" aria-hidden="true">
+                <svg class="ic" viewBox="0 0 24 24"><path d="M7 3v18" /><path d="M3 7.5h4" /><path d="M3 12h18" /><path d="M3 16.5h4" /><path d="M17 3v18" /><rect width="18" height="18" x="3" y="3" rx="2" /></svg>
+              </div>
+              <h2 class="hero__title">Drop a video to play</h2>
+              <p class="hero__sub">Or browse for a file on your computer to begin playback.</p>
+              <button id="btn-open" class="pill pill--primary" type="button">Open a video</button>
+              <div class="hero__formats" aria-hidden="true">
+                <span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span>
+              </div>
+              <p id="empty-error" class="hero__error" role="alert" hidden></p>
+            </div>
+          </div>
         </div>
       </section>
 
-      <!-- Player stage -->
+      <!-- ===================== PLAYER STAGE (frames 02 / 03 / 04) ===================== -->
       <main id="stage" class="stage" hidden>
-        <div id="video-wrap" class="video-wrap">
-          <video id="video" class="video" playsinline></video>
+        <video id="video" class="video" playsinline></video>
 
-          <!-- Big center play/pause flash -->
-          <div id="center-toggle" class="center-toggle" aria-hidden="true">
-            <span id="center-icon" class="center-toggle__icon">&#9654;</span>
+        <div class="scrim scrim--top" aria-hidden="true"></div>
+        <div class="scrim scrim--bottom" aria-hidden="true"></div>
+
+        <!-- Top overlay: back + title + live badge -->
+        <div class="overlay-top" data-tauri-drag-region>
+          <button id="btn-back" class="glass-btn" type="button" title="Back to library">
+            <svg class="ic" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
+          <div class="overlay-top__title">
+            <div class="overlay-top__heading">
+              <span id="title-label" class="title-main"></span>
+              <button id="live-badge" class="live-badge" type="button" title="Jump to live (L)" data-caught="false" hidden>LIVE</button>
+            </div>
+            <span id="subtitle-label" class="title-sub"></span>
+          </div>
+        </div>
+
+        <!-- Big center play/pause flash -->
+        <div id="center-toggle" class="center-toggle" data-playing="false" aria-hidden="true">
+          <svg class="ic ic--fill ic-play" viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4" /></svg>
+          <svg class="ic ic--fill ic-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+        </div>
+
+        <!-- Transient toast shown when jumping (A / D / L / click) -->
+        <div id="marker-flash" class="toast" data-flash="false" aria-live="polite">
+          <span class="toast__icon" aria-hidden="true">
+            <svg class="ic" viewBox="0 0 24 24"><path d="m6 17 5-5-5-5" /><path d="m13 17 5-5-5-5" /></svg>
+          </span>
+          <span class="toast__body">
+            <span class="toast__label">JUMPED TO</span>
+            <span id="marker-flash-text" class="toast__text"></span>
+          </span>
+        </div>
+
+        <!-- Bottom control bar -->
+        <div id="controls" class="controls" data-visible="true">
+          <!-- Scrubber -->
+          <div class="scrubber">
+            <div class="scrubber__track" aria-hidden="true">
+              <div id="buffered" class="scrubber__buffered"></div>
+              <div id="progress" class="scrubber__progress"></div>
+            </div>
+            <!-- Timestamp markers (play-002) injected here. -->
+            <div id="markers" class="scrubber__markers"></div>
+            <!-- Live-edge tick (play-003). -->
+            <div id="live-edge" class="scrubber__live-edge" aria-hidden="true" hidden>
+              <span class="scrubber__live-tag">LIVE</span>
+            </div>
+            <input id="seek" class="scrubber__range" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek" />
           </div>
 
-          <!-- Transient label shown when jumping to a timestamp (A / D / click) -->
-          <div id="marker-flash" class="marker-flash" data-flash="false" aria-live="polite">
-            <span class="marker-flash__icon" aria-hidden="true">&#9776;</span>
-            <span id="marker-flash-text" class="marker-flash__text"></span>
-          </div>
+          <!-- Time row -->
+          <div id="time" class="timerow"></div>
 
-          <!-- Control bar -->
-          <div id="controls" class="controls" data-visible="true">
-            <!-- Scrubber -->
-            <div class="scrubber">
-              <input
-                id="seek"
-                class="scrubber__range"
-                type="range"
-                min="0"
-                max="1000"
-                value="0"
-                step="1"
-                aria-label="Seek"
-              />
-              <div class="scrubber__track" aria-hidden="true">
-                <div id="buffered" class="scrubber__buffered"></div>
-                <div id="progress" class="scrubber__progress"></div>
-              </div>
-              <!-- Timestamp markers (play-002) are injected here, on top of the bar. -->
-              <div id="markers" class="scrubber__markers"></div>
-              <!-- Live edge tick (play-003): where the reachable "live" point sits. -->
-              <div id="live-edge" class="scrubber__live-edge" aria-hidden="true" hidden></div>
+          <!-- Controls row: left (volume) · center (transport) · right (actions) -->
+          <div class="controls__row">
+            <div class="controls__left">
+              <button id="btn-mute" class="iconbtn iconbtn--sm" type="button" data-muted="false" title="Mute (M)">
+                <svg class="ic ic-vol" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></svg>
+                <svg class="ic ic-muted" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="22" x2="16" y1="9" y2="15" /><line x1="16" x2="22" y1="9" y2="15" /></svg>
+              </button>
+              <input id="volume" class="volume__range" type="range" min="0" max="100" value="100" step="1" aria-label="Volume" />
             </div>
 
-            <div class="controls__row">
-              <div class="controls__group">
-                <button id="btn-rewind" class="iconbtn" type="button" title="Back 10s (←)">
-                  <span class="iconbtn__glyph">&#8634;</span><span class="iconbtn__sub">10</span>
-                </button>
-                <button id="btn-play" class="iconbtn iconbtn--primary" type="button" title="Play/Pause (Space)">
-                  <span id="play-glyph" class="iconbtn__glyph">&#9654;</span>
-                </button>
-                <button id="btn-forward" class="iconbtn" type="button" title="Forward 10s (→)">
-                  <span class="iconbtn__glyph">&#8635;</span><span class="iconbtn__sub">10</span>
-                </button>
+            <div class="controls__center">
+              <button id="btn-rewind" class="iconbtn" type="button" title="Back 10s (←)">
+                <svg class="ic" viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20" /><line x1="5" x2="5" y1="19" y2="5" /></svg>
+              </button>
+              <button id="btn-play" class="iconbtn iconbtn--primary" type="button" data-playing="false" title="Play / Pause (Space)">
+                <svg class="ic ic--fill ic-play" viewBox="0 0 24 24"><polygon points="7 4 20 12 7 20 7 4" /></svg>
+                <svg class="ic ic--fill ic-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+              </button>
+              <button id="btn-forward" class="iconbtn" type="button" title="Forward 10s (→)">
+                <svg class="ic" viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4" /><line x1="19" x2="19" y1="5" y2="19" /></svg>
+              </button>
+            </div>
 
-                <div class="volume">
-                  <button id="btn-mute" class="iconbtn" type="button" title="Mute (M)">
-                    <span id="mute-glyph" class="iconbtn__glyph">&#128266;</span>
-                  </button>
-                  <input
-                    id="volume"
-                    class="volume__range"
-                    type="range"
-                    min="0"
-                    max="100"
-                    value="100"
-                    step="1"
-                    aria-label="Volume"
-                  />
-                </div>
-
-                <span id="time" class="time">0:00&nbsp;/&nbsp;0:00</span>
-
-                <!-- Livestream indicator (play-003): click / press L to jump to live. -->
-                <button
-                  id="live-badge"
-                  class="live-badge"
-                  type="button"
-                  title="Jump to live (L)"
-                  data-caught="false"
-                  hidden
-                >&#9679; LIVE</button>
-              </div>
-
-              <div class="controls__group">
-                <span id="title-label" class="title-label"></span>
-                <button id="btn-timestamps" class="iconbtn" type="button" title="Timestamps / chapters (T)" aria-pressed="false">
-                  <span class="iconbtn__glyph">&#9776;</span>
-                </button>
-                <button id="btn-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed">1&times;</button>
-                <button id="btn-fs" class="iconbtn" type="button" title="Fullscreen (F)">
-                  <span class="iconbtn__glyph">&#9974;</span>
-                </button>
-              </div>
+            <div class="controls__right">
+              <button id="btn-golive" class="golive" type="button" title="Jump to live (L)" hidden>
+                <span class="golive__dot" aria-hidden="true"></span>GO LIVE<kbd class="kbd">L</kbd>
+              </button>
+              <button id="btn-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed">1&times;</button>
+              <button id="btn-timestamps" class="iconbtn iconbtn--sm" type="button" title="Chapters (T)" aria-pressed="false">
+                <svg class="ic" viewBox="0 0 24 24"><path d="M12 12H3" /><path d="M16 6H3" /><path d="M12 18H3" /><path d="m16 12 5 3-5 3z" /></svg>
+              </button>
+              <button id="btn-keys" class="iconbtn iconbtn--sm" type="button" title="Keyboard shortcuts (?)">
+                <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
+              </button>
+              <button id="btn-fs" class="iconbtn iconbtn--sm" type="button" title="Fullscreen (F)">
+                <svg class="ic" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></svg>
+              </button>
             </div>
           </div>
         </div>
 
-        <!-- Timestamps panel (play-002): paste chapters, see/jump the list -->
+        <!-- Timestamps / chapters panel (play-002, frame 03) -->
         <aside id="timestamps-panel" class="ts-panel" data-open="false" aria-hidden="true">
           <div class="ts-panel__head">
-            <h2 class="ts-panel__title">Timestamps</h2>
-            <button id="btn-timestamps-close" class="iconbtn" type="button" title="Close (Esc)">
-              <span class="iconbtn__glyph">&times;</span>
-            </button>
+            <h2 class="ts-panel__title">Chapters</h2>
+            <div class="ts-panel__head-right">
+              <span id="timestamps-count" class="badge">No timestamps yet.</span>
+              <button id="btn-timestamps-close" class="iconbtn iconbtn--sm" type="button" title="Close (Esc)">
+                <svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+              </button>
+            </div>
           </div>
           <p class="ts-panel__hint">
             One per line, <code>HH:MM:SS Title</code> &mdash; e.g. <code>00:01:30 Chapter one</code>.
@@ -143,10 +189,60 @@
             autocomplete="off"
             placeholder="00:00:00 Intro&#10;00:00:10 Chapter one&#10;00:00:20 Chapter two"
           ></textarea>
-          <p id="timestamps-count" class="ts-panel__count">No timestamps yet.</p>
+          <p class="ts-panel__label">JUMP TO CHAPTER</p>
           <ul id="timestamps-list" class="ts-list" aria-label="Timestamps"></ul>
         </aside>
       </main>
+
+      <!-- ===================== KEYBOARD SHORTCUTS OVERLAY (frame 05) ===================== -->
+      <div id="shortcuts-overlay" class="shortcuts" data-open="false" aria-hidden="true">
+        <div class="shortcuts__backdrop" data-close="true"></div>
+        <div class="shortcuts__panel" role="dialog" aria-label="Keyboard shortcuts">
+          <div class="shortcuts__head">
+            <div class="shortcuts__heading">
+              <span class="shortcuts__icon" aria-hidden="true">
+                <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
+              </span>
+              <div>
+                <h2 class="shortcuts__title">Keyboard shortcuts</h2>
+                <p class="shortcuts__sub">Control playback without touching the mouse.</p>
+              </div>
+            </div>
+            <button id="btn-keys-close" class="iconbtn iconbtn--sm" type="button" title="Close (Esc)">
+              <svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+            </button>
+          </div>
+          <div class="shortcuts__cols">
+            <div class="shortcuts__col">
+              <p class="shortcuts__group">PLAYBACK</p>
+              <ul class="keys">
+                <li><span>Play / pause</span><span class="keys__caps"><kbd class="kbd">Space</kbd></span></li>
+                <li><span>Back / forward 10s</span><span class="keys__caps"><kbd class="kbd">&larr;</kbd><kbd class="kbd">&rarr;</kbd></span></li>
+                <li><span>Volume up / down</span><span class="keys__caps"><kbd class="kbd">&uarr;</kbd><kbd class="kbd">&darr;</kbd></span></li>
+                <li><span>Mute</span><span class="keys__caps"><kbd class="kbd">M</kbd></span></li>
+                <li><span>Fullscreen</span><span class="keys__caps"><kbd class="kbd">F</kbd></span></li>
+                <li><span>Open a file</span><span class="keys__caps"><kbd class="kbd">O</kbd></span></li>
+              </ul>
+            </div>
+            <div class="shortcuts__col">
+              <p class="shortcuts__group">CHAPTERS &amp; TIMESTAMPS</p>
+              <ul class="keys">
+                <li><span>Previous / next chapter</span><span class="keys__caps"><kbd class="kbd">A</kbd><kbd class="kbd">D</kbd></span></li>
+                <li><span>Toggle chapters panel</span><span class="keys__caps"><kbd class="kbd">T</kbd></span></li>
+              </ul>
+              <p class="shortcuts__group">LIVESTREAM</p>
+              <ul class="keys">
+                <li><span>Jump to live edge</span><span class="keys__caps"><kbd class="kbd">L</kbd></span></li>
+              </ul>
+              <p class="shortcuts__group">GENERAL</p>
+              <ul class="keys">
+                <li><span>This help</span><span class="keys__caps"><kbd class="kbd">?</kbd></span></li>
+                <li><span>Close panel / help</span><span class="keys__caps"><kbd class="kbd">Esc</kbd></span></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script type="module" src="/src/main.ts"></script>
