@@ -171,3 +171,127 @@ export function toggleMute(state: PlayerState): PlayerState {
 export function effectiveVolume(state: PlayerState): number {
   return state.muted ? 0 : state.volume;
 }
+
+// ---------------------------------------------------------------------------
+// Timestamps (play-002)
+//
+// A user pastes a block of `XX:XX:XX TITLE` lines; we parse them into labeled
+// points on the timeline ("chapters"). The UI renders a marker per timestamp on
+// the scrubber and lets the user jump between them (click, or the A/D hotkeys).
+// As with the rest of player-core, everything here is pure and DOM-free.
+// ---------------------------------------------------------------------------
+
+/** A user-defined chapter marker: a labeled point in the timeline. */
+export interface Timestamp {
+  /** Position in seconds from the start. */
+  time: number;
+  /** Human label shown on the marker and in the list. */
+  title: string;
+}
+
+/**
+ * A small guard, in seconds, so repeated "previous" presses keep stepping
+ * backward even when the playhead is sitting essentially on top of a marker.
+ */
+export const NAV_EPSILON = 0.25;
+
+/**
+ * Parse a single timecode token like `HH:MM:SS`, `MM:SS`, or `SS` into seconds.
+ * Each `:`-separated field is the next-larger unit, read right to left, so
+ * `1:30` -> 90 and `0:01:30` -> 90. Returns null for malformed input.
+ */
+export function parseTimecode(token: string): number | null {
+  const parts = token.split(":");
+  if (parts.length === 0 || parts.length > 3) return null;
+  let seconds = 0;
+  for (const part of parts) {
+    if (!/^\d+$/.test(part)) return null;
+    seconds = seconds * 60 + Number(part);
+  }
+  return seconds;
+}
+
+/**
+ * Parse one line of the form `XX:XX:XX TITLE` into a Timestamp. The leading
+ * token is the timecode; the remainder (trimmed) is the title. Lines that are
+ * blank or whose first token is not a valid timecode yield null. A line with a
+ * valid timecode but no title falls back to showing the timecode itself.
+ */
+export function parseTimestampLine(line: string): Timestamp | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const sep = trimmed.search(/\s/);
+  const codeToken = sep === -1 ? trimmed : trimmed.slice(0, sep);
+  const time = parseTimecode(codeToken);
+  if (time === null) return null;
+  const title = sep === -1 ? "" : trimmed.slice(sep + 1).trim();
+  return { time, title: title || codeToken };
+}
+
+/**
+ * Parse a multi-line block of `XX:XX:XX TITLE` lines into a sorted,
+ * duplicate-free list of timestamps. Invalid lines are skipped. The result is
+ * sorted ascending by time so marker rendering and prev/next navigation are
+ * well-defined; entries sharing an exact time collapse to the first seen.
+ */
+export function parseTimestamps(text: string): Timestamp[] {
+  const parsed = text
+    .split(/\r?\n/)
+    .map(parseTimestampLine)
+    .filter((t): t is Timestamp => t !== null)
+    .sort((a, b) => a.time - b.time);
+  const out: Timestamp[] = [];
+  for (const stamp of parsed) {
+    if (out.length === 0 || out[out.length - 1].time !== stamp.time) out.push(stamp);
+  }
+  return out;
+}
+
+/** Marker position as a 0..1 fraction of duration, for placing it on the bar. */
+export function markerFraction(time: number, duration: number): number {
+  if (duration <= 0) return 0;
+  return clamp(time / duration, 0, 1);
+}
+
+/**
+ * The closest timestamp before `current` (greatest time < current - epsilon),
+ * or null if none. The epsilon keeps repeated presses moving backward even when
+ * the playhead rests on a marker. Order-independent (does not assume sorting).
+ */
+export function previousTimestamp(
+  stamps: Timestamp[],
+  current: number,
+  epsilon: number = NAV_EPSILON,
+): Timestamp | null {
+  let best: Timestamp | null = null;
+  for (const s of stamps) {
+    if (s.time < current - epsilon && (best === null || s.time > best.time)) best = s;
+  }
+  return best;
+}
+
+/**
+ * The closest timestamp after `current` (smallest time > current), or null if
+ * none. Order-independent (does not assume sorting).
+ */
+export function nextTimestamp(stamps: Timestamp[], current: number): Timestamp | null {
+  let best: Timestamp | null = null;
+  for (const s of stamps) {
+    if (s.time > current && (best === null || s.time < best.time)) best = s;
+  }
+  return best;
+}
+
+/**
+ * Index of the "active" timestamp — the last one at or before `current` — or -1
+ * when the playhead is before the first marker. Used to highlight the current
+ * chapter in the list and on the bar.
+ */
+export function activeTimestampIndex(stamps: Timestamp[], current: number): number {
+  let idx = -1;
+  for (let i = 0; i < stamps.length; i++) {
+    if (stamps[i].time <= current + NAV_EPSILON) idx = i;
+    else break;
+  }
+  return idx;
+}

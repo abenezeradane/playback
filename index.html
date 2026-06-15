@@ -40,6 +40,12 @@
             <span id="center-icon" class="center-toggle__icon">&#9654;</span>
           </div>
 
+          <!-- Transient label shown when jumping to a timestamp (A / D / click) -->
+          <div id="marker-flash" class="marker-flash" data-flash="false" aria-live="polite">
+            <span class="marker-flash__icon" aria-hidden="true">&#9776;</span>
+            <span id="marker-flash-text" class="marker-flash__text"></span>
+          </div>
+
           <!-- Control bar -->
           <div id="controls" class="controls" data-visible="true">
             <!-- Scrubber -->
@@ -58,6 +64,8 @@
                 <div id="buffered" class="scrubber__buffered"></div>
                 <div id="progress" class="scrubber__progress"></div>
               </div>
+              <!-- Timestamp markers (play-002) are injected here, on top of the bar. -->
+              <div id="markers" class="scrubber__markers"></div>
             </div>
 
             <div class="controls__row">
@@ -93,6 +101,9 @@
 
               <div class="controls__group">
                 <span id="title-label" class="title-label"></span>
+                <button id="btn-timestamps" class="iconbtn" type="button" title="Timestamps / chapters (T)" aria-pressed="false">
+                  <span class="iconbtn__glyph">&#9776;</span>
+                </button>
                 <button id="btn-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed">1&times;</button>
                 <button id="btn-fs" class="iconbtn" type="button" title="Fullscreen (F)">
                   <span class="iconbtn__glyph">&#9974;</span>
@@ -101,6 +112,28 @@
             </div>
           </div>
         </div>
+
+        <!-- Timestamps panel (play-002): paste chapters, see/jump the list -->
+        <aside id="timestamps-panel" class="ts-panel" data-open="false" aria-hidden="true">
+          <div class="ts-panel__head">
+            <h2 class="ts-panel__title">Timestamps</h2>
+            <button id="btn-timestamps-close" class="iconbtn" type="button" title="Close (Esc)">
+              <span class="iconbtn__glyph">&times;</span>
+            </button>
+          </div>
+          <p class="ts-panel__hint">
+            One per line, <code>HH:MM:SS Title</code> &mdash; e.g. <code>00:01:30 Chapter one</code>.
+          </p>
+          <textarea
+            id="timestamps-input"
+            class="ts-panel__input"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="00:00:00 Intro&#10;00:00:10 Chapter one&#10;00:00:20 Chapter two"
+          ></textarea>
+          <p id="timestamps-count" class="ts-panel__count">No timestamps yet.</p>
+          <ul id="timestamps-list" class="ts-list" aria-label="Timestamps"></ul>
+        </aside>
       </main>
     </div>
 

@@ -26,7 +26,13 @@ import {
   setVolume,
   toggleMute,
   effectiveVolume,
+  parseTimestamps,
+  markerFraction,
+  previousTimestamp,
+  nextTimestamp,
+  activeTimestampIndex,
   type PlayerState,
+  type Timestamp,
 } from "./player-core";
 
 const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi"];
@@ -66,6 +72,17 @@ const buffered = $<HTMLDivElement>("buffered");
 const timeLabel = $<HTMLSpanElement>("time");
 const titleLabel = $<HTMLSpanElement>("title-label");
 
+// Timestamps (play-002)
+const markersLayer = $<HTMLDivElement>("markers");
+const btnTimestamps = $<HTMLButtonElement>("btn-timestamps");
+const btnTimestampsClose = $<HTMLButtonElement>("btn-timestamps-close");
+const tsPanel = $<HTMLElement>("timestamps-panel");
+const tsInput = $<HTMLTextAreaElement>("timestamps-input");
+const tsList = $<HTMLUListElement>("timestamps-list");
+const tsCount = $<HTMLParagraphElement>("timestamps-count");
+const markerFlash = $<HTMLDivElement>("marker-flash");
+const markerFlashText = $<HTMLSpanElement>("marker-flash-text");
+
 const PLAY_GLYPH = "▶"; // ▶
 const PAUSE_GLYPH = "⏸"; // ⏸
 const VOLUME_GLYPH = "🔊"; // 🔊
@@ -76,6 +93,13 @@ const MUTE_GLYPH = "🔇"; // 🔇
 // ---------------------------------------------------------------------------
 let state: PlayerState = createInitialState();
 let isScrubbing = false;
+
+// Parsed timestamps + the DOM nodes rendered for them (index-aligned), so the
+// active-chapter highlight can be updated cheaply on every timeupdate.
+let timestamps: Timestamp[] = [];
+let markerEls: HTMLElement[] = [];
+let listEls: HTMLElement[] = [];
+let activeTsIndex = -1;
 
 /** Pull the canonical values from the media element into our state object. */
 function syncFromVideo(): void {
@@ -125,6 +149,9 @@ function render(): void {
 
   // Rate
   btnRate.textContent = `${state.rate}×`;
+
+  // Active-chapter highlight (cheap; rebuilds nothing).
+  updateActiveTimestamp();
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +167,8 @@ function doTogglePlay(): void {
   }
   flashCenter();
   render();
+  // Surface the controls on every play/pause; they auto-hide again only while playing.
+  showControls();
 }
 
 function doSkip(forward: boolean): void {
@@ -214,6 +243,130 @@ function flashCenter(): void {
   flashTimer = window.setTimeout(() => {
     centerToggle.dataset.flash = "false";
   }, 360);
+}
+
+// ---------------------------------------------------------------------------
+// Timestamps (play-002)
+// ---------------------------------------------------------------------------
+let markerFlashTimer: number | undefined;
+
+/** Re-parse the textarea and rebuild the markers + list. */
+function refreshTimestamps(): void {
+  timestamps = parseTimestamps(tsInput.value);
+  renderTimestamps();
+}
+
+/** Rebuild the scrubber markers and the panel list from `timestamps`. */
+function renderTimestamps(): void {
+  markersLayer.replaceChildren();
+  tsList.replaceChildren();
+  markerEls = [];
+  listEls = [];
+  activeTsIndex = -1;
+
+  tsCount.textContent =
+    timestamps.length === 0
+      ? "No timestamps yet."
+      : `${timestamps.length} timestamp${timestamps.length === 1 ? "" : "s"}`;
+
+  timestamps.forEach((ts) => {
+    // Scrubber marker (a clickable tick on top of the bar).
+    const marker = document.createElement("button");
+    marker.type = "button";
+    marker.className = "marker";
+    marker.style.left = `${markerFraction(ts.time, state.duration) * 100}%`;
+    marker.title = `${formatTime(ts.time)} — ${ts.title}`;
+    const label = document.createElement("span");
+    label.className = "marker__label";
+    label.textContent = `${formatTime(ts.time)}  ${ts.title}`;
+    marker.appendChild(label);
+    marker.addEventListener("click", (e) => {
+      e.stopPropagation();
+      jumpToTimestamp(ts);
+    });
+    markersLayer.appendChild(marker);
+    markerEls.push(marker);
+
+    // Panel list row (also a jump target).
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "ts-list__item";
+    const time = document.createElement("span");
+    time.className = "ts-list__time";
+    time.textContent = formatTime(ts.time);
+    const title = document.createElement("span");
+    title.className = "ts-list__title";
+    title.textContent = ts.title;
+    item.append(time, title);
+    item.addEventListener("click", () => jumpToTimestamp(ts));
+    tsList.appendChild(item);
+    listEls.push(item);
+  });
+
+  updateActiveTimestamp();
+}
+
+/** Toggle the `data-active` flag on the marker + row for the current chapter. */
+function updateActiveTimestamp(): void {
+  if (timestamps.length === 0) return;
+  const idx = activeTimestampIndex(timestamps, state.currentTime);
+  if (idx === activeTsIndex) return;
+  if (activeTsIndex >= 0) {
+    markerEls[activeTsIndex]?.removeAttribute("data-active");
+    listEls[activeTsIndex]?.removeAttribute("data-active");
+  }
+  if (idx >= 0) {
+    markerEls[idx]?.setAttribute("data-active", "true");
+    listEls[idx]?.setAttribute("data-active", "true");
+  }
+  activeTsIndex = idx;
+}
+
+/** Seek to a timestamp and surface its title briefly. */
+function jumpToTimestamp(ts: Timestamp): void {
+  doSeekTo(ts.time);
+  flashMarker(ts.title);
+  showControls();
+}
+
+/** Show the "jumped to chapter" toast for a moment. */
+function flashMarker(title: string): void {
+  markerFlashText.textContent = title;
+  markerFlash.dataset.flash = "true";
+  window.clearTimeout(markerFlashTimer);
+  markerFlashTimer = window.setTimeout(() => {
+    markerFlash.dataset.flash = "false";
+  }, 1100);
+}
+
+/** Hotkey A: jump to the closest previous timestamp. */
+function doPrevTimestamp(): void {
+  if (stage.hidden || timestamps.length === 0) return;
+  syncFromVideo();
+  const target = previousTimestamp(timestamps, state.currentTime);
+  if (target) jumpToTimestamp(target);
+}
+
+/** Hotkey D: jump to the closest upcoming timestamp. */
+function doNextTimestamp(): void {
+  if (stage.hidden || timestamps.length === 0) return;
+  syncFromVideo();
+  const target = nextTimestamp(timestamps, state.currentTime);
+  if (target) jumpToTimestamp(target);
+}
+
+function setPanelOpen(open: boolean): void {
+  tsPanel.dataset.open = String(open);
+  tsPanel.setAttribute("aria-hidden", String(!open));
+  btnTimestamps.setAttribute("aria-pressed", String(open));
+  if (open) {
+    showControls(); // keep the scrubber + markers on screen alongside the panel
+    tsInput.focus();
+  }
+}
+
+function togglePanel(): void {
+  setPanelOpen(tsPanel.dataset.open !== "true");
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +468,11 @@ function wireControls(): void {
   btnRate.addEventListener("click", doCycleRate);
   btnFs.addEventListener("click", () => void doToggleFullscreen());
 
+  // Timestamps panel (play-002)
+  btnTimestamps.addEventListener("click", togglePanel);
+  btnTimestampsClose.addEventListener("click", () => setPanelOpen(false));
+  tsInput.addEventListener("input", refreshTimestamps);
+
   video.addEventListener("click", doTogglePlay);
 
   // Scrubber: live-preview while dragging, commit on release.
@@ -338,6 +496,8 @@ function wireControls(): void {
   video.addEventListener("loadedmetadata", () => {
     syncFromVideo();
     render();
+    // Duration is now known — reposition markers against the real timeline.
+    renderTimestamps();
   });
   video.addEventListener("timeupdate", () => {
     syncFromVideo();
@@ -374,7 +534,12 @@ function wireKeyboard(): void {
     // Don't hijack typing in inputs.
     const target = e.target as HTMLElement | null;
     if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
-      if (e.key !== "Escape") return;
+      // Esc still works from the textarea (to close the panel); typing is otherwise left alone.
+      if (e.key === "Escape") {
+        setPanelOpen(false);
+        tsInput.blur();
+      }
+      return;
     }
     switch (e.key) {
       case " ":
@@ -405,6 +570,25 @@ function wireKeyboard(): void {
       case "o":
         void openFileDialog();
         break;
+      case "a":
+      case "A":
+        doPrevTimestamp();
+        break;
+      case "d":
+      case "D":
+        doNextTimestamp();
+        break;
+      case "t":
+      case "T":
+        if (!stage.hidden) {
+          // Prevent the keystroke from leaking into the textarea we're about to focus.
+          e.preventDefault();
+          togglePanel();
+        }
+        break;
+      case "Escape":
+        setPanelOpen(false);
+        break;
       default:
         break;
     }
@@ -429,4 +613,5 @@ wireControls();
 wireKeyboard();
 void registerDragAndDrop();
 void loadLaunchFile();
+renderTimestamps();
 render();

@@ -19,6 +19,13 @@ import {
   setVolume,
   toggleMute,
   effectiveVolume,
+  parseTimecode,
+  parseTimestampLine,
+  parseTimestamps,
+  markerFraction,
+  previousTimestamp,
+  nextTimestamp,
+  activeTimestampIndex,
   PLAYBACK_RATES,
   SKIP_SECONDS,
   type PlayerState,
@@ -196,5 +203,87 @@ describe("volume + mute", () => {
   it("effectiveVolume respects the mute flag", () => {
     expect(effectiveVolume(base({ volume: 0.7, muted: false }))).toBe(0.7);
     expect(effectiveVolume(base({ volume: 0.7, muted: true }))).toBe(0);
+  });
+});
+
+describe("timestamps — parsing", () => {
+  it("parseTimecode reads HH:MM:SS / MM:SS / SS into seconds", () => {
+    expect(parseTimecode("00:01:30")).toBe(90);
+    expect(parseTimecode("1:30")).toBe(90);
+    expect(parseTimecode("90")).toBe(90);
+    expect(parseTimecode("01:02:03")).toBe(3723);
+  });
+  it("parseTimecode rejects malformed tokens", () => {
+    expect(parseTimecode("")).toBeNull();
+    expect(parseTimecode("aa:bb")).toBeNull();
+    expect(parseTimecode("1:2:3:4")).toBeNull();
+    expect(parseTimecode("1.5")).toBeNull();
+  });
+  it("parseTimestampLine splits the timecode from the title", () => {
+    expect(parseTimestampLine("00:01:30 Chapter one")).toEqual({ time: 90, title: "Chapter one" });
+    expect(parseTimestampLine("  0:05   Intro  ")).toEqual({ time: 5, title: "Intro" });
+  });
+  it("parseTimestampLine falls back to the timecode when no title is given", () => {
+    expect(parseTimestampLine("00:00:10")).toEqual({ time: 10, title: "00:00:10" });
+  });
+  it("parseTimestampLine returns null for blank or non-timecode lines", () => {
+    expect(parseTimestampLine("")).toBeNull();
+    expect(parseTimestampLine("   ")).toBeNull();
+    expect(parseTimestampLine("not a timestamp")).toBeNull();
+  });
+  it("parseTimestamps sorts, skips junk, and de-duplicates by time", () => {
+    const text = [
+      "00:00:20 Second",
+      "garbage line",
+      "00:00:05 First",
+      "",
+      "00:00:20 Dup (dropped)",
+      "00:00:40 Third",
+    ].join("\n");
+    expect(parseTimestamps(text)).toEqual([
+      { time: 5, title: "First" },
+      { time: 20, title: "Second" },
+      { time: 40, title: "Third" },
+    ]);
+  });
+});
+
+describe("timestamps — markers + navigation", () => {
+  const stamps = [
+    { time: 5, title: "First" },
+    { time: 20, title: "Second" },
+    { time: 40, title: "Third" },
+  ];
+
+  it("markerFraction maps a time onto 0..1 of the duration", () => {
+    expect(markerFraction(20, 100)).toBeCloseTo(0.2);
+    expect(markerFraction(0, 100)).toBe(0);
+    expect(markerFraction(200, 100)).toBe(1); // clamped
+    expect(markerFraction(20, 0)).toBe(0); // unknown duration
+  });
+
+  it("nextTimestamp finds the closest upcoming marker", () => {
+    expect(nextTimestamp(stamps, 0)).toEqual({ time: 5, title: "First" });
+    expect(nextTimestamp(stamps, 10)).toEqual({ time: 20, title: "Second" });
+    expect(nextTimestamp(stamps, 20)).toEqual({ time: 40, title: "Third" });
+    expect(nextTimestamp(stamps, 40)).toBeNull();
+  });
+
+  it("previousTimestamp finds the closest earlier marker", () => {
+    expect(previousTimestamp(stamps, 100)).toEqual({ time: 40, title: "Third" });
+    expect(previousTimestamp(stamps, 25)).toEqual({ time: 20, title: "Second" });
+    expect(previousTimestamp(stamps, 5)).toBeNull();
+  });
+
+  it("previousTimestamp steps back when resting on a marker (epsilon guard)", () => {
+    // Playhead sitting on the 20s marker should step to the 5s marker, not stay.
+    expect(previousTimestamp(stamps, 20)).toEqual({ time: 5, title: "First" });
+  });
+
+  it("activeTimestampIndex reports the current chapter", () => {
+    expect(activeTimestampIndex(stamps, 0)).toBe(-1);
+    expect(activeTimestampIndex(stamps, 5)).toBe(0);
+    expect(activeTimestampIndex(stamps, 30)).toBe(1);
+    expect(activeTimestampIndex(stamps, 999)).toBe(2);
   });
 });

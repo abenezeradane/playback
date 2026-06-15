@@ -18,6 +18,10 @@ frontend (TypeScript + Vite) driving an HTML5 `<video>` element.
 - **Playback speed** cycling (0.5×–2×).
 - **Fullscreen** — button or `F`.
 - **Auto-hiding controls** during playback.
+- **Timestamps / chapters** — open the panel (`T` or the ☰ button), paste a list
+  of `HH:MM:SS Title` lines, and the player draws a clickable marker per
+  timestamp on the scrubber. Click a marker (or a row in the list) to jump there;
+  press `A` / `D` to jump to the previous / next timestamp.
 
 Supported containers/codecs depend on the system WebView2 (Windows) /
 WebKitGTK / WKWebView: MP4 (H.264/AAC), WebM, and Ogg are the safe set.
@@ -32,7 +36,7 @@ WebKitGTK / WKWebView: MP4 (H.264/AAC), WebM, and Ogg are the safe set.
 | `src/main.ts` | Wires the DOM + Tauri APIs + `<video>` to `player-core`. |
 | `src/styles.css` | Dark "editorial" styling (see `DESIGN.md`). |
 | `src-tauri/` | Rust/Tauri 2.0 shell (dialog plugin, asset protocol). |
-| `samples/sample.mp4` | A 6-second test clip with an on-screen timecode. |
+| `samples/sample.mp4` | A 30-second test clip with an on-screen timecode. |
 
 ## Prerequisites
 

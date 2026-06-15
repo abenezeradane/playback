@@ -442,6 +442,261 @@ body {
   cursor: none;
 }
 
+/* ---------- Timestamp markers (play-002) ---------- */
+/*
+ * Markers sit in their own layer on top of the transparent range input so they
+ * stay individually clickable. The layer itself ignores the pointer (clicks
+ * fall through to the scrubber); only the marker ticks opt back in.
+ */
+.scrubber__range {
+  z-index: 1;
+}
+
+.scrubber__markers {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px; /* generous hit area; the visible tick is centered + thin */
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  transform: translateX(-50%);
+  cursor: pointer;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.marker::before {
+  content: "";
+  width: 3px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  background: var(--on-dark);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  transition: transform 90ms ease, background 90ms ease;
+}
+
+.marker:hover::before,
+.marker[data-active="true"]::before {
+  background: var(--primary);
+  transform: scaleY(1.35);
+}
+
+/* Hover label above the tick. */
+.marker__label {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.9);
+  border: 1px solid var(--hairline-dark);
+  color: var(--on-dark);
+  font-size: 12px;
+  white-space: nowrap;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.marker:hover .marker__label {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Transient "jumped to chapter" toast in the center of the stage. */
+.marker-flash {
+  position: absolute;
+  top: 18%;
+  left: 50%;
+  transform: translate(-50%, -6px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 70%;
+  padding: 10px 16px;
+  border-radius: var(--radius-full);
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid var(--hairline-dark);
+  color: var(--on-dark);
+  font-size: 15px;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+.marker-flash[data-flash="true"] {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.marker-flash__icon {
+  color: var(--primary);
+  font-size: 14px;
+}
+
+.marker-flash__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Timestamps panel ---------- */
+.ts-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 340px;
+  max-width: 86vw;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  background: rgba(18, 19, 20, 0.96);
+  border-left: 1px solid var(--hairline-dark);
+  backdrop-filter: blur(8px);
+  transform: translateX(100%);
+  transition: transform 220ms ease;
+  z-index: 5;
+}
+
+.ts-panel[data-open="true"] {
+  transform: translateX(0);
+}
+
+.ts-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ts-panel__title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.ts-panel__hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--mute-dark);
+}
+
+.ts-panel__hint code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.ts-panel__input {
+  width: 100%;
+  height: 132px;
+  resize: none;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--hairline-dark);
+  background: var(--canvas-dark);
+  color: var(--on-dark);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.ts-panel__input:focus {
+  border-color: var(--primary);
+}
+
+.ts-panel__count {
+  margin: 0;
+  font-size: 12px;
+  color: var(--mute-dark);
+}
+
+.ts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+}
+
+.ts-list__item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--on-dark);
+  font-family: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+
+.ts-list__item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ts-list__item[data-active="true"] {
+  background: rgba(0, 112, 209, 0.22);
+}
+
+.ts-list__time {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--primary);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.ts-list__title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--body-dark);
+}
+
+.ts-list__item[data-active="true"] .ts-list__title {
+  color: var(--on-dark);
+}
+
+/* Active toggle state for the controls button. */
+.iconbtn[aria-pressed="true"] {
+  background: rgba(0, 112, 209, 0.28);
+}
+
 /* Responsive: tighten controls on narrow windows. */
 @media (max-width: 640px) {
   .empty__title {
@@ -452,5 +707,9 @@ body {
   }
   .title-label {
     display: none;
+  }
+  .ts-panel {
+    width: 100%;
+    max-width: 100%;
   }
 }
