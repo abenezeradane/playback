@@ -22,6 +22,7 @@ import {
   parseTimecode,
   parseTimestampLine,
   parseTimestamps,
+  mergeTimestamps,
   markerFraction,
   previousTimestamp,
   nextTimestamp,
@@ -253,6 +254,21 @@ describe("timestamps — parsing", () => {
       { time: 5, title: "First" },
       { time: 20, title: "Second" },
       { time: 40, title: "Third" },
+    ]);
+  });
+  it("mergeTimestamps adds, re-sorts, and keeps the existing entry on a tie", () => {
+    const existing = [
+      { time: 5, title: "First" },
+      { time: 20, title: "Second" },
+    ];
+    const merged = mergeTimestamps(existing, [
+      { time: 12, title: "Mid" },
+      { time: 5, title: "Dupe (ignored)" },
+    ]);
+    expect(merged).toEqual([
+      { time: 5, title: "First" },
+      { time: 12, title: "Mid" },
+      { time: 20, title: "Second" },
     ]);
   });
 });

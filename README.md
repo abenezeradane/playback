@@ -18,10 +18,12 @@ frontend (TypeScript + Vite) driving an HTML5 `<video>` element.
 - **Playback speed** cycling (0.5×–2×).
 - **Fullscreen** — button or `F`.
 - **Auto-hiding controls** during playback.
-- **Timestamps / chapters** — open the panel (`T` or the ☰ button), paste a list
-  of `HH:MM:SS Title` lines, and the player draws a clickable marker per
-  timestamp on the scrubber. Click a marker (or a row in the list) to jump there;
-  press `A` / `D` to jump to the previous / next timestamp.
+- **Timestamps / chapters** — open the panel (`T` or the ☰ button) and click
+  **Add timestamp** to enter one as `HH:MM:SS Title` (Enter adds it and keeps the
+  input open for the next). Pasting several lines at once adds them all and closes
+  the input. Each timestamp becomes a clickable marker on the scrubber and a row
+  in the list (with a hover **×** to remove it). Click a marker or row to jump
+  there; press `A` / `D` to jump to the previous / next timestamp.
 - **Livestream playback** — open a file that is still being written and Playback
   tails it in real time (via MediaSource), holding a ~5 second live delay. A
   growing file is auto-detected (no special marker needed) and playback starts

@@ -29,6 +29,7 @@ import {
   toggleMute,
   effectiveVolume,
   parseTimestamps,
+  mergeTimestamps,
   markerFraction,
   previousTimestamp,
   nextTimestamp,
@@ -97,9 +98,11 @@ const markersLayer = $<HTMLDivElement>("markers");
 const btnTimestamps = $<HTMLButtonElement>("btn-timestamps");
 const btnTimestampsClose = $<HTMLButtonElement>("btn-timestamps-close");
 const tsPanel = $<HTMLElement>("timestamps-panel");
-const tsInput = $<HTMLTextAreaElement>("timestamps-input");
+const btnAddTimestamp = $<HTMLButtonElement>("btn-add-timestamp");
+const tsAddInput = $<HTMLInputElement>("timestamp-input");
+const tsAddHint = $<HTMLParagraphElement>("timestamp-hint");
 const tsList = $<HTMLUListElement>("timestamps-list");
-const tsCount = $<HTMLParagraphElement>("timestamps-count");
+const tsCount = $<HTMLSpanElement>("timestamps-count");
 const markerFlash = $<HTMLDivElement>("marker-flash");
 const markerFlashText = $<HTMLSpanElement>("marker-flash-text");
 
@@ -338,10 +341,38 @@ function flashCenter(): void {
 // ---------------------------------------------------------------------------
 let markerFlashTimer: number | undefined;
 
-/** Re-parse the textarea and rebuild the markers + list. */
-function refreshTimestamps(): void {
-  timestamps = parseTimestamps(tsInput.value);
+/**
+ * Parse `text` (one timestamp per line) and merge the valid entries into the
+ * collection, then re-render. Returns how many new timestamps were added.
+ */
+function addTimestampsFromText(text: string): number {
+  const additions = parseTimestamps(text);
+  if (additions.length === 0) return 0;
+  const before = timestamps.length;
+  timestamps = mergeTimestamps(timestamps, additions);
   renderTimestamps();
+  return timestamps.length - before;
+}
+
+/** Remove the timestamp at `index` and re-render. */
+function removeTimestamp(index: number): void {
+  timestamps = timestamps.filter((_, i) => i !== index);
+  renderTimestamps();
+}
+
+/** Reveal the single-line add input (focused, empty) for a new entry. */
+function openAddInput(): void {
+  tsAddInput.value = "";
+  tsAddInput.hidden = false;
+  tsAddHint.hidden = false;
+  tsAddInput.focus();
+}
+
+/** Hide and clear the add input. */
+function closeAddInput(): void {
+  tsAddInput.value = "";
+  tsAddInput.hidden = true;
+  tsAddHint.hidden = true;
 }
 
 /** Rebuild the scrubber markers and the panel list from `timestamps`. */
@@ -352,9 +383,10 @@ function renderTimestamps(): void {
   listEls = [];
   activeTsIndex = -1;
 
-  tsCount.textContent = String(timestamps.length);
+  tsCount.textContent =
+    timestamps.length === 0 ? "No timestamps yet." : String(timestamps.length);
 
-  timestamps.forEach((ts) => {
+  timestamps.forEach((ts, index) => {
     // Scrubber marker (a clickable tick on top of the bar).
     const marker = document.createElement("button");
     marker.type = "button";
@@ -372,18 +404,32 @@ function renderTimestamps(): void {
     markersLayer.appendChild(marker);
     markerEls.push(marker);
 
-    // Panel list row (also a jump target).
-    const item = document.createElement("button");
-    item.type = "button";
+    // Panel list row: a jump target plus a remove button.
+    const item = document.createElement("li");
     item.className = "ts-list__item";
+    const jump = document.createElement("button");
+    jump.type = "button";
+    jump.className = "ts-list__jump";
     const time = document.createElement("span");
     time.className = "ts-list__time";
     time.textContent = formatTime(ts.time);
     const title = document.createElement("span");
     title.className = "ts-list__title";
     title.textContent = ts.title;
-    item.append(time, title);
-    item.addEventListener("click", () => jumpToTimestamp(ts));
+    jump.append(time, title);
+    jump.addEventListener("click", () => jumpToTimestamp(ts));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "ts-list__remove";
+    remove.title = "Remove timestamp";
+    remove.setAttribute("aria-label", `Remove ${ts.title}`);
+    remove.innerHTML =
+      '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>';
+    remove.addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeTimestamp(index);
+    });
+    item.append(jump, remove);
     tsList.appendChild(item);
     listEls.push(item);
   });
@@ -445,8 +491,11 @@ function setPanelOpen(open: boolean): void {
   tsPanel.setAttribute("aria-hidden", String(!open));
   btnTimestamps.setAttribute("aria-pressed", String(open));
   if (open) {
-    showControls(); // keep the scrubber + markers on screen alongside the panel
-    tsInput.focus();
+    // Keep the scrubber + markers on screen alongside the panel. We deliberately
+    // do NOT focus a text field here, so `T` / `A` / `D` keep working.
+    showControls();
+  } else {
+    closeAddInput();
   }
 }
 
@@ -1271,7 +1320,31 @@ function wireControls(): void {
   // Timestamps panel (play-002)
   btnTimestamps.addEventListener("click", togglePanel);
   btnTimestampsClose.addEventListener("click", () => setPanelOpen(false));
-  tsInput.addEventListener("input", refreshTimestamps);
+
+  // "Add timestamp" reveals a one-shot input that is only focused on demand, so
+  // the panel's hotkeys aren't swallowed in its default state.
+  btnAddTimestamp.addEventListener("click", openAddInput);
+  tsAddInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      // Commit a single typed line; stay open + cleared for the next entry.
+      e.preventDefault();
+      addTimestampsFromText(tsAddInput.value);
+      tsAddInput.value = "";
+    } else if (e.key === "Escape") {
+      // Close just the input (the global handler closes the panel otherwise).
+      e.stopPropagation();
+      closeAddInput();
+    }
+  });
+  tsAddInput.addEventListener("paste", (e) => {
+    // Pasting (often multiple lines) commits every line and closes the input.
+    e.preventDefault();
+    const text = e.clipboardData?.getData("text") ?? "";
+    addTimestampsFromText(text);
+    closeAddInput();
+  });
+  // Leaving the field (clicking elsewhere) dismisses it so it can't trap hotkeys.
+  tsAddInput.addEventListener("blur", closeAddInput);
 
   video.addEventListener("click", doTogglePlay);
 
@@ -1345,11 +1418,8 @@ function wireKeyboard(): void {
     // Don't hijack typing in inputs.
     const target = e.target as HTMLElement | null;
     if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
-      // Esc still works from the textarea (to close the panel); typing is otherwise left alone.
-      if (e.key === "Escape") {
-        setPanelOpen(false);
-        tsInput.blur();
-      }
+      // Keystrokes inside a text field are handled locally (the add-timestamp
+      // input owns its Enter/Escape); never trigger player shortcuts here.
       return;
     }
     switch (e.key) {
@@ -1396,7 +1466,6 @@ function wireKeyboard(): void {
       case "t":
       case "T":
         if (!stage.hidden) {
-          // Prevent the keystroke from leaking into the textarea we're about to focus.
           e.preventDefault();
           togglePanel();
         }

@@ -240,11 +240,26 @@ export function parseTimestamps(text: string): Timestamp[] {
     .map(parseTimestampLine)
     .filter((t): t is Timestamp => t !== null)
     .sort((a, b) => a.time - b.time);
+  return dedupeByTime(parsed);
+}
+
+/** Drop entries sharing a time with the previous one. Input must be sorted. */
+function dedupeByTime(sorted: Timestamp[]): Timestamp[] {
   const out: Timestamp[] = [];
-  for (const stamp of parsed) {
+  for (const stamp of sorted) {
     if (out.length === 0 || out[out.length - 1].time !== stamp.time) out.push(stamp);
   }
   return out;
+}
+
+/**
+ * Merge new timestamps into an existing collection: concatenate, sort by time,
+ * and drop duplicates. On a tie the existing entry wins (its title is kept), so
+ * re-adding a time already present is a no-op rather than an overwrite.
+ */
+export function mergeTimestamps(existing: Timestamp[], additions: Timestamp[]): Timestamp[] {
+  const all = [...existing, ...additions].sort((a, b) => a.time - b.time);
+  return dedupeByTime(all);
 }
 
 /** Marker position as a 0..1 fraction of duration, for placing it on the bar. */

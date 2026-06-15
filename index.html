@@ -179,16 +179,24 @@
               </button>
             </div>
           </div>
-          <p class="ts-panel__hint">
-            One per line, <code>HH:MM:SS Title</code> &mdash; e.g. <code>00:01:30 Chapter one</code>.
-          </p>
-          <textarea
-            id="timestamps-input"
-            class="ts-panel__input"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="00:00:00 Intro&#10;00:00:10 Chapter one&#10;00:00:20 Chapter two"
-          ></textarea>
+          <div class="ts-panel__add">
+            <button id="btn-add-timestamp" class="ts-panel__addbtn" type="button">
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+              Add timestamp
+            </button>
+            <input
+              id="timestamp-input"
+              class="ts-panel__input"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="00:01:30 Chapter title"
+              hidden
+            />
+            <p id="timestamp-hint" class="ts-panel__hint" hidden>
+              Type <code>HH:MM:SS Title</code> and press Enter, or paste several lines at once.
+            </p>
+          </div>
           <p class="ts-panel__label">JUMP TO CHAPTER</p>
           <ul id="timestamps-list" class="ts-list" aria-label="Timestamps"></ul>
         </aside>

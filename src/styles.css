@@ -47,6 +47,18 @@
   box-sizing: border-box;
 }
 
+/* Hide scrollbars app-wide; scrolling itself stays enabled. */
+*,
+html,
+body {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE / legacy Edge */
+}
+
+*::-webkit-scrollbar {
+  display: none; /* Chromium (WebView2) / WebKit (WKWebView) */
+}
+
 [hidden] {
   display: none !important;
 }
@@ -1121,11 +1133,43 @@ body {
   border-radius: 4px;
 }
 
+.ts-panel__add {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ts-panel__addbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 9px 16px 9px 12px;
+  border-radius: var(--radius-pill);
+  border: 1px dashed var(--border-glass);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.ts-panel__addbtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.ts-panel__addbtn .ic {
+  width: 16px;
+  height: 16px;
+}
+
 .ts-panel__input {
   width: 100%;
-  height: 120px;
-  resize: none;
-  padding: 14px 16px;
+  padding: 11px 16px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-glass);
   background: var(--surface-window);
@@ -1163,18 +1207,11 @@ body {
 
 .ts-list__item {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: stretch;
   width: 100%;
-  padding: 13px 12px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--text-secondary);
-  font-family: inherit;
-  font-size: 14px;
-  text-align: left;
-  cursor: pointer;
   transition: background 100ms ease;
 }
 
@@ -1185,6 +1222,51 @@ body {
 .ts-list__item[data-active="true"] {
   background: var(--accent-soft);
   border-color: var(--accent);
+}
+
+.ts-list__jump {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 13px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ts-list__remove {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  transition: opacity 100ms ease, color 100ms ease;
+}
+
+.ts-list__remove .ic {
+  width: 15px;
+  height: 15px;
+}
+
+.ts-list__item:hover .ts-list__remove,
+.ts-list__item[data-active="true"] .ts-list__remove {
+  opacity: 1;
+}
+
+.ts-list__remove:hover {
+  color: var(--danger, #ff5a5f);
 }
 
 .ts-list__time {
