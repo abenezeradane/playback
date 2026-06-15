@@ -111,6 +111,11 @@ let isScrubbing = false;
 
 // The active livestream controller (play-003), or null for a normal file.
 let live: LiveStream | null = null;
+// Background watcher that auto-upgrades a normal open to live if the file grows.
+let growthWatch: number | undefined;
+// When a live source has just been (auto-)opened, jump to the live edge as soon
+// as enough has buffered (so an upgraded recording starts at "now", not the past).
+let pendingGoLive = false;
 
 // Parsed timestamps + the DOM nodes rendered for them (index-aligned), so the
 // active-chapter highlight can be updated cheaply on every timeupdate.
@@ -468,20 +473,36 @@ interface StreamStatus {
   complete: boolean;
 }
 
-/** Bytes pulled per read, and how often we poll for more. */
-const LIVE_CHUNK_BYTES = 512 * 1024;
-const LIVE_POLL_MS = 350;
+interface LiveStartLayout {
+  size: number;
+  init_end: number;
+  start: number;
+}
 
-// Candidate MediaSource MIME types, most specific first; the first one the
-// WebView reports as supported is used. Our fixture is H.264 High@3.1 + AAC-LC
-// (`-c copy` of the sample), but we tolerate a few common profiles.
+/** Bytes pulled per read; reads per poll (so a fresh window loads quickly). */
+const LIVE_CHUNK_BYTES = 4 * 1024 * 1024;
+const LIVE_READS_PER_POLL = 6;
+const LIVE_POLL_MS = 700;
+// How much of the tail to load up front — the back-trackable DVR window. Keeps a
+// multi-GB stream from reading/buffering its whole history just to reach live.
+const LIVE_WINDOW_BYTES = 16 * 1024 * 1024;
+// Treat the stream as ended (and finalize) once it has not grown for this long
+// AND has no `.live` marker. Generous, so HLS segment gaps don't trip it.
+const LIVE_STALL_MS = 8000;
+// Cap the buffered span to stay under the MediaSource quota on long streams;
+// evict from the oldest end when exceeded (limits how far back you can track).
+const LIVE_MAX_BUFFER_SECONDS = 120;
+const LIVE_EVICT_SECONDS = 30;
+
+// Fallback MediaSource MIME types if the codec can't be read from the init
+// segment; the first one the WebView reports as supported wins.
 const LIVE_MIME_CANDIDATES = [
-  'video/mp4; codecs="avc1.64001f,mp4a.40.2"', // H.264 High@3.1 + AAC-LC
+  'video/mp4; codecs="avc1.64002a,mp4a.40.2"', // H.264 High@4.2 (1080p60) + AAC
+  'video/mp4; codecs="avc1.64001f,mp4a.40.2"', // High@3.1 + AAC-LC
   'video/mp4; codecs="avc1.4d401f,mp4a.40.2"', // Main@3.1 + AAC-LC
   'video/mp4; codecs="avc1.42e01e,mp4a.40.2"', // Baseline@3.0 + AAC-LC
-  'video/mp4; codecs="avc1.640028,mp4a.40.2"', // High@4.0 + AAC-LC
-  'video/mp4; codecs="avc1.64001f"', // video-only fallbacks
-  'video/mp4; codecs="avc1.42e01e"',
+  'video/mp4; codecs="avc1.64002a"', // video-only fallbacks
+  'video/mp4; codecs="avc1.64001f"',
 ];
 
 async function tauriInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
@@ -489,26 +510,236 @@ async function tauriInvoke<T>(cmd: string, args: Record<string, unknown>): Promi
   return invoke<T>(cmd, args);
 }
 
-/**
- * Normalize an invoke result to an ArrayBuffer. Depending on the platform/IPC
- * transport, a Rust command returning bytes arrives as an ArrayBuffer, a typed
- * array, or (on WebView2) a plain number[] — handle all three.
- */
-function toArrayBuffer(raw: unknown): ArrayBuffer {
-  if (raw instanceof ArrayBuffer) return raw;
-  if (raw instanceof Uint8Array) return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
-  if (ArrayBuffer.isView(raw)) {
-    const v = raw as ArrayBufferView;
-    return v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength) as ArrayBuffer;
+/** Decode a base64 chunk (the `read_stream_chunk` transport) into bytes. */
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** Index of an ASCII needle (e.g. a box type) within a byte array, or -1. */
+function indexOfAscii(bytes: Uint8Array, needle: string): number {
+  outer: for (let i = 0; i + needle.length <= bytes.length; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (bytes[i + j] !== needle.charCodeAt(j)) continue outer;
+    }
+    return i;
   }
-  if (Array.isArray(raw)) return new Uint8Array(raw as number[]).buffer;
-  return new ArrayBuffer(0);
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
+// Minimal fragmented-MP4 transmuxing.
+//
+// Some real-world recorders (e.g. Streamlink capturing Twitch) write fMP4 that
+// ffprobe accepts but the WebView's MediaSource refuses, for two reasons:
+//   1. the audio `esds` is missing its AudioSpecificConfig (DecoderSpecificInfo),
+//   2. each `tfhd` uses absolute `base-data-offset` addressing, which MSE forbids
+//      (it requires movie-fragment-relative addressing).
+// We fix both on the fly: inject the AAC config into the init segment, and
+// rewrite each `moof` to use `default-base-is-moof`. Streams that are already
+// MSE-compliant (e.g. our ffmpeg fixture) pass through these untouched.
+// ---------------------------------------------------------------------------
+
+interface Box {
+  type: string;
+  start: number;
+  size: number;
+  hs: number;
+}
+
+/** Walk the top-level boxes of `b` within [start, end). */
+function walkBoxes(b: Uint8Array, start: number, end: number): Box[] {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const out: Box[] = [];
+  let i = start;
+  while (i + 8 <= end) {
+    let size = dv.getUint32(i);
+    let hs = 8;
+    if (size === 1) {
+      if (i + 16 > end) break;
+      size = Number(dv.getBigUint64(i + 8));
+      hs = 16;
+    }
+    if (size < 8 || i + size > end) break;
+    out.push({ type: boxType(b, i), start: i, size, hs });
+    i += size;
+  }
+  return out;
+}
+
+function boxType(b: Uint8Array, i: number): string {
+  return String.fromCharCode(b[i + 4], b[i + 5], b[i + 6], b[i + 7]);
+}
+
+/** Read a 4-character code at an absolute offset (not a box header). */
+function fourCC(b: Uint8Array, off: number): string {
+  return String.fromCharCode(b[off], b[off + 1], b[off + 2], b[off + 3]);
+}
+
+const AAC_FREQS = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+
+/** Read an MPEG-4 descriptor header at `p` (tag + expandable length). */
+function readDescriptor(b: Uint8Array, p: number): { tag: number; len: number; payload: number; lenLastByte: number } {
+  const tag = b[p];
+  p++;
+  let len = 0;
+  let lenLastByte = p;
+  let c: number;
+  do {
+    c = b[p];
+    lenLastByte = p;
+    p++;
+    len = (len << 7) | (c & 0x7f);
+  } while (c & 0x80);
+  return { tag, len, payload: p, lenLastByte };
 }
 
 /**
- * Tails a growing file into a MediaSource. Owns the byte cursor, the append
- * queue, and the poll loop; exposes `window()` (the live window snapshot the UI
- * renders) and whether the stream is still `live`.
+ * Inject the AudioSpecificConfig into the audio track's `esds` if it is missing,
+ * so MSE can decode the AAC. Derives the config (AAC-LC, sample rate, channels)
+ * from the `mp4a` sample entry. Returns the (possibly unchanged) init segment.
+ */
+function patchInitSegment(init: Uint8Array): Uint8Array {
+  const dv = new DataView(init.buffer, init.byteOffset, init.byteLength);
+  const moov = walkBoxes(init, 0, init.length).find((b) => b.type === "moov");
+  if (!moov) return init;
+
+  let mp4a: Box | undefined;
+  let esds: Box | undefined;
+  const chain: Box[] = [moov];
+  for (const trak of walkBoxes(init, moov.start + moov.hs, moov.start + moov.size).filter((b) => b.type === "trak")) {
+    const mdia = walkBoxes(init, trak.start + trak.hs, trak.start + trak.size).find((b) => b.type === "mdia");
+    if (!mdia) continue;
+    const mdiaKids = walkBoxes(init, mdia.start + mdia.hs, mdia.start + mdia.size);
+    const hdlr = mdiaKids.find((b) => b.type === "hdlr");
+    if (!hdlr || fourCC(init, hdlr.start + hdlr.hs + 8) !== "soun") continue;
+    const minf = mdiaKids.find((b) => b.type === "minf");
+    if (!minf) continue;
+    const stbl = walkBoxes(init, minf.start + minf.hs, minf.start + minf.size).find((b) => b.type === "stbl");
+    if (!stbl) continue;
+    const stsd = walkBoxes(init, stbl.start + stbl.hs, stbl.start + stbl.size).find((b) => b.type === "stsd");
+    if (!stsd) continue;
+    mp4a = walkBoxes(init, stsd.start + stsd.hs + 8, stsd.start + stsd.size)[0];
+    if (!mp4a) continue;
+    esds = walkBoxes(init, mp4a.start + 36, mp4a.start + mp4a.size).find((b) => b.type === "esds");
+    if (esds) chain.push(trak, mdia, minf, stbl, stsd, mp4a, esds);
+    break;
+  }
+  if (!esds || !mp4a) return init;
+
+  // Walk the descriptors: ES_Descriptor(0x03) -> DecoderConfig(0x04) -> [DecSpecificInfo(0x05)?]
+  const es = readDescriptor(init, esds.start + esds.hs + 4);
+  if (es.tag !== 0x03) return init;
+  let q = es.payload + 2; // skip ES_ID
+  const flags = init[q];
+  q++;
+  if (flags & 0x80) q += 2;
+  if (flags & 0x40) q += 1 + init[q];
+  if (flags & 0x20) q += 2;
+  const dc = readDescriptor(init, q);
+  if (dc.tag !== 0x04) return init;
+  const dcConfigEnd = dc.payload + 13; // oti(1)+streamType(1)+buffer(3)+maxBR(4)+avgBR(4)
+  if (dcConfigEnd < init.length && init[dcConfigEnd] === 0x05) return init; // already has the config
+
+  const channels = dv.getUint16(mp4a.start + 24) || 2;
+  const hz = dv.getUint16(mp4a.start + 32);
+  const freqIdx = AAC_FREQS.indexOf(hz) >= 0 ? AAC_FREQS.indexOf(hz) : 4;
+  const asc = (2 << 11) | (freqIdx << 7) | (channels << 3); // AAC-LC
+  const ascDesc = new Uint8Array([0x05, 0x02, (asc >> 8) & 0xff, asc & 0xff]);
+
+  const out = new Uint8Array(init.length + 4);
+  out.set(init.subarray(0, dcConfigEnd), 0);
+  out.set(ascDesc, dcConfigEnd);
+  out.set(init.subarray(dcConfigEnd), dcConfigEnd + 4);
+  // Grow the two descriptor lengths and every container box that holds the esds.
+  out[dc.lenLastByte] += 4;
+  out[es.lenLastByte] += 4;
+  const odv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+  for (const box of chain) odv.setUint32(box.start, odv.getUint32(box.start) + 4);
+  return out;
+}
+
+/**
+ * Rewrite a `moof` so its `tfhd`s use movie-fragment-relative addressing: drop
+ * the absolute `base-data-offset` field, set `default-base-is-moof`, and shift
+ * each `trun.data_offset` to account for the removed bytes. Returns the moof
+ * unchanged if it is already compliant. Assumes the original `base_data_offset`
+ * equals the moof's own offset (verified for the target streams).
+ */
+function transmuxFragment(moof: Uint8Array): Uint8Array {
+  // First pass over the unmodified moof: locate the tfhds that use absolute
+  // addressing and the truns that carry a data_offset. (Box sizes must not be
+  // mutated before this, or re-walking would land misaligned.)
+  const src = new DataView(moof.buffer, moof.byteOffset, moof.byteLength);
+  const tfhds: Box[] = [];
+  const trafsToShrink: Box[] = [];
+  const trunOffsets: number[] = [];
+  for (const traf of walkBoxes(moof, 8, moof.length).filter((b) => b.type === "traf")) {
+    const kids = walkBoxes(moof, traf.start + 8, traf.start + traf.size);
+    const tfhd = kids.find((b) => b.type === "tfhd");
+    const trun = kids.find((b) => b.type === "trun");
+    if (tfhd && src.getUint32(tfhd.start + 8) & 0x1) {
+      tfhds.push(tfhd);
+      trafsToShrink.push(traf);
+    }
+    if (trun && src.getUint32(trun.start + 8) & 0x1) trunOffsets.push(trun.start);
+  }
+  if (tfhds.length === 0) return moof; // already MSE-compliant
+  const removed = tfhds.length * 8;
+
+  const m = moof.slice();
+  const dv = new DataView(m.buffer, m.byteOffset, m.byteLength);
+  // The moof shrinks by `removed`, so the trailing mdat moves up — shift every
+  // moof-relative data_offset to match.
+  for (const ts of trunOffsets) dv.setInt32(ts + 16, dv.getInt32(ts + 16) - removed);
+  const removeRanges: number[] = [];
+  for (let i = 0; i < tfhds.length; i++) {
+    const tfhd = tfhds[i];
+    const fpos = tfhd.start + 8; // version+flags
+    dv.setUint32(fpos, (dv.getUint32(fpos) & ~0x1) | 0x20000); // clear base-data-offset, set default-base-is-moof
+    removeRanges.push(tfhd.start + 16); // base_data_offset sits right after track_ID
+    dv.setUint32(tfhd.start, dv.getUint32(tfhd.start) - 8); // shrink tfhd
+    dv.setUint32(trafsToShrink[i].start, dv.getUint32(trafsToShrink[i].start) - 8); // shrink traf
+  }
+  dv.setUint32(0, dv.getUint32(0) - removed); // shrink moof
+  // Physically drop the base_data_offset byte ranges.
+  const out = new Uint8Array(m.length - removed);
+  let w = 0;
+  let r = 0;
+  for (const cut of removeRanges.sort((a, b) => a - b)) {
+    out.set(m.subarray(r, cut), w);
+    w += cut - r;
+    r = cut + 8;
+  }
+  out.set(m.subarray(r), w);
+  return out;
+}
+
+/**
+ * Derive the exact MediaSource MIME type from the init segment by reading the
+ * H.264 parameters out of the `avcC` box (`avc1.PPCCLL`) and detecting an AAC
+ * track. Returns null if it can't be parsed or the WebView can't play it.
+ */
+function mimeFromInit(initBytes: Uint8Array): string | null {
+  const p = indexOfAscii(initBytes, "avcC");
+  if (p < 0) return null;
+  const hex = (n: number) => n.toString(16).padStart(2, "0");
+  const codec = `avc1.${hex(initBytes[p + 5])}${hex(initBytes[p + 6])}${hex(initBytes[p + 7])}`;
+  const hasAudio = indexOfAscii(initBytes, "mp4a") >= 0;
+  const withAudio = `video/mp4; codecs="${codec},mp4a.40.2"`;
+  if (hasAudio && MediaSource.isTypeSupported(withAudio)) return withAudio;
+  const videoOnly = `video/mp4; codecs="${codec}"`;
+  if (MediaSource.isTypeSupported(videoOnly)) return videoOnly;
+  return null;
+}
+
+/**
+ * Tails a growing fragmented-MP4 file into a MediaSource. Appends the init
+ * segment, then starts near the live edge (so a multi-GB stream doesn't replay
+ * its whole history) and keeps appending new fragments as they are written.
+ * Exposes `window()` (the snapshot the UI renders) and whether it is still `live`.
  */
 class LiveStream {
   readonly path: string;
@@ -516,11 +747,14 @@ class LiveStream {
   private mediaSource = new MediaSource();
   private sourceBuffer?: SourceBuffer;
   private objectUrl = "";
-  private offset = 0; // bytes appended so far
+  private offset = 0; // next byte to read from the file
   private queue: ArrayBuffer[] = [];
+  private pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0); // bytes not yet forming a complete box
   private pollTimer?: number;
   private stopped = false;
   private finalized = false;
+  private lastSize = 0;
+  private lastGrowthAt = Date.now();
   /** Seconds of media available (buffered end). Read by the UI each render. */
   available = 0;
   /** True while the file is still being written. */
@@ -532,14 +766,28 @@ class LiveStream {
   }
 
   async start(): Promise<void> {
-    const mime = LIVE_MIME_CANDIDATES.find((m) => MediaSource.isTypeSupported(m));
+    // Find the init segment + a recent fragment boundary to start from.
+    const layout = await tauriInvoke<LiveStartLayout>("live_start", {
+      path: this.path,
+      windowBytes: LIVE_WINDOW_BYTES,
+    });
+    if (layout.init_end >= layout.size) {
+      throw new Error("This file is not a fragmented MP4 — cannot play it live.");
+    }
+    const initBytes = await this.readRange(0, layout.init_end);
+    const mime =
+      mimeFromInit(initBytes) ?? LIVE_MIME_CANDIDATES.find((m) => MediaSource.isTypeSupported(m));
     if (!mime) throw new Error("This stream's format is not supported for live playback.");
+
     this.objectUrl = URL.createObjectURL(this.mediaSource);
     video.src = this.objectUrl;
     await new Promise<void>((resolve) => {
       this.mediaSource.addEventListener("sourceopen", () => resolve(), { once: true });
     });
     const sb = this.mediaSource.addSourceBuffer(mime);
+    // "sequence" rebases appended fragments onto a 0-based timeline, so starting
+    // mid-file (not from byte 0) still yields a clean buffered range from 0.
+    sb.mode = "sequence";
     this.sourceBuffer = sb;
     sb.addEventListener("updateend", () => {
       this.refreshAvailable();
@@ -547,51 +795,151 @@ class LiveStream {
       this.maybeFinalize();
       this.onUpdate();
     });
+
+    // Queue the (possibly patched) init segment, then tail from the windowed start.
+    const patchedInit = patchInitSegment(initBytes);
+    this.queue.push(patchedInit.slice().buffer as ArrayBuffer);
+    this.offset = layout.start;
+    this.lastSize = layout.size;
+    this.lastGrowthAt = Date.now();
+    this.pump();
     void this.poll();
+  }
+
+  /** Read the byte range [from, to) from the file, decoding the base64 chunks. */
+  private async readRange(from: number, to: number): Promise<Uint8Array> {
+    const parts: Uint8Array[] = [];
+    let cur = from;
+    while (cur < to && !this.stopped) {
+      const b64 = await tauriInvoke<string>("read_stream_chunk", {
+        path: this.path,
+        offset: cur,
+        maxLen: Math.min(LIVE_CHUNK_BYTES, to - cur),
+      });
+      const bytes = b64ToBytes(b64);
+      if (bytes.length === 0) break;
+      parts.push(bytes);
+      cur += bytes.length;
+    }
+    const total = parts.reduce((n, p) => n + p.length, 0);
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const p of parts) {
+      out.set(p, at);
+      at += p.length;
+    }
+    return out;
+  }
+
+  /**
+   * Accumulate freshly-read bytes and extract complete top-level boxes. Each
+   * `moof` is transmuxed to be MSE-compliant; everything else is passed through.
+   * Partial boxes are held in `pending` until the rest arrives.
+   */
+  private feed(bytes: Uint8Array): void {
+    if (this.pending.length > 0) {
+      const merged = new Uint8Array(this.pending.length + bytes.length);
+      merged.set(this.pending, 0);
+      merged.set(bytes, this.pending.length);
+      this.pending = merged;
+    } else {
+      this.pending = bytes;
+    }
+
+    const buf = this.pending;
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let off = 0;
+    while (buf.length - off >= 8) {
+      let size = dv.getUint32(off);
+      if (size === 1) {
+        if (buf.length - off < 16) break;
+        size = Number(dv.getBigUint64(off + 8));
+      }
+      if (size < 8) {
+        off = buf.length; // malformed; resync by dropping the rest of this batch
+        break;
+      }
+      if (buf.length - off < size) break; // box not fully arrived yet
+      const box = buf.subarray(off, off + size);
+      const out = boxType(buf, off) === "moof" ? transmuxFragment(box) : box;
+      this.queue.push(out.slice().buffer as ArrayBuffer);
+      off += size;
+    }
+    this.pending = off > 0 ? buf.slice(off) : buf;
+    this.pump();
   }
 
   private async poll(): Promise<void> {
     if (this.stopped || this.finalized) return;
     try {
       const status = await tauriInvoke<StreamStatus>("stream_status", { path: this.path });
-      this.live = status.live && !status.complete;
-      if (status.size > this.offset) {
-        const raw = await tauriInvoke<unknown>("read_stream_chunk", {
+      if (status.size > this.lastSize) {
+        this.lastSize = status.size;
+        this.lastGrowthAt = Date.now();
+      }
+      // Live while a `.live` marker is set or the file is still growing; ended
+      // once `.done` or it has been stalled past the grace window.
+      if (status.complete) this.live = false;
+      else if (status.live) this.live = true;
+      else this.live = Date.now() - this.lastGrowthAt < LIVE_STALL_MS;
+
+      // Pull whatever new bytes exist (bounded per poll so we don't hog).
+      let reads = 0;
+      while (status.size > this.offset && reads < LIVE_READS_PER_POLL && !this.stopped) {
+        const b64 = await tauriInvoke<string>("read_stream_chunk", {
           path: this.path,
           offset: this.offset,
           maxLen: LIVE_CHUNK_BYTES,
         });
-        const buf = toArrayBuffer(raw);
-        if (buf.byteLength > 0) {
-          this.offset += buf.byteLength;
-          this.queue.push(buf);
-          this.pump();
-        }
-      } else if (status.complete && this.offset >= status.size) {
-        // Writer is done and every byte has been read — wrap up.
-        this.live = false;
-        this.maybeFinalize();
+        const bytes = b64ToBytes(b64);
+        if (bytes.length === 0) break;
+        this.offset += bytes.length;
+        this.feed(bytes);
+        reads++;
       }
     } catch {
       /* transient read error (e.g. mid-write); retry next tick */
     }
     this.refreshAvailable();
+    this.maybeFinalize();
     this.onUpdate();
     if (!this.stopped && !this.finalized) {
       this.pollTimer = window.setTimeout(() => void this.poll(), LIVE_POLL_MS);
     }
   }
 
-  /** Append the next queued chunk once the SourceBuffer is idle. */
+  /** Evict the oldest buffered range / append the next chunk when idle. */
   private pump(): void {
     const sb = this.sourceBuffer;
-    if (!sb || sb.updating || this.queue.length === 0) return;
-    if (this.mediaSource.readyState !== "open") return;
+    if (!sb || sb.updating || this.mediaSource.readyState !== "open") return;
+
+    // Keep the buffered span bounded so long streams don't hit the MSE quota.
+    if (sb.buffered.length > 0) {
+      const span = sb.buffered.end(sb.buffered.length - 1) - sb.buffered.start(0);
+      if (span > LIVE_MAX_BUFFER_SECONDS && video.currentTime > sb.buffered.start(0) + LIVE_EVICT_SECONDS) {
+        try {
+          sb.remove(sb.buffered.start(0), sb.buffered.start(0) + LIVE_EVICT_SECONDS);
+          return; // resume appending after the remove completes (updateend)
+        } catch {
+          /* fall through to append */
+        }
+      }
+    }
+
+    if (this.queue.length === 0) return;
     const chunk = this.queue.shift()!;
     try {
       sb.appendBuffer(chunk);
-    } catch {
-      /* QuotaExceeded or transient parser state — drop this chunk's retry */
+    } catch (err) {
+      // Out of quota — put the chunk back and evict the oldest data, then retry.
+      this.queue.unshift(chunk);
+      if (err instanceof Error && err.name === "QuotaExceededError" && sb.buffered.length > 0) {
+        try {
+          sb.remove(sb.buffered.start(0), sb.buffered.start(0) + LIVE_EVICT_SECONDS);
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 
@@ -602,11 +950,11 @@ class LiveStream {
     }
   }
 
-  /** Once the writer is done and all bytes are appended, end the MediaSource. */
+  /** Once the stream has ended and everything is appended, end the MediaSource. */
   private maybeFinalize(): void {
     if (this.finalized || this.live) return;
     const sb = this.sourceBuffer;
-    if (!sb || sb.updating || this.queue.length > 0) return;
+    if (!sb || sb.updating || this.queue.length > 0 || this.offset < this.lastSize) return;
     if (this.mediaSource.readyState !== "open") return;
     this.finalized = true;
     window.clearTimeout(this.pollTimer);
@@ -641,6 +989,7 @@ function stopLive(): void {
     live.stop();
     live = null;
   }
+  pendingGoLive = false;
   app.dataset.live = "false";
   btnForward.disabled = false;
   liveBadge.hidden = true;
@@ -653,6 +1002,12 @@ function activeLiveWindow(): LiveWindow | null {
 
 /** Re-render on every poll/append tick so the LIVE badge + edge stay current. */
 function onLiveUpdate(): void {
+  // A freshly opened/upgraded live source: once there's more than the delay
+  // buffered, snap to the live edge so we start at "now".
+  if (pendingGoLive && live && live.live && live.available > LIVE_DELAY_SECONDS) {
+    pendingGoLive = false;
+    doJumpToLive();
+  }
   // Enforce the live delay: while playing, never let the playhead outrun the
   // live edge into the trailing safety buffer (e.g. if writing momentarily
   // stalls). Tracking back and seeking are untouched.
@@ -662,6 +1017,52 @@ function onLiveUpdate(): void {
   }
   syncFromVideo();
   render();
+}
+
+/** Stop the background growth watcher, if any. */
+function stopGrowthWatch(): void {
+  window.clearTimeout(growthWatch);
+  growthWatch = undefined;
+}
+
+/**
+ * Watch a normally-opened file for growth; if it is being written and is a
+ * fragmented MP4 (so MediaSource can tail it), upgrade to live playback. This is
+ * how a real recorder's file (no `.live` marker) is recognised as a livestream.
+ */
+function startGrowthWatch(path: string, baseSize: number): void {
+  stopGrowthWatch();
+  let last = baseSize;
+  let ticks = 0;
+  const GROWTH_WATCH_MS = 2000;
+  const GROWTH_WATCH_MAX = 8; // give up after ~16s of no growth
+  const GROWTH_THRESHOLD = 64 * 1024;
+  const tick = async () => {
+    ticks++;
+    try {
+      const s = await tauriInvoke<StreamStatus>("stream_status", { path });
+      if (s.complete) return; // finished writing — it's a normal file
+      if (s.size > last + GROWTH_THRESHOLD) {
+        const layout = await tauriInvoke<LiveStartLayout>("live_start", {
+          path,
+          windowBytes: LIVE_WINDOW_BYTES,
+        });
+        if (layout.init_end < layout.size) await upgradeToLive(path); // fragmented -> tail it
+        return; // either upgraded, or not fragmented — stop watching
+      }
+      last = Math.max(last, s.size);
+    } catch {
+      /* ignore; try again */
+    }
+    if (ticks < GROWTH_WATCH_MAX) growthWatch = window.setTimeout(() => void tick(), GROWTH_WATCH_MS);
+  };
+  growthWatch = window.setTimeout(() => void tick(), GROWTH_WATCH_MS);
+}
+
+/** Switch a file that turned out to be growing from normal to live playback. */
+async function upgradeToLive(path: string): Promise<void> {
+  if (live) return;
+  await loadLiveFromPath(path, true);
 }
 
 /**
@@ -695,17 +1096,19 @@ function showError(message: string): void {
 
 /** Load a media file by absolute filesystem path (via Tauri's asset protocol). */
 async function loadFromPath(path: string): Promise<void> {
+  stopGrowthWatch();
   try {
-    // If a writer is actively appending to this file (signalled by a sibling
-    // `.live` marker), tail it as a livestream; otherwise open it normally.
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
+    // A `.live` marker means a writer is actively appending — tail it right away.
     if (status && status.live && !status.complete) {
-      await loadLiveFromPath(path);
+      await loadLiveFromPath(path, false);
       return;
     }
+    // Otherwise play normally, but watch in the background: if the file turns out
+    // to be growing (a recording in progress), auto-upgrade to live playback.
     const { convertFileSrc } = await import("@tauri-apps/api/core");
-    const src = convertFileSrc(path);
-    loadSrc(src, basename(path));
+    loadSrc(convertFileSrc(path), basename(path));
+    if (status && !status.complete) startGrowthWatch(path, status.size);
   } catch (err) {
     showError(`Could not open the file: ${String(err)}`);
   }
@@ -714,6 +1117,7 @@ async function loadFromPath(path: string): Promise<void> {
 /** Load a media file from an already-resolved URL (asset:// or blob:). */
 function loadSrc(src: string, title: string): void {
   stopLive(); // leaving any previous livestream behind
+  // Note: a growth watch may be (re)started by the caller after this returns.
   emptyError.hidden = true;
   video.src = src;
   titleLabel.textContent = title;
@@ -730,8 +1134,13 @@ function loadSrc(src: string, title: string): void {
   showControls();
 }
 
-/** Open a still-being-written file as a livestream, fed through MediaSource. */
-async function loadLiveFromPath(path: string): Promise<void> {
+/**
+ * Open a still-being-written file as a livestream, fed through MediaSource.
+ * `autoLive` snaps to the live edge once buffered (used when auto-upgrading a
+ * detected-growing file); the marker path passes false to start from the top.
+ */
+async function loadLiveFromPath(path: string, autoLive = false): Promise<void> {
+  stopGrowthWatch();
   stopLive();
   emptyError.hidden = true;
   const title = basename(path);
@@ -745,6 +1154,7 @@ async function loadLiveFromPath(path: string): Promise<void> {
   applyAudioToVideo();
   try {
     live = new LiveStream(path, onLiveUpdate);
+    pendingGoLive = autoLive;
     await live.start();
   } catch (err) {
     stopLive();

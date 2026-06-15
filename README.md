@@ -23,16 +23,22 @@ frontend (TypeScript + Vite) driving an HTML5 `<video>` element.
   timestamp on the scrubber. Click a marker (or a row in the list) to jump there;
   press `A` / `D` to jump to the previous / next timestamp.
 - **Livestream playback** — open a file that is still being written and Playback
-  tails it in real time (via MediaSource), holding a ~5 second live delay. You
-  can track back and fast-forward through everything written so far, but
-  fast-forward stops at the live edge once you catch up. A **LIVE** badge shows
-  how far behind live you are; press `L` (or click the badge) to jump to live.
-  When the file finishes writing it becomes an ordinary, fully-seekable file.
+  tails it in real time (via MediaSource), holding a ~5 second live delay. A
+  growing file is auto-detected (no special marker needed) and playback starts
+  near the live edge, so even a multi-gigabyte capture opens quickly. You can
+  track back and fast-forward through the buffered window, but fast-forward stops
+  at the live edge once you catch up. A **LIVE** badge shows how far behind live
+  you are; press `L` (or click the badge) to jump to live. When the file finishes
+  writing it becomes an ordinary, fully-seekable file. Real recorder output
+  (e.g. Streamlink capturing a Twitch stream) often writes fMP4 that browsers'
+  MediaSource rejects; Playback transmuxes it on the fly (injects the missing AAC
+  config, rewrites fragment addressing) so it plays.
 
 Supported containers/codecs depend on the system WebView2 (Windows) /
 WebKitGTK / WKWebView: MP4 (H.264/AAC), WebM, and Ogg are the safe set.
 Livestream playback feeds a MediaSource, so the growing file must be a
-fragmented MP4 (fMP4) or WebM.
+fragmented MP4 (fMP4) — a progressive MP4 being written (its index only finalized
+at the end) cannot be tailed until recording stops.
 
 ## Project layout
 
