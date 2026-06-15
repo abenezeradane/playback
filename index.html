@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <title>Playback</title>
+  </head>
+  <body>
+    <div id="app" class="app" data-state="empty">
+      <!-- Title / drag bar -->
+      <header class="titlebar" data-tauri-drag-region>
+        <div class="titlebar__brand" data-tauri-drag-region>
+          <span class="titlebar__glyph" aria-hidden="true">&#9654;</span>
+          <span class="titlebar__name">Playback</span>
+        </div>
+        <button id="btn-open-top" class="pill pill--ghost" type="button">Open file&hellip;</button>
+      </header>
+
+      <!-- Empty state: shown before a video is loaded -->
+      <section id="empty-state" class="empty">
+        <div class="empty__inner">
+          <h1 class="empty__title">Watch anything.</h1>
+          <p class="empty__sub">
+            Open a video file to start playback. Drag &amp; drop a file anywhere,
+            or use the button below.
+          </p>
+          <button id="btn-open" class="pill pill--primary" type="button">Open a video</button>
+          <p id="empty-error" class="empty__error" role="alert" hidden></p>
+        </div>
+      </section>
+
+      <!-- Player stage -->
+      <main id="stage" class="stage" hidden>
+        <div id="video-wrap" class="video-wrap">
+          <video id="video" class="video" playsinline></video>
+
+          <!-- Big center play/pause flash -->
+          <div id="center-toggle" class="center-toggle" aria-hidden="true">
+            <span id="center-icon" class="center-toggle__icon">&#9654;</span>
+          </div>
+
+          <!-- Control bar -->
+          <div id="controls" class="controls" data-visible="true">
+            <!-- Scrubber -->
+            <div class="scrubber">
+              <input
+                id="seek"
+                class="scrubber__range"
+                type="range"
+                min="0"
+                max="1000"
+                value="0"
+                step="1"
+                aria-label="Seek"
+              />
+              <div class="scrubber__track" aria-hidden="true">
+                <div id="buffered" class="scrubber__buffered"></div>
+                <div id="progress" class="scrubber__progress"></div>
+              </div>
+            </div>
+
+            <div class="controls__row">
+              <div class="controls__group">
+                <button id="btn-rewind" class="iconbtn" type="button" title="Back 10s (←)">
+                  <span class="iconbtn__glyph">&#8634;</span><span class="iconbtn__sub">10</span>
+                </button>
+                <button id="btn-play" class="iconbtn iconbtn--primary" type="button" title="Play/Pause (Space)">
+                  <span id="play-glyph" class="iconbtn__glyph">&#9654;</span>
+                </button>
+                <button id="btn-forward" class="iconbtn" type="button" title="Forward 10s (→)">
+                  <span class="iconbtn__glyph">&#8635;</span><span class="iconbtn__sub">10</span>
+                </button>
+
+                <div class="volume">
+                  <button id="btn-mute" class="iconbtn" type="button" title="Mute (M)">
+                    <span id="mute-glyph" class="iconbtn__glyph">&#128266;</span>
+                  </button>
+                  <input
+                    id="volume"
+                    class="volume__range"
+                    type="range"
+                    min="0"
+                    max="100"
+                    value="100"
+                    step="1"
+                    aria-label="Volume"
+                  />
+                </div>
+
+                <span id="time" class="time">0:00&nbsp;/&nbsp;0:00</span>
+              </div>
+
+              <div class="controls__group">
+                <span id="title-label" class="title-label"></span>
+                <button id="btn-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed">1&times;</button>
+                <button id="btn-fs" class="iconbtn" type="button" title="Fullscreen (F)">
+                  <span class="iconbtn__glyph">&#9974;</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

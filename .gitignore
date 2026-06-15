@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Local-only material kept out of the published history: AI-harness docs,
+# verification evidence, smoke/perf scripts, media fixtures, internal reports.
+CLAUDE.md
+.claude/
+init.sh
+claude-progress.md
+docs/claude-progress.md
+docs/session-handoff.md
+docs/superpowers/
+docs/clean-state-checklist.md
+docs/evaluator-rubric.md
+docs/quality-document.md
+docs/feature_list.json
+docs/security-audit.md
+docs/performance-analysis.md
+docs/inspiration.jpg
+docs/images/
+docs/playback.pen
+docs/evidence/
+samples/
+scripts/*
+!scripts/fetch-ffmpeg.mjs
+!scripts/fetch-libmpv.mjs
