@@ -147,6 +147,18 @@ export function nextRate(rate: number): number {
 }
 
 /**
+ * Step one speed up (`direction > 0`) or down (`direction < 0`) without
+ * wrapping — clamps at the slowest/fastest rate. Used by the +/- hotkeys, where
+ * stopping at the ends is less surprising than the rate button's wrap-around.
+ */
+export function stepRate(rate: number, direction: number): number {
+  const idx = PLAYBACK_RATES.indexOf(rate as (typeof PLAYBACK_RATES)[number]);
+  const cur = idx >= 0 ? idx : PLAYBACK_RATES.indexOf(1);
+  const next = clamp(cur + Math.sign(direction), 0, PLAYBACK_RATES.length - 1);
+  return PLAYBACK_RATES[next];
+}
+
+/**
  * Set the volume (0..1). Setting volume above zero implicitly unmutes; setting
  * it to zero implicitly mutes — matching the behavior users expect from a slider.
  */

@@ -25,6 +25,7 @@ import {
   progressFraction,
   bufferedFraction,
   nextRate,
+  stepRate,
   setVolume,
   toggleMute,
   effectiveVolume,
@@ -68,6 +69,10 @@ const centerToggle = $<HTMLDivElement>("center-toggle");
 
 const btnOpen = $<HTMLButtonElement>("btn-open");
 const btnOpenTop = $<HTMLButtonElement>("btn-open-top");
+const dropZone = $<HTMLButtonElement>("drop-zone");
+const recentCards = $<HTMLDivElement>("recent-cards");
+const recentEmpty = $<HTMLDivElement>("recent-empty");
+const btnClearRecent = $<HTMLButtonElement>("btn-clear-recent");
 const btnBack = $<HTMLButtonElement>("btn-back");
 const btnPlay = $<HTMLButtonElement>("btn-play");
 const btnRewind = $<HTMLButtonElement>("btn-rewind");
@@ -108,6 +113,7 @@ const markerFlashText = $<HTMLSpanElement>("marker-flash-text");
 const nowChapter = $<HTMLDivElement>("now-chapter");
 const nowChapterTime = $<HTMLSpanElement>("now-chapter-time");
 const nowChapterLabel = $<HTMLSpanElement>("now-chapter-label");
+const pinChapterToggle = $<HTMLInputElement>("pin-chapter-toggle");
 
 // ---------------------------------------------------------------------------
 // State
@@ -301,10 +307,21 @@ function doCycleRate(): void {
   render();
 }
 
+/** Hotkeys +/−: step the playback speed up or down (clamped, no wrap). */
+function doStepRate(direction: number): void {
+  syncFromVideo();
+  state = { ...state, rate: stepRate(state.rate, direction) };
+  applyAudioToVideo();
+  render();
+  showControls();
+}
+
 async function doToggleFullscreen(): Promise<void> {
   try {
     if (!document.fullscreenElement) {
-      await stage.requestFullscreen();
+      // Fullscreen the whole app, not just the stage, so overlays that live
+      // outside #stage (keyboard shortcuts, pinned chapter) stay visible.
+      await app.requestFullscreen();
     } else {
       await document.exitFullscreen();
     }
@@ -319,13 +336,23 @@ async function doToggleFullscreen(): Promise<void> {
 let hideTimer: number | undefined;
 let flashTimer: number | undefined;
 
+/**
+ * Single source of truth for chrome visibility. `data-chrome` on the stage lets
+ * elements that live outside #controls (e.g. the pinned chapter pill) track the
+ * controls' show/hide without being subject to the controls' own fade.
+ */
+function setChromeVisible(visible: boolean): void {
+  controls.dataset.visible = String(visible);
+  stage.dataset.chrome = visible ? "shown" : "hidden";
+}
+
 function showControls(): void {
-  controls.dataset.visible = "true";
+  setChromeVisible(true);
   stage.dataset.idle = "false";
   window.clearTimeout(hideTimer);
   hideTimer = window.setTimeout(() => {
     if (state.isPlaying) {
-      controls.dataset.visible = "false";
+      setChromeVisible(false);
       stage.dataset.idle = "true";
     }
   }, 2600);
@@ -458,6 +485,32 @@ function updateActiveTimestamp(): void {
   activeTsIndex = idx;
 }
 
+// Persisted setting: pin the current-chapter pill to the bottom-left corner so
+// it stays visible even when the rest of the chrome auto-hides.
+const PIN_CHAPTER_KEY = "playback:pinChapter";
+
+/** Apply the pin-chapter setting to the pill + toggle, and persist it. */
+function setPinChapter(on: boolean): void {
+  nowChapter.dataset.pinned = String(on);
+  pinChapterToggle.checked = on;
+  try {
+    localStorage.setItem(PIN_CHAPTER_KEY, on ? "1" : "0");
+  } catch {
+    /* storage unavailable (e.g. private mode) — setting just won't persist */
+  }
+}
+
+/** Restore the saved pin-chapter setting on startup. */
+function loadPinChapter(): void {
+  let saved = false;
+  try {
+    saved = localStorage.getItem(PIN_CHAPTER_KEY) === "1";
+  } catch {
+    /* ignore */
+  }
+  setPinChapter(saved);
+}
+
 /** Show the active chapter's time + title in the control chrome, or hide it. */
 function updateNowChapter(idx: number): void {
   if (idx < 0) {
@@ -536,6 +589,7 @@ function goHome(): void {
   stage.hidden = true;
   emptyState.hidden = false;
   emptyError.hidden = true;
+  renderRecents();
   document.title = "Playback";
 }
 
@@ -1195,8 +1249,136 @@ function showError(message: string): void {
 }
 
 /** Load a media file by absolute filesystem path (via Tauri's asset protocol). */
+// ---------------------------------------------------------------------------
+// Recent files (home screen) — local file history, no account. Persisted in
+// localStorage; rendered as cards on the home, click to re-open.
+// ---------------------------------------------------------------------------
+interface RecentFile {
+  path: string;
+  name: string;
+  openedAt: number;
+  duration?: number;
+}
+const RECENTS_KEY = "playback:recents";
+const RECENTS_MAX = 8;
+/** Path of the file currently loaded (so we can backfill its duration). */
+let currentPath: string | null = null;
+
+function loadRecents(): RecentFile[] {
+  try {
+    const arr = JSON.parse(localStorage.getItem(RECENTS_KEY) ?? "[]") as RecentFile[];
+    return Array.isArray(arr) ? arr.filter((r) => r && typeof r.path === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecents(list: RecentFile[]): void {
+  try {
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(list));
+  } catch {
+    /* storage unavailable / quota — recents are best-effort */
+  }
+}
+
+function addRecent(path: string, name: string): void {
+  const list = loadRecents().filter((r) => r.path !== path);
+  list.unshift({ path, name, openedAt: Date.now() });
+  if (list.length > RECENTS_MAX) list.length = RECENTS_MAX;
+  saveRecents(list);
+  renderRecents();
+}
+
+function setRecentDuration(path: string, duration: number): void {
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  const list = loadRecents();
+  const item = list.find((r) => r.path === path);
+  if (item && item.duration !== duration) {
+    item.duration = duration;
+    saveRecents(list);
+    renderRecents();
+  }
+}
+
+function clearRecents(): void {
+  saveRecents([]);
+  renderRecents();
+}
+
+/** "just now" / "5m ago" / "3h ago" / "yesterday" / "4 days ago" / "2 weeks ago". */
+function timeAgo(ts: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d === 1) return "yesterday";
+  if (d < 7) return `${d} days ago`;
+  const w = Math.floor(d / 7);
+  return w === 1 ? "last week" : `${w} weeks ago`;
+}
+
+/** A stable accent gradient derived from the filename (stands in for a thumbnail). */
+function thumbGradient(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  return `linear-gradient(135deg, hsl(${hue} 60% 42%), hsl(${(hue + 38) % 360} 55% 20%))`;
+}
+
+const RECENT_PLAY_SVG =
+  '<svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="8 5 19 12 8 19 8 5" /></svg>';
+
+function renderRecents(): void {
+  const list = loadRecents();
+  const has = list.length > 0;
+  recentCards.replaceChildren();
+  recentCards.hidden = !has;
+  recentEmpty.hidden = has;
+  btnClearRecent.hidden = !has;
+
+  for (const r of list) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "recent-card";
+    card.title = r.path;
+
+    const thumb = document.createElement("span");
+    thumb.className = "recent-card__thumb";
+    thumb.style.background = thumbGradient(r.name);
+    const play = document.createElement("span");
+    play.className = "recent-card__play";
+    play.innerHTML = RECENT_PLAY_SVG;
+    thumb.appendChild(play);
+    if (r.duration) {
+      const dur = document.createElement("span");
+      dur.className = "recent-card__dur";
+      dur.textContent = formatTime(r.duration);
+      thumb.appendChild(dur);
+    }
+
+    const meta = document.createElement("span");
+    meta.className = "recent-card__meta";
+    const nm = document.createElement("span");
+    nm.className = "recent-card__name";
+    nm.textContent = r.name;
+    const sub = document.createElement("span");
+    sub.className = "recent-card__sub";
+    sub.textContent = `Opened ${timeAgo(r.openedAt)}`;
+    meta.append(nm, sub);
+
+    card.append(thumb, meta);
+    card.addEventListener("click", () => void loadFromPath(r.path));
+    recentCards.appendChild(card);
+  }
+}
+
 async function loadFromPath(path: string): Promise<void> {
   stopGrowthWatch();
+  currentPath = path;
+  addRecent(path, basename(path));
   try {
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
     // A `.live` marker means a writer is actively appending — tail it right away.
@@ -1320,6 +1502,8 @@ async function registerDragAndDrop(): Promise<void> {
 function wireControls(): void {
   btnOpen.addEventListener("click", () => void openFileDialog());
   btnOpenTop.addEventListener("click", () => void openFileDialog());
+  dropZone.addEventListener("click", () => void openFileDialog());
+  btnClearRecent.addEventListener("click", clearRecents);
   btnPlay.addEventListener("click", doTogglePlay);
   btnRewind.addEventListener("click", () => doSkip(false));
   btnForward.addEventListener("click", () => doSkip(true));
@@ -1339,6 +1523,13 @@ function wireControls(): void {
   // Timestamps panel (play-002)
   btnTimestamps.addEventListener("click", togglePanel);
   btnTimestampsClose.addEventListener("click", () => setPanelOpen(false));
+
+  // "Always show current chapter" setting: pin the pill to the bottom-left.
+  // Blur after toggling so Space/hotkeys aren't swallowed by the focused input.
+  pinChapterToggle.addEventListener("change", () => {
+    setPinChapter(pinChapterToggle.checked);
+    pinChapterToggle.blur();
+  });
 
   // "Add timestamp" reveals a one-shot input that is only focused on demand, so
   // the panel's hotkeys aren't swallowed in its default state.
@@ -1399,6 +1590,7 @@ function wireControls(): void {
   video.addEventListener("loadedmetadata", () => {
     syncFromVideo();
     render();
+    if (currentPath) setRecentDuration(currentPath, video.duration);
     // Duration is now known — reposition markers against the real timeline.
     renderTimestamps();
   });
@@ -1428,7 +1620,7 @@ function wireControls(): void {
   // Reveal controls on mouse activity over the stage.
   stage.addEventListener("mousemove", showControls);
   stage.addEventListener("mouseleave", () => {
-    if (state.isPlaying) controls.dataset.visible = "false";
+    if (state.isPlaying) setChromeVisible(false);
   });
 }
 
@@ -1463,6 +1655,14 @@ function wireKeyboard(): void {
         break;
       case "m":
         doToggleMute();
+        break;
+      case "+":
+      case "=":
+        if (!stage.hidden) doStepRate(1);
+        break;
+      case "-":
+      case "_":
+        if (!stage.hidden) doStepRate(-1);
         break;
       case "f":
         void doToggleFullscreen();
@@ -1519,7 +1719,9 @@ async function loadLaunchFile(): Promise<void> {
 // ---------------------------------------------------------------------------
 wireControls();
 wireKeyboard();
+loadPinChapter();
 void registerDragAndDrop();
 void loadLaunchFile();
 renderTimestamps();
+renderRecents();
 render();

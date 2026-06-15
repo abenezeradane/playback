@@ -16,6 +16,7 @@ import {
   sliderToTime,
   timeToSlider,
   nextRate,
+  stepRate,
   setVolume,
   toggleMute,
   effectiveVolume,
@@ -185,6 +186,16 @@ describe("playback rate", () => {
   });
   it("falls back to the first rate for an unknown value", () => {
     expect(nextRate(3)).toBe(PLAYBACK_RATES[0]);
+  });
+  it("stepRate moves one speed up/down without wrapping", () => {
+    expect(stepRate(1, 1)).toBe(1.25);
+    expect(stepRate(1, -1)).toBe(0.75);
+  });
+  it("stepRate clamps at the slowest and fastest rates", () => {
+    const min = PLAYBACK_RATES[0];
+    const max = PLAYBACK_RATES[PLAYBACK_RATES.length - 1];
+    expect(stepRate(min, -1)).toBe(min);
+    expect(stepRate(max, 1)).toBe(max);
   });
 });
 
