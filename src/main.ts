@@ -19,6 +19,7 @@ import {
   fastForward,
   rewind,
   seekTo,
+  sectionSeekTime,
   SKIP_SECONDS,
   sliderToTime,
   timeToSlider,
@@ -292,6 +293,21 @@ function doSeekTo(seconds: number): void {
   state = seekTo(state, seconds);
   video.currentTime = state.currentTime;
   render();
+}
+
+/**
+ * Jump to a tenth of the video with the 0-9 number keys (play-009): digit n
+ * seeks to n/10 of the duration. For a growing-file livestream we map against
+ * the written window (`available`) and route through doSeekTo, which clamps to
+ * the live window — so a digit past the live edge lands at the edge, never
+ * beyond. The split is a seek convention only; nothing is drawn on the timeline.
+ */
+function doSectionSeek(digit: number): void {
+  syncFromVideo();
+  const w = activeLiveWindow();
+  const basis = w ? w.available : state.duration;
+  doSeekTo(sectionSeekTime(digit, basis));
+  showControls();
 }
 
 function doToggleMute(): void {
@@ -1770,6 +1786,22 @@ function wireKeyboard(): void {
         setPanelOpen(false);
         break;
       default:
+        // Number keys 0-9 jump to that tenth of the video (player-only). e.key
+        // is "0".."9" for both the top row and the numpad; the single-char range
+        // check excludes "F1"/"ArrowUp"/etc. Skip when a modifier is held so
+        // accelerator combos (Ctrl+1, …) aren't hijacked.
+        if (
+          e.key.length === 1 &&
+          e.key >= "0" &&
+          e.key <= "9" &&
+          !e.ctrlKey &&
+          !e.altKey &&
+          !e.metaKey &&
+          !stage.hidden
+        ) {
+          e.preventDefault();
+          doSectionSeek(Number(e.key));
+        }
         break;
     }
   });

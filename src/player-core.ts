@@ -115,6 +115,21 @@ export function seekToFraction(state: PlayerState, fraction: number): PlayerStat
   return seekTo(state, f * state.duration);
 }
 
+/**
+ * Target time (seconds) for the 0-9 number-key "jump to a tenth" shortcut:
+ * `(digit / 10) * duration`, so 0 -> start (0%), 5 -> 50%, 9 -> 90%. Playback is
+ * treated as ten equal sections (section n starts at n/10 of the duration) — but
+ * purely as a seek convention; nothing is drawn on the timeline. The digit is
+ * clamped to 0-9 and a non-finite or non-positive duration yields 0. The caller
+ * applies the result through the usual seek path (which clamps to [0, duration]
+ * for a file or to the live window for a growing stream).
+ */
+export function sectionSeekTime(digit: number, duration: number): number {
+  if (!Number.isFinite(duration) || duration <= 0) return 0;
+  const section = clamp(Math.floor(digit), 0, 9);
+  return (section / 10) * duration;
+}
+
 /** Progress as a 0..1 fraction for rendering the scrubber fill. */
 export function progressFraction(state: PlayerState): number {
   if (state.duration <= 0) return 0;

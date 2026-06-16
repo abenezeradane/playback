@@ -11,6 +11,7 @@ import {
   rewind,
   seekTo,
   seekToFraction,
+  sectionSeekTime,
   progressFraction,
   bufferedFraction,
   sliderToTime,
@@ -152,6 +153,29 @@ describe("seek", () => {
     expect(seekToFraction(s, 0.5).currentTime).toBe(100);
     expect(seekToFraction(s, 1).currentTime).toBe(200);
     expect(seekToFraction(s, 1.5).currentTime).toBe(200);
+  });
+});
+
+describe("section seek — 0-9 number keys (play-009)", () => {
+  it("maps each digit to its tenth of the duration", () => {
+    expect(sectionSeekTime(0, 200)).toBe(0);
+    expect(sectionSeekTime(1, 200)).toBe(20);
+    expect(sectionSeekTime(5, 200)).toBe(100);
+    expect(sectionSeekTime(9, 200)).toBeCloseTo(180);
+  });
+  it("9 is the maximum (90%); never reaches 100%", () => {
+    expect(sectionSeekTime(9, 100)).toBeCloseTo(90);
+  });
+  it("clamps the digit to 0-9 and floors fractional digits", () => {
+    expect(sectionSeekTime(-3, 200)).toBe(0);
+    expect(sectionSeekTime(12, 200)).toBeCloseTo(180); // clamps to 9 -> 90%
+    expect(sectionSeekTime(5.9, 200)).toBe(100); // floor(5.9) -> 5
+  });
+  it("guards a non-finite or non-positive duration with 0", () => {
+    expect(sectionSeekTime(5, 0)).toBe(0);
+    expect(sectionSeekTime(5, -10)).toBe(0);
+    expect(sectionSeekTime(5, Number.NaN)).toBe(0);
+    expect(sectionSeekTime(5, Number.POSITIVE_INFINITY)).toBe(0);
   });
 });
 
