@@ -173,7 +173,7 @@ function render(): void {
       seek.value = String(timeToSlider(state.currentTime, state.duration, 1000));
     }
     progress.style.width = `${progressFraction(state) * 100}%`;
-    timeLabel.innerHTML = `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-tot">${formatTime(state.duration)}</span>`;
+    timeLabel.innerHTML = `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-sep">/</span><span class="t-tot">${formatTime(state.duration)}</span>`;
 
     // Buffered indicator
     if (video.buffered.length > 0 && state.duration > 0) {
@@ -218,8 +218,8 @@ function renderLive(w: LiveWindow): void {
 
   // Time reads as "position / LIVE", with how far behind when not caught up.
   timeLabel.innerHTML = caught
-    ? `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-live">LIVE</span>`
-    : `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-live">LIVE <em>−${behind}s</em></span>`;
+    ? `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-sep">/</span><span class="t-live">LIVE</span>`
+    : `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-sep">/</span><span class="t-live">LIVE <em>−${behind}s</em></span>`;
 
   // LIVE status badge (top overlay); pulses once caught up to the edge.
   liveBadge.hidden = false;
