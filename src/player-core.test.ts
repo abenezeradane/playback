@@ -28,6 +28,11 @@ import {
   previousTimestamp,
   nextTimestamp,
   activeTimestampIndex,
+  timestampKey,
+  parseTimestampStore,
+  serializeTimestampStore,
+  readStoredTimestamps,
+  writeStoredTimestamps,
   createLiveWindow,
   liveEdge,
   clampToLiveWindow,
@@ -321,6 +326,78 @@ describe("timestamps — markers + navigation", () => {
     expect(activeTimestampIndex(stamps, 5)).toBe(0);
     expect(activeTimestampIndex(stamps, 30)).toBe(1);
     expect(activeTimestampIndex(stamps, 999)).toBe(2);
+  });
+});
+
+describe("timestamps — persistence (play-007)", () => {
+  const a = [
+    { time: 8, title: "Intro" },
+    { time: 16, title: "Chorus" },
+  ];
+  const b = [{ time: 4, title: "Cold open" }];
+
+  it("timestampKey is the trimmed source identity", () => {
+    expect(timestampKey("C:/videos/clip.mp4")).toBe("C:/videos/clip.mp4");
+    expect(timestampKey("  /tmp/x.mp4  ")).toBe("/tmp/x.mp4");
+  });
+
+  it("writeStoredTimestamps stores a sorted, de-duplicated list under the key", () => {
+    const store = writeStoredTimestamps({}, "clipA", [
+      { time: 16, title: "Chorus" },
+      { time: 8, title: "Intro" },
+      { time: 8, title: "Dupe" }, // same time as Intro — collapses, first kept
+    ]);
+    expect(store).toEqual({ clipA: a });
+  });
+
+  it("writeStoredTimestamps does not mutate the input store and keeps videos independent", () => {
+    const original = { clipA: a };
+    const next = writeStoredTimestamps(original, "clipB", b);
+    expect(original).toEqual({ clipA: a }); // untouched
+    expect(next).toEqual({ clipA: a, clipB: b }); // both scoped separately
+  });
+
+  it("writeStoredTimestamps removes the key when the list is emptied", () => {
+    const store = { clipA: a, clipB: b };
+    const next = writeStoredTimestamps(store, "clipA", []);
+    expect(next).toEqual({ clipB: b });
+    expect("clipA" in next).toBe(false); // not a lingering empty array
+  });
+
+  it("readStoredTimestamps returns the saved set or an empty list", () => {
+    expect(readStoredTimestamps({ clipA: a }, "clipA")).toEqual(a);
+    expect(readStoredTimestamps({ clipA: a }, "missing")).toEqual([]);
+  });
+
+  it("round-trips through serialize + parse", () => {
+    const store = writeStoredTimestamps(writeStoredTimestamps({}, "clipA", a), "clipB", b);
+    const restored = parseTimestampStore(serializeTimestampStore(store));
+    expect(restored).toEqual(store);
+  });
+
+  it("parseTimestampStore yields an empty store for null/garbage input", () => {
+    expect(parseTimestampStore(null)).toEqual({});
+    expect(parseTimestampStore("")).toEqual({});
+    expect(parseTimestampStore("not json{")).toEqual({});
+    expect(parseTimestampStore("[1,2,3]")).toEqual({}); // an array isn't a store
+    expect(parseTimestampStore("42")).toEqual({});
+  });
+
+  it("parseTimestampStore drops malformed entries and empty lists, sorting the rest", () => {
+    const json = JSON.stringify({
+      clipA: [
+        { time: 16, title: "Chorus" },
+        { time: 8, title: "Intro" },
+        { time: -3, title: "Negative" }, // invalid time — dropped
+        { time: "x", title: "NaN" }, // non-number — dropped
+        { time: 5 }, // missing title — dropped
+        { title: "no time" }, // missing time — dropped
+      ],
+      clipB: [], // empty — whole key dropped
+      clipC: "not an array", // dropped
+      "": [{ time: 1, title: "blank key" }], // empty key — dropped
+    });
+    expect(parseTimestampStore(json)).toEqual({ clipA: a });
   });
 });
 

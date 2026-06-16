@@ -35,6 +35,11 @@ import {
   previousTimestamp,
   nextTimestamp,
   activeTimestampIndex,
+  timestampKey,
+  parseTimestampStore,
+  serializeTimestampStore,
+  readStoredTimestamps,
+  writeStoredTimestamps,
   LIVE_DELAY_SECONDS,
   liveEdge,
   clampToLiveWindow,
@@ -45,6 +50,7 @@ import {
   liveProgressFraction,
   type PlayerState,
   type Timestamp,
+  type TimestampStore,
   type LiveWindow,
 } from "./player-core";
 
@@ -381,6 +387,7 @@ function addTimestampsFromText(text: string): number {
   const before = timestamps.length;
   timestamps = mergeTimestamps(timestamps, additions);
   renderTimestamps();
+  persistTimestamps();
   return timestamps.length - before;
 }
 
@@ -388,6 +395,48 @@ function addTimestampsFromText(text: string): number {
 function removeTimestamp(index: number): void {
   timestamps = timestamps.filter((_, i) => i !== index);
   renderTimestamps();
+  persistTimestamps();
+}
+
+// --- Per-video persistence (play-007) ---
+// Saved timestamps survive close+reopen and app restarts, scoped per video by a
+// stable key. The whole store lives under one localStorage key; pure (de)serialize
+// + read/write helpers live in player-core so they're unit-tested without a DOM.
+const TIMESTAMPS_KEY = "playback:timestamps";
+
+/** Identity of the video currently loaded; null on the home screen. */
+let currentTimestampKey: string | null = null;
+
+function loadTimestampStore(): TimestampStore {
+  return parseTimestampStore(localStorage.getItem(TIMESTAMPS_KEY));
+}
+
+function saveTimestampStore(store: TimestampStore): void {
+  try {
+    localStorage.setItem(TIMESTAMPS_KEY, serializeTimestampStore(store));
+  } catch {
+    /* storage unavailable / quota — saved timestamps are best-effort */
+  }
+}
+
+/**
+ * Replace the in-memory timestamps with the saved set for `source` (a file path
+ * or URL), then re-render. Called on every open so timestamps are scoped per
+ * video. A no-op when the key is unchanged (e.g. a live auto-upgrade re-opens the
+ * same path) so it never wipes the session's in-memory edits.
+ */
+function loadTimestampsFor(source: string | null): void {
+  const key = source ? timestampKey(source) : null;
+  if (key === currentTimestampKey) return;
+  currentTimestampKey = key;
+  timestamps = key ? readStoredTimestamps(loadTimestampStore(), key) : [];
+  renderTimestamps();
+}
+
+/** Persist the current in-memory timestamps under the current video's key. */
+function persistTimestamps(): void {
+  if (currentTimestampKey === null) return;
+  saveTimestampStore(writeStoredTimestamps(loadTimestampStore(), currentTimestampKey, timestamps));
 }
 
 /** Reveal the single-line add input (focused, empty) for a new entry. */
@@ -585,6 +634,8 @@ function goHome(): void {
   video.removeAttribute("src");
   video.load();
   state = createInitialState();
+  loadTimestampsFor(null); // clear this video's chapters when returning home
+  currentPath = null;
   app.dataset.state = "empty";
   stage.hidden = true;
   emptyState.hidden = false;
@@ -1378,6 +1429,7 @@ function renderRecents(): void {
 async function loadFromPath(path: string): Promise<void> {
   stopGrowthWatch();
   currentPath = path;
+  loadTimestampsFor(path); // seed this video's saved timestamps before it loads
   addRecent(path, basename(path));
   try {
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);

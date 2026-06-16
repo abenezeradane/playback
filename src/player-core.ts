@@ -324,6 +324,97 @@ export function activeTimestampIndex(stamps: Timestamp[], current: number): numb
 }
 
 // ---------------------------------------------------------------------------
+// Timestamp persistence (play-007)
+//
+// Timestamps added in a session are saved per video so they reappear the next
+// time the same file is opened — surviving a close+reopen and a full app
+// restart. The store is a flat map of a stable per-video key -> that video's
+// Timestamp[]. These helpers own the keying and (de)serialization so they can
+// be unit-tested without localStorage; main.ts persists the serialized string.
+// ---------------------------------------------------------------------------
+
+/** A map of per-video key -> the saved timestamps for that video. */
+export type TimestampStore = Record<string, Timestamp[]>;
+
+/**
+ * Stable identity for a video, used to scope its saved timestamps. Today this is
+ * just the absolute file path (or URL); it is factored out as the single place
+ * to enrich the key later (e.g. with a size/mtime fingerprint so moved files
+ * behave sensibly, or a normalized URL once play-006 lands).
+ */
+export function timestampKey(source: string): string {
+  return source.trim();
+}
+
+/** Keep only well-formed Timestamp entries, then sort + de-duplicate by time. */
+function sanitizeTimestamps(value: unknown): Timestamp[] {
+  if (!Array.isArray(value)) return [];
+  const clean: Timestamp[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const { time, title } = item as Partial<Timestamp>;
+    if (typeof time !== "number" || !Number.isFinite(time) || time < 0) continue;
+    if (typeof title !== "string") continue;
+    clean.push({ time, title });
+  }
+  // Reuse the canonical sort + de-dupe so loaded data matches freshly parsed data.
+  return mergeTimestamps([], clean);
+}
+
+/**
+ * Parse the serialized store, dropping anything malformed. Each video's list is
+ * sanitized (valid entries only, sorted, de-duplicated) and empty lists are
+ * dropped. Returns an empty store for null/garbage input so a corrupt or
+ * oversized value can never break loading.
+ */
+export function parseTimestampStore(json: string | null | undefined): TimestampStore {
+  if (!json) return {};
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return {};
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const store: TimestampStore = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!key) continue;
+    const list = sanitizeTimestamps(value);
+    if (list.length > 0) store[key] = list;
+  }
+  return store;
+}
+
+/** Serialize the store for persistence. */
+export function serializeTimestampStore(store: TimestampStore): string {
+  return JSON.stringify(store);
+}
+
+/** The saved timestamps for `key`, or an empty list when none are stored. */
+export function readStoredTimestamps(store: TimestampStore, key: string): Timestamp[] {
+  const list = store[key];
+  return Array.isArray(list) ? list : [];
+}
+
+/**
+ * Return a new store with `key` set to `stamps` (sorted + de-duplicated). An
+ * empty list removes the key entirely rather than persisting an empty array, so
+ * a video whose timestamps were all cleared doesn't linger in storage. The input
+ * store is not mutated, so each video's set stays independent.
+ */
+export function writeStoredTimestamps(
+  store: TimestampStore,
+  key: string,
+  stamps: Timestamp[],
+): TimestampStore {
+  const next: TimestampStore = { ...store };
+  const clean = mergeTimestamps([], stamps);
+  if (clean.length === 0) delete next[key];
+  else next[key] = clean;
+  return next;
+}
+
+// ---------------------------------------------------------------------------
 // Livestream (play-003)
 //
 // A "live" source is a file still being written on disk: bytes keep arriving and
