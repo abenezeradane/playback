@@ -50,10 +50,23 @@ import {
   canFastForwardLive,
   behindLive,
   liveProgressFraction,
+  DEFAULT_FPS,
+  snapFps,
+  formatSmpte,
+  formatFps,
+  lastFrameTime,
+  fractionToTime,
+  rulerTicks,
+  createShuttle,
+  shuttleStop,
+  shuttleForward,
+  shuttleReverse,
+  shuttleRate,
   type PlayerState,
   type Timestamp,
   type TimestampStore,
   type LiveWindow,
+  type Shuttle,
 } from "./player-core";
 
 const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi"];
@@ -124,6 +137,35 @@ const nowChapterTime = $<HTMLSpanElement>("now-chapter-time");
 const nowChapterLabel = $<HTMLSpanElement>("now-chapter-label");
 const pinChapterToggle = $<HTMLInputElement>("pin-chapter-toggle");
 
+// Timeline / cut view (play-004)
+const btnCut = $<HTMLButtonElement>("btn-cut");
+const cutSection = $<HTMLElement>("cut");
+const cutBack = $<HTMLButtonElement>("cut-back");
+const cutExit = $<HTMLButtonElement>("cut-exit");
+const cutKeys = $<HTMLButtonElement>("cut-keys");
+const cutFs = $<HTMLButtonElement>("cut-fs");
+const cutTitle = $<HTMLSpanElement>("cut-title");
+const cutMeta = $<HTMLSpanElement>("cut-meta");
+const cutTimeline = $<HTMLDivElement>("cut-timeline");
+const cutRuler = $<HTMLDivElement>("cut-ruler");
+const cutFilmstrip = $<HTMLCanvasElement>("cut-filmstrip");
+const cutWaveform = $<HTMLCanvasElement>("cut-waveform");
+const cutFuture = $<HTMLDivElement>("cut-future");
+const cutPlayhead = $<HTMLDivElement>("cut-playhead");
+const cutTcCur = $<HTMLSpanElement>("cut-tc-cur");
+const cutTcTot = $<HTMLSpanElement>("cut-tc-tot");
+const cutTcFps = $<HTMLSpanElement>("cut-tc-fps");
+const cutShuttleState = $<HTMLSpanElement>("cut-shuttle");
+const cutJumpStartBtn = $<HTMLButtonElement>("cut-jumpstart");
+const cutReverseBtn = $<HTMLButtonElement>("cut-reverse");
+const cutPlayBtn = $<HTMLButtonElement>("cut-play");
+const cutForwardBtn = $<HTMLButtonElement>("cut-forward");
+const cutJumpEndBtn = $<HTMLButtonElement>("cut-jumpend");
+const cutLoopBtn = $<HTMLButtonElement>("cut-loop");
+const cutRateBtn = $<HTMLButtonElement>("cut-rate");
+const cutMuteBtn = $<HTMLButtonElement>("cut-mute");
+const cutVolume = $<HTMLInputElement>("cut-volume");
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -145,6 +187,24 @@ let markerEls: HTMLElement[] = [];
 let listEls: HTMLElement[] = [];
 let activeTsIndex = -1;
 
+// Timeline / cut view (play-004) ----------------------------------------
+let cutMode = false;
+/** Clip frame rate, measured from playback (requestVideoFrameCallback) or default. */
+let detectedFps = DEFAULT_FPS;
+/** J/K/L shuttle transport state (pure model in player-core). */
+let shuttle: Shuttle = createShuttle();
+let shuttleRAF: number | undefined;
+let shuttleLast = 0;
+let loopOn = false;
+/** Cached audio peaks for the waveform (0..1), redrawn on enter/resize. */
+let waveformPeaks: number[] = [];
+/** Captured filmstrip thumbnails (160×90 offscreen canvases), composited on draw. */
+let filmFrames: (HTMLCanvasElement | null)[] = [];
+/** Bump to cancel a stale async filmstrip/waveform build when the file changes. */
+let filmstripToken = 0;
+let waveformToken = 0;
+let cutScrubbing = false;
+
 /** Pull the canonical values from the media element into our state object. */
 function syncFromVideo(): void {
   state = {
@@ -154,7 +214,10 @@ function syncFromVideo(): void {
     duration: Number.isFinite(video.duration) ? video.duration : 0,
     volume: video.volume,
     muted: video.muted,
-    rate: video.playbackRate,
+    // `rate` is the user's chosen speed (the rate chip) and is the single source
+    // of truth — NOT read back from the element, because the play-004 J/K/L
+    // shuttle temporarily drives video.playbackRate to its own speed ladder.
+    rate: state.rate,
   };
 }
 
@@ -207,6 +270,9 @@ function render(): void {
 
   // Active-chapter highlight (cheap; rebuilds nothing).
   updateActiveTimestamp();
+
+  // Timeline / cut view mirrors the same state (play-004).
+  if (cutMode) renderCut();
 }
 
 /** Render the scrubber, time, and LIVE chrome for a still-growing stream. */
@@ -676,6 +742,10 @@ function goHome(): void {
   video.pause();
   stopLive();
   stopGrowthWatch();
+  setCutMode(false);
+  clearCutDeck();
+  resetShuttle();
+  setLoop(false);
   setPanelOpen(false);
   setShortcutsOpen(false);
   video.removeAttribute("src");
@@ -1328,6 +1398,590 @@ function doJumpToLive(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Timeline / cut view (play-004)
+//
+// An editorial review surface layered over the player: the same <video> becomes
+// a bordered viewer, and a bottom "Timeline Deck" shows a timecode ruler, a
+// filmstrip of thumbnails, and an audio waveform with a scrub playhead. The
+// transport reports a frame-accurate SMPTE timecode and adds J/K/L shuttle,
+// jump-to-start/end, and a loop toggle. All decisions are pure (player-core);
+// here we drive the DOM + the real <video> (whose playbackRate can't go
+// negative, so reverse shuttle steps currentTime on a rAF loop).
+// ---------------------------------------------------------------------------
+const FILMSTRIP_CELLS = 12;
+const WAVEFORM_BARS = 240;
+const WAVEFORM_MAX_BYTES = 48 * 1024 * 1024; // decode real audio only below this
+
+/** Enter/leave the timeline view. No-op to enter when no video is loaded. */
+function setCutMode(on: boolean): void {
+  if (on && stage.hidden) return;
+  cutMode = on;
+  app.dataset.mode = on ? "cut" : "player";
+  cutSection.hidden = !on;
+  btnCut.setAttribute("aria-pressed", String(on));
+  if (on) {
+    setPanelOpen(false);
+    setShortcutsOpen(false);
+    // Build the filmstrip + waveform on first open (deferred from load).
+    ensureCutDeckBuilt();
+    // The canvases only have a size once visible — draw them now.
+    drawFilmstrip();
+    drawWaveform();
+    renderCut();
+    showControls();
+  } else {
+    resetShuttle();
+    showControls();
+  }
+}
+
+function toggleCutMode(): void {
+  setCutMode(!cutMode);
+}
+
+/** Path of the clip whose deck is (to be) built, and whether it is built yet. */
+let cutDeckPath: string | null = null;
+let cutDeckBuilt = false;
+
+/**
+ * Note the clip for the deck. The filmstrip + waveform builds are deferred to the
+ * first time the timeline view is opened (ensureCutDeckBuilt): the filmstrip
+ * captures frames from the main video, so deferring lets the main video settle
+ * (loaded + composited) before we seek it around to grab thumbnails.
+ */
+function prepareCutDeck(path: string): void {
+  cutDeckPath = path;
+  cutDeckBuilt = false;
+  cutTitle.textContent = basename(path);
+  cutMeta.textContent = "";
+  resetFpsDetection();
+  // The ruler is cheap (DOM ticks) and built from the loadedmetadata handler.
+  if (cutMode) ensureCutDeckBuilt();
+}
+
+/** Build the filmstrip + waveform once, on demand (first cut-view open). */
+function ensureCutDeckBuilt(): void {
+  if (cutDeckBuilt || !cutDeckPath) return;
+  cutDeckBuilt = true;
+  void buildCutMedia(cutDeckPath);
+}
+
+/**
+ * Build the deck media: the filmstrip (captured from the main video) and the
+ * waveform (the real audio, decoded from the file bytes; synthesized as a
+ * fallback for large/unreadable files so the deck always shows bars).
+ */
+async function buildCutMedia(path: string): Promise<void> {
+  buildFilmstripFromMain();
+  const token = ++waveformToken;
+  try {
+    const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
+    const size = status ? status.size : 0;
+    if (size > 0 && size <= WAVEFORM_MAX_BYTES) {
+      const bytes = await readWholeFile(path, size);
+      if (token !== waveformToken) return;
+      await decodeWaveform(bytes, token);
+      return;
+    }
+  } catch {
+    /* fall through to the synthesized waveform */
+  }
+  if (token !== waveformToken) return;
+  waveformPeaks = synthPeaks(path, WAVEFORM_BARS);
+  drawWaveform();
+}
+
+/** Clear the deck when returning home / before a new clip. */
+function clearCutDeck(): void {
+  filmstripToken++;
+  waveformToken++;
+  waveformPeaks = [];
+  filmFrames = [];
+  cutDeckPath = null;
+  cutDeckBuilt = false;
+  cutRuler.replaceChildren();
+  const fctx = cutFilmstrip.getContext("2d");
+  if (fctx) fctx.clearRect(0, 0, cutFilmstrip.width, cutFilmstrip.height);
+  const wctx = cutWaveform.getContext("2d");
+  if (wctx) wctx.clearRect(0, 0, cutWaveform.width, cutWaveform.height);
+  cutTitle.textContent = "";
+  cutMeta.textContent = "";
+}
+
+/** Footage meta line: resolution · fps (both read from the real clip). */
+function updateCutMeta(): void {
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+  const parts: string[] = [];
+  if (w && h) parts.push(`${w}×${h}`);
+  parts.push(formatFps(detectedFps));
+  cutMeta.textContent = parts.join("  ·  ");
+  cutTcFps.textContent = `· ${formatFps(detectedFps)}`;
+}
+
+// --- Frame-rate detection via requestVideoFrameCallback -------------------
+interface FrameMeta {
+  mediaTime: number;
+  presentedFrames: number;
+}
+type RVFC = (cb: (now: number, meta: FrameMeta) => void) => number;
+let fpsSamples: FrameMeta[] = [];
+
+function resetFpsDetection(): void {
+  detectedFps = DEFAULT_FPS;
+  fpsSamples = [];
+  updateCutMeta();
+  startFpsDetection();
+}
+
+/**
+ * Measure the clip fps from a few presented frames (mediaTime + presentedFrames
+ * deltas), snapped onto a broadcast-standard rate. HTML5 video exposes no fps in
+ * metadata, so this is the reliable read; it falls back to DEFAULT_FPS when the
+ * API is unavailable or the clip never plays.
+ */
+function startFpsDetection(): void {
+  const rvfc = (video as unknown as { requestVideoFrameCallback?: RVFC })
+    .requestVideoFrameCallback;
+  if (typeof rvfc !== "function") return;
+  const onFrame = (_now: number, meta: FrameMeta): void => {
+    fpsSamples.push({ mediaTime: meta.mediaTime, presentedFrames: meta.presentedFrames });
+    const first = fpsSamples[0];
+    const last = fpsSamples[fpsSamples.length - 1];
+    const dt = last.mediaTime - first.mediaTime;
+    const df = last.presentedFrames - first.presentedFrames;
+    if (dt > 0.4 && df >= 8) {
+      detectedFps = snapFps(df / dt);
+      updateCutMeta();
+      if (cutMode) renderCut();
+      return; // measured — stop sampling
+    }
+    if (fpsSamples.length < 300) rvfc.call(video, onFrame);
+  };
+  rvfc.call(video, onFrame);
+}
+
+// --- Filmstrip ------------------------------------------------------------
+/** Draw a source (video/canvas) covering the box [dx,dy,dw,dh] (center-crop). */
+function drawCover(
+  ctx: CanvasRenderingContext2D,
+  src: CanvasImageSource,
+  sw: number,
+  sh: number,
+  dx: number,
+  dy: number,
+  dw: number,
+  dh: number,
+): void {
+  if (!sw || !sh) return;
+  const scale = Math.max(dw / sw, dh / sh);
+  const w = sw * scale;
+  const h = sh * scale;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(dx, dy, dw, dh);
+  ctx.clip();
+  ctx.drawImage(src, dx + (dw - w) / 2, dy + (dh - h) / 2, w, h);
+  ctx.restore();
+}
+
+/**
+ * Composite the captured thumbnails onto the single filmstrip canvas, sized to
+ * its client box (the same proven pattern as the waveform — per-element canvases
+ * did not render in this WebView). Slots without a captured frame yet show a flat
+ * placeholder. Frame dividers separate the slots.
+ */
+function drawFilmstrip(): void {
+  const cv = cutFilmstrip;
+  const rect = cv.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width));
+  const h = Math.max(1, Math.round(rect.height));
+  if (w <= 1 || h <= 1) return; // not visible yet
+  if (cv.width !== w) cv.width = w;
+  if (cv.height !== h) cv.height = h;
+  const ctx = cv.getContext("2d");
+  if (!ctx) return;
+  const slotW = w / FILMSTRIP_CELLS;
+  for (let k = 0; k < FILMSTRIP_CELLS; k++) {
+    const x = Math.round(k * slotW);
+    const x2 = Math.round((k + 1) * slotW);
+    const frame = filmFrames[k];
+    if (frame) {
+      drawCover(ctx, frame, frame.width, frame.height, x, 0, x2 - x, h);
+    } else {
+      ctx.fillStyle = "#141517";
+      ctx.fillRect(x, 0, x2 - x, h);
+    }
+    // Frame divider.
+    if (k > 0) {
+      ctx.fillStyle = "rgba(7,8,10,0.6)";
+      ctx.fillRect(x, 0, 1, h);
+    }
+  }
+}
+
+/**
+ * Build the filmstrip — N evenly-spaced thumbnails spanning the clip — by seeking
+ * the MAIN <video> through the capture points and grabbing each presented frame.
+ *
+ * Why the main element and not an auxiliary one: WebView2/Chromium only reliably
+ * PAINTS (and thus lets drawImage read a real frame from) the visibly-composited
+ * video; a detached / off-screen / occluded generator <video> gets culled and
+ * drawImage captures black (confirmed: it ran with a valid 1280px source yet
+ * produced black). So we briefly scrub the on-screen viewer to grab frames into
+ * offscreen 160×90 canvases, then restore the playhead + play state. Each frame
+ * is grabbed on the next requestVideoFrameCallback (after the frame is actually
+ * presented), not on 'seeked' (which only signals the seek data is ready).
+ */
+function buildFilmstripFromMain(): void {
+  const token = ++filmstripToken;
+  filmFrames = new Array(FILMSTRIP_CELLS).fill(null);
+  drawFilmstrip();
+  const dur = video.duration;
+  if (!Number.isFinite(dur) || dur <= 0) return;
+
+  const rvfc = (video as unknown as { requestVideoFrameCallback?: (cb: () => void) => number })
+    .requestVideoFrameCallback;
+  const wasPaused = video.paused;
+  const savedTime = video.currentTime;
+  video.pause();
+
+  let k = 0;
+  let pending = false;
+  let safety: number | undefined;
+  const restore = (): void => {
+    if (token !== filmstripToken) return; // a newer build now owns the viewer
+    video.currentTime = savedTime;
+    if (!wasPaused) void video.play().catch(() => {});
+    render();
+  };
+  const grabAndNext = (): void => {
+    if (!pending) return;
+    pending = false;
+    window.clearTimeout(safety);
+    video.removeEventListener("seeked", onSeeked);
+    if (token !== filmstripToken) return; // aborted by a newer build / home
+    if (video.videoWidth > 0) {
+      const off = document.createElement("canvas");
+      off.width = 160;
+      off.height = 90;
+      const octx = off.getContext("2d");
+      if (octx) {
+        drawCover(octx, video, video.videoWidth, video.videoHeight, 0, 0, 160, 90);
+        filmFrames[k] = off;
+        drawFilmstrip();
+      }
+    }
+    k++;
+    if (k < FILMSTRIP_CELLS) seekNext();
+    else restore();
+  };
+  const onSeeked = (): void => {
+    // Grab on the next presented frame so drawImage reads a painted (non-black)
+    // frame rather than just seek-ready data.
+    if (typeof rvfc === "function") rvfc.call(video, grabAndNext);
+    else grabAndNext();
+  };
+  function seekNext(): void {
+    if (token !== filmstripToken) return;
+    pending = true;
+    video.addEventListener("seeked", onSeeked, { once: true });
+    window.clearTimeout(safety);
+    safety = window.setTimeout(grabAndNext, 1500); // don't hang if a frame never lands
+    video.currentTime = ((k + 0.5) / FILMSTRIP_CELLS) * dur;
+  }
+  seekNext();
+}
+
+// --- Waveform -------------------------------------------------------------
+/** Read the whole file as bytes (base64 chunks over the Rust command). */
+async function readWholeFile(path: string, size: number): Promise<Uint8Array> {
+  const parts: Uint8Array[] = [];
+  let off = 0;
+  while (off < size) {
+    const b64 = await tauriInvoke<string>("read_stream_chunk", {
+      path,
+      offset: off,
+      maxLen: Math.min(LIVE_CHUNK_BYTES, size - off),
+    });
+    const bytes = b64ToBytes(b64);
+    if (bytes.length === 0) break;
+    parts.push(bytes);
+    off += bytes.length;
+  }
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+/** Peak-amplitude downsample of an AudioBuffer into `bars` normalized values. */
+function downsamplePeaks(buf: AudioBuffer, bars: number): number[] {
+  const ch = buf.getChannelData(0);
+  const n = ch.length;
+  const per = Math.max(1, Math.floor(n / bars));
+  const peaks: number[] = [];
+  let max = 1e-4;
+  for (let i = 0; i < bars; i++) {
+    const start = i * per;
+    const end = Math.min(n, start + per);
+    let peak = 0;
+    for (let j = start; j < end; j++) {
+      const a = Math.abs(ch[j]);
+      if (a > peak) peak = a;
+    }
+    peaks.push(peak);
+    if (peak > max) max = peak;
+  }
+  return peaks.map((p) => p / max);
+}
+
+/** Deterministic fallback waveform (from the path) when audio can't be decoded. */
+function synthPeaks(seed: string, bars: number): number[] {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) h = (h ^ seed.charCodeAt(i)) * 16777619;
+  h >>>= 0;
+  const peaks: number[] = [];
+  for (let i = 0; i < bars; i++) {
+    h = (h * 1664525 + 1013904223) >>> 0;
+    const r = h / 0xffffffff;
+    const env = 0.4 + 0.45 * Math.abs(Math.sin((i / bars) * Math.PI * 3 + 1));
+    peaks.push(Math.min(1, (0.3 + r * 0.7) * env));
+  }
+  return peaks;
+}
+
+/**
+ * Decode the real audio track from already-read bytes into waveform peaks. If
+ * there's no audio / the decode fails, fall back to a deterministic synthesized
+ * waveform so the deck always shows bars. `token` guards against a stale build.
+ */
+async function decodeWaveform(bytes: Uint8Array, token: number): Promise<void> {
+  let peaks: number[] | null = null;
+  try {
+    const Ctx =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const audioCtx = new Ctx();
+    try {
+      const decoded = await audioCtx.decodeAudioData(bytes.buffer.slice(0) as ArrayBuffer);
+      if (token === waveformToken) peaks = downsamplePeaks(decoded, WAVEFORM_BARS);
+    } finally {
+      void audioCtx.close();
+    }
+  } catch {
+    peaks = null;
+  }
+  if (token !== waveformToken) return;
+  if (!peaks || peaks.every((p) => p === 0)) peaks = synthPeaks(cutDeckPath ?? "", WAVEFORM_BARS);
+  waveformPeaks = peaks;
+  drawWaveform();
+}
+
+/** Paint the cached waveform peaks onto the (display-sized) canvas. */
+function drawWaveform(): void {
+  const cv = cutWaveform;
+  const rect = cv.getBoundingClientRect();
+  const w = Math.max(1, Math.round(rect.width));
+  const h = Math.max(1, Math.round(rect.height));
+  if (w <= 1 || h <= 1) return; // not visible yet
+  if (cv.width !== w) cv.width = w;
+  if (cv.height !== h) cv.height = h;
+  const ctx = cv.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, w, h);
+  const peaks = waveformPeaks;
+  if (peaks.length === 0) return;
+  const mid = h / 2;
+  const barW = w / peaks.length;
+  ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+  for (let i = 0; i < peaks.length; i++) {
+    const bh = Math.max(1, peaks[i] * (h - 4));
+    ctx.fillRect(i * barW, mid - bh / 2, Math.max(1, barW - 1), bh);
+  }
+}
+
+// --- Ruler ----------------------------------------------------------------
+/** Lay out the timecode ruler (minor ticks + labelled major ticks). */
+function buildRuler(duration: number): void {
+  cutRuler.replaceChildren();
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  for (const tick of rulerTicks(duration, 8)) {
+    const left = `${markerFraction(tick.time, duration) * 100}%`;
+    const el = document.createElement("div");
+    el.className = `cut__tick ${tick.major ? "cut__tick--major" : "cut__tick--minor"}`;
+    el.style.left = left;
+    cutRuler.appendChild(el);
+    if (tick.major) {
+      const label = document.createElement("span");
+      label.className = "cut__tick-label";
+      label.style.left = left;
+      label.textContent = formatTime(tick.time);
+      cutRuler.appendChild(label);
+    }
+  }
+}
+
+// --- Render the deck against the current state ----------------------------
+function renderCut(): void {
+  const dur = state.duration;
+  const cur = state.currentTime;
+  cutTcCur.textContent = formatSmpte(cur, detectedFps);
+  cutTcTot.textContent = formatSmpte(dur, detectedFps);
+  const frac = dur > 0 ? clamp(cur / dur, 0, 1) : 0;
+  cutPlayhead.style.left = `${frac * 100}%`;
+  cutFuture.style.left = `${frac * 100}%`;
+
+  cutPlayBtn.dataset.playing = String(state.isPlaying);
+  cutRateBtn.textContent = `${state.rate}×`;
+  const audible = effectiveVolume(state);
+  cutVolume.value = String(Math.round(audible * 100));
+  cutMuteBtn.dataset.muted = String(audible === 0);
+  cutLoopBtn.setAttribute("aria-pressed", String(loopOn));
+
+  // Shuttle status: light up the active direction, show the rate badge past 1×.
+  const rate = shuttleRate(shuttle);
+  cutReverseBtn.setAttribute("aria-pressed", String(shuttle.direction === -1));
+  cutForwardBtn.setAttribute("aria-pressed", String(shuttle.direction === 1));
+  if (rate === 0 || rate === 1) {
+    cutShuttleState.hidden = true;
+  } else {
+    cutShuttleState.hidden = false;
+    cutShuttleState.textContent = `${rate < 0 ? "◀" : "▶"} ${Math.abs(rate)}×`;
+  }
+}
+
+// --- Shuttle transport (J/K/L) --------------------------------------------
+function stopShuttleLoop(): void {
+  if (shuttleRAF !== undefined) {
+    cancelAnimationFrame(shuttleRAF);
+    shuttleRAF = undefined;
+  }
+}
+
+/** Return the shuttle to stop and restore the user's playback speed. */
+function resetShuttle(): void {
+  shuttle = createShuttle();
+  stopShuttleLoop();
+  video.playbackRate = state.rate;
+}
+
+/** One reverse-shuttle tick: HTML5 can't play backwards, so step currentTime. */
+function reverseStep(now: number): void {
+  const rate = shuttleRate(shuttle);
+  if (rate >= 0) {
+    stopShuttleLoop();
+    return;
+  }
+  const dt = Math.min(0.25, (now - shuttleLast) / 1000); // cap a long frame gap
+  shuttleLast = now;
+  const next = video.currentTime + rate * dt; // rate is negative
+  if (next <= 0) {
+    video.currentTime = 0;
+    shuttle = shuttleStop();
+    video.playbackRate = state.rate;
+    syncFromVideo();
+    render();
+    return;
+  }
+  video.currentTime = next;
+  syncFromVideo();
+  render();
+  shuttleRAF = requestAnimationFrame(reverseStep);
+}
+
+/** Apply the current shuttle state to the real <video>. */
+function applyShuttle(): void {
+  stopShuttleLoop();
+  const rate = shuttleRate(shuttle);
+  if (rate === 0) {
+    video.playbackRate = state.rate;
+    video.pause();
+  } else if (rate > 0) {
+    video.playbackRate = Math.min(rate, 16); // Chromium caps playbackRate at 16
+    void video.play().catch(() => {});
+  } else {
+    video.playbackRate = state.rate;
+    video.pause();
+    shuttleLast = performance.now();
+    shuttleRAF = requestAnimationFrame(reverseStep);
+  }
+  syncFromVideo();
+  render();
+  showControls();
+}
+
+/** L — play forward / step the forward speed up. */
+function doShuttleForward(): void {
+  shuttle = shuttleForward(shuttle);
+  applyShuttle();
+}
+
+/** J — play in reverse / step the reverse speed up. */
+function doShuttleReverse(): void {
+  shuttle = shuttleReverse(shuttle);
+  applyShuttle();
+}
+
+/** K — stop the shuttle (and pause). */
+function doShuttleStop(): void {
+  shuttle = shuttleStop();
+  applyShuttle();
+}
+
+/** The big center transport button: plain play/pause at the user's speed. */
+function cutPlayPause(): void {
+  resetShuttle();
+  syncFromVideo();
+  if (video.paused || video.ended) void video.play().catch(() => {});
+  else video.pause();
+  syncFromVideo();
+  render();
+  showControls();
+}
+
+/** Move the playhead to the first / last frame (Home / End, or the buttons). */
+function doJumpStart(): void {
+  resetShuttle();
+  doSeekTo(0);
+  if (cutMode) renderCut();
+  showControls();
+}
+
+function doJumpEnd(): void {
+  resetShuttle();
+  syncFromVideo();
+  doSeekTo(lastFrameTime(state.duration, detectedFps));
+  if (cutMode) renderCut();
+  showControls();
+}
+
+/** Loop toggle: repeat playback at the clip's end. */
+function setLoop(on: boolean): void {
+  loopOn = on;
+  video.loop = on;
+  cutSection.dataset.loop = String(on);
+  cutLoopBtn.setAttribute("aria-pressed", String(on));
+}
+
+function toggleLoop(): void {
+  setLoop(!loopOn);
+}
+
+/** Scrub the timeline from a pointer position (shared by click + drag). */
+function cutSeekFromPointer(e: PointerEvent): void {
+  const rect = cutTimeline.getBoundingClientRect();
+  if (rect.width <= 0) return;
+  const frac = clamp((e.clientX - rect.left) / rect.width, 0, 1);
+  doSeekTo(fractionToTime(frac, state.duration));
+  renderCut();
+}
+
+// ---------------------------------------------------------------------------
 // Loading a file
 // ---------------------------------------------------------------------------
 function basename(path: string): string {
@@ -1488,7 +2142,11 @@ async function loadFromPath(path: string): Promise<void> {
     // Otherwise play normally, but watch in the background: if the file turns out
     // to be growing (a recording in progress), auto-upgrade to live playback.
     const { convertFileSrc } = await import("@tauri-apps/api/core");
-    loadSrc(convertFileSrc(path), basename(path), parentDir(path));
+    const src = convertFileSrc(path);
+    loadSrc(src, basename(path), parentDir(path));
+    // Note the clip for the timeline-view deck (play-004); the filmstrip + waveform
+    // are built lazily on first cut-view open.
+    prepareCutDeck(path);
     if (status && !status.complete) startGrowthWatch(path, status.size);
   } catch (err) {
     showError(`Could not open the file: ${String(err)}`);
@@ -1509,6 +2167,9 @@ function loadSrc(src: string, title: string, subtitle = ""): void {
   stage.hidden = false;
   state = createInitialState();
   applyAudioToVideo();
+  // Reset the cut-view transport for the new clip (play-004).
+  resetShuttle();
+  setLoop(false);
   video.load();
   void video.play().catch(() => {
     /* autoplay may be blocked; user can press play */
@@ -1619,6 +2280,10 @@ function wireControls(): void {
     if ((e.target as HTMLElement).dataset.close) setShortcutsOpen(false);
   });
 
+  // Timeline / cut view (play-004)
+  btnCut.addEventListener("click", toggleCutMode);
+  wireCut();
+
   // Timestamps panel (play-002)
   btnTimestamps.addEventListener("click", togglePanel);
   btnTimestampsClose.addEventListener("click", () => setPanelOpen(false));
@@ -1657,7 +2322,10 @@ function wireControls(): void {
   // Leaving the field (clicking elsewhere) dismisses it so it can't trap hotkeys.
   tsAddInput.addEventListener("blur", closeAddInput);
 
-  video.addEventListener("click", doTogglePlay);
+  video.addEventListener("click", () => {
+    if (cutMode) cutPlayPause();
+    else doTogglePlay();
+  });
 
   // Scrubber: live-preview while dragging, commit on release. In live mode the
   // slider maps onto the [0, available] DVR window instead of a fixed duration.
@@ -1694,6 +2362,10 @@ function wireControls(): void {
     if (currentPath) setRecentDuration(currentPath, video.duration);
     // Duration is now known — reposition markers against the real timeline.
     renderTimestamps();
+    // Cut view (play-004): build the ruler now the duration + dimensions exist.
+    buildRuler(video.duration);
+    updateCutMeta();
+    if (cutMode) renderCut();
   });
   video.addEventListener("timeupdate", () => {
     syncFromVideo();
@@ -1725,6 +2397,60 @@ function wireControls(): void {
   });
 }
 
+/** Wire the timeline / cut view controls (play-004). */
+function wireCut(): void {
+  cutBack.addEventListener("click", goHome);
+  cutExit.addEventListener("click", () => setCutMode(false));
+  cutKeys.addEventListener("click", toggleShortcuts);
+  cutFs.addEventListener("click", () => void doToggleFullscreen());
+
+  // Transport
+  cutJumpStartBtn.addEventListener("click", doJumpStart);
+  cutReverseBtn.addEventListener("click", doShuttleReverse);
+  cutPlayBtn.addEventListener("click", cutPlayPause);
+  cutForwardBtn.addEventListener("click", doShuttleForward);
+  cutJumpEndBtn.addEventListener("click", doJumpEnd);
+
+  // Options
+  cutLoopBtn.addEventListener("click", toggleLoop);
+  cutRateBtn.addEventListener("click", doCycleRate);
+  cutMuteBtn.addEventListener("click", doToggleMute);
+  cutVolume.addEventListener("input", () => doSetVolume(Number(cutVolume.value)));
+
+  // Timeline scrub: click or drag anywhere on the deck.
+  cutTimeline.addEventListener("pointerdown", (e) => {
+    cutScrubbing = true;
+    resetShuttle();
+    try {
+      cutTimeline.setPointerCapture(e.pointerId);
+    } catch {
+      /* capture unsupported — drag still works via the move listener */
+    }
+    cutSeekFromPointer(e);
+  });
+  cutTimeline.addEventListener("pointermove", (e) => {
+    if (cutScrubbing) cutSeekFromPointer(e);
+  });
+  const endScrub = (e: PointerEvent): void => {
+    cutScrubbing = false;
+    try {
+      cutTimeline.releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+  cutTimeline.addEventListener("pointerup", endScrub);
+  cutTimeline.addEventListener("pointercancel", endScrub);
+
+  // The deck canvases are display-sized — repaint them when the window resizes.
+  window.addEventListener("resize", () => {
+    if (cutMode) {
+      drawFilmstrip();
+      drawWaveform();
+    }
+  });
+}
+
 function wireKeyboard(): void {
   window.addEventListener("keydown", (e) => {
     // Don't hijack typing in inputs.
@@ -1734,6 +2460,29 @@ function wireKeyboard(): void {
       // input owns its Enter/Escape); never trigger player shortcuts here.
       return;
     }
+
+    // Timeline / cut view (play-004): J/K/L drive the shuttle transport,
+    // overriding their normal-mode meanings (k = play/pause, l = jump-to-live)
+    // only while the timeline view is open. Skip when a modifier is held.
+    if (cutMode && !stage.hidden && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const k = e.key.toLowerCase();
+      if (k === "j") {
+        e.preventDefault();
+        doShuttleReverse();
+        return;
+      }
+      if (k === "k") {
+        e.preventDefault();
+        doShuttleStop();
+        return;
+      }
+      if (k === "l") {
+        e.preventDefault();
+        doShuttleForward();
+        return;
+      }
+    }
+
     switch (e.key) {
       case " ":
       case "k":
@@ -1783,11 +2532,31 @@ function wireKeyboard(): void {
       case "L":
         if (!stage.hidden) doJumpToLive();
         break;
+      case "Home":
+        if (!stage.hidden) {
+          e.preventDefault();
+          doJumpStart();
+        }
+        break;
+      case "End":
+        if (!stage.hidden) {
+          e.preventDefault();
+          doJumpEnd();
+        }
+        break;
       case "t":
       case "T":
         if (!stage.hidden) {
           e.preventDefault();
           togglePanel();
+        }
+        break;
+      case "c":
+      case "C":
+        // Toggle the timeline / cut view (play-004).
+        if (!stage.hidden) {
+          e.preventDefault();
+          toggleCutMode();
         }
         break;
       case "?":

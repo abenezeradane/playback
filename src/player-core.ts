@@ -543,3 +543,208 @@ export function liveProgressFraction(currentTime: number, w: LiveWindow): number
   if (w.available <= 0) return 0;
   return clamp(currentTime / w.available, 0, 1);
 }
+
+// ---------------------------------------------------------------------------
+// Frame-accurate timeline / cut view (play-004)
+//
+// An editorial "review" surface layered on the normal player: a SMPTE timecode,
+// a timeline deck (ruler + filmstrip + waveform + playhead), J/K/L shuttle
+// transport, and jump-to-start/end + loop. Everything that decides a number — a
+// frame index, a SMPTE string, the shuttle rate ladder, the ruler tick layout —
+// lives here so it is pure and unit-testable; main.ts maps it onto the DOM and
+// the real <video> (whose playbackRate can't go negative, so reverse shuttle is
+// a timer-driven currentTime stepper there).
+// ---------------------------------------------------------------------------
+
+/** Frame rate assumed when a clip's real fps can't be measured from metadata. */
+export const DEFAULT_FPS = 30;
+
+/** Broadcast-standard frame rates we snap a measured fps onto. */
+export const STANDARD_FPS = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60] as const;
+
+/**
+ * Snap a noisy measured fps (e.g. from requestVideoFrameCallback) onto the
+ * closest broadcast-standard rate when it is within tolerance, else round to the
+ * nearest whole frame rate. A non-finite or non-positive input falls back to the
+ * default. Keeps "29.97-ish" readings from rendering as 29.9704523.
+ */
+export function snapFps(fps: number): number {
+  if (!Number.isFinite(fps) || fps <= 0) return DEFAULT_FPS;
+  let best: number = STANDARD_FPS[0];
+  let bestDelta = Infinity;
+  for (const f of STANDARD_FPS) {
+    const d = Math.abs(f - fps);
+    if (d < bestDelta) {
+      bestDelta = d;
+      best = f;
+    }
+  }
+  return bestDelta <= 0.6 ? best : Math.round(fps);
+}
+
+/**
+ * The integer SMPTE timebase for a frame rate: fractional rates use their
+ * nearest whole-number count of frames per second (29.97 -> 30, 23.976 -> 24),
+ * which is how non-drop-frame SMPTE counts. Always at least 1.
+ */
+function timebase(fps: number): number {
+  const f = !Number.isFinite(fps) || fps <= 0 ? DEFAULT_FPS : fps;
+  return Math.max(1, Math.round(f));
+}
+
+/** Frame index at `time` seconds for a clip at `fps` (floored; never negative). */
+export function timeToFrame(time: number, fps: number): number {
+  if (!Number.isFinite(time) || time < 0) return 0;
+  // A tiny epsilon absorbs float error so e.g. exactly 1s at 30fps is frame 30.
+  return Math.floor(time * timebase(fps) + 1e-6);
+}
+
+/** Start time (seconds) of frame index `frame` at `fps` (never negative). */
+export function frameToTime(frame: number, fps: number): number {
+  const fr = Number.isFinite(frame) ? Math.max(0, Math.floor(frame)) : 0;
+  return fr / timebase(fps);
+}
+
+/**
+ * Format `time` seconds as a frame-accurate non-drop-frame SMPTE timecode
+ * `HH:MM:SS:FF` at `fps`. Negative/non-finite times render as `00:00:00:00`.
+ */
+export function formatSmpte(time: number, fps: number): string {
+  const tb = timebase(fps);
+  const totalFrames = timeToFrame(time, fps);
+  const ff = totalFrames % tb;
+  const totalSeconds = Math.floor(totalFrames / tb);
+  const s = totalSeconds % 60;
+  const m = Math.floor(totalSeconds / 60) % 60;
+  const h = Math.floor(totalSeconds / 3600);
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  return `${p2(h)}:${p2(m)}:${p2(s)}:${p2(ff)}`;
+}
+
+/** Human fps label like "30 fps" or "23.976 fps" (snapped, trailing zeros trimmed). */
+export function formatFps(fps: number): string {
+  const f = snapFps(fps);
+  const rounded = Math.round(f * 1000) / 1000;
+  const text = Number.isInteger(rounded)
+    ? String(rounded)
+    : rounded.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  return `${text} fps`;
+}
+
+/**
+ * Time (seconds) of the clip's last whole frame — where jump-to-end lands the
+ * playhead so it sits on the final frame rather than past the end. Clamped into
+ * the clip. A non-positive/non-finite duration yields 0.
+ */
+export function lastFrameTime(duration: number, fps: number): number {
+  if (!Number.isFinite(duration) || duration <= 0) return 0;
+  const tb = timebase(fps);
+  const totalFrames = Math.max(0, Math.floor(duration * tb + 1e-6));
+  const lastIndex = Math.max(0, totalFrames - 1);
+  return Math.min(duration, lastIndex / tb);
+}
+
+/** Absolute time (seconds) for a 0..1 timeline fraction — the ruler/filmstrip/
+ * waveform/playhead all share this mapping (and scrubbing inverts it). */
+export function fractionToTime(fraction: number, duration: number): number {
+  if (!Number.isFinite(duration) || duration <= 0) return 0;
+  return clamp(fraction, 0, 1) * duration;
+}
+
+// --- J/K/L shuttle transport ---------------------------------------------
+// K stops; L plays forward and steps the forward speed up on each repeat; J
+// plays in reverse and steps the reverse speed up on each repeat. The shuttle is
+// a (direction, speedIndex) pair; the signed playback rate is derived from it.
+
+/** Shuttle speed magnitudes stepped through by repeated J / L presses. */
+export const SHUTTLE_SPEEDS = [1, 2, 4, 8, 16] as const;
+
+export interface Shuttle {
+  /** -1 reverse, 0 stopped, 1 forward. */
+  direction: -1 | 0 | 1;
+  /** Index into SHUTTLE_SPEEDS (only meaningful while direction !== 0). */
+  speedIndex: number;
+}
+
+/** A stopped shuttle (the initial state, and what K returns). */
+export function createShuttle(): Shuttle {
+  return { direction: 0, speedIndex: 0 };
+}
+
+/** K — stop the shuttle. */
+export function shuttleStop(): Shuttle {
+  return createShuttle();
+}
+
+/**
+ * L — play forward. Already forward: step the speed up one rung (clamped at the
+ * fastest). From stopped or reverse: (re)start forward at the slowest speed.
+ */
+export function shuttleForward(s: Shuttle): Shuttle {
+  if (s.direction === 1) {
+    return { direction: 1, speedIndex: Math.min(s.speedIndex + 1, SHUTTLE_SPEEDS.length - 1) };
+  }
+  return { direction: 1, speedIndex: 0 };
+}
+
+/**
+ * J — play in reverse. Already reverse: step the reverse speed up one rung
+ * (clamped at the fastest). From stopped or forward: (re)start reverse slowest.
+ */
+export function shuttleReverse(s: Shuttle): Shuttle {
+  if (s.direction === -1) {
+    return { direction: -1, speedIndex: Math.min(s.speedIndex + 1, SHUTTLE_SPEEDS.length - 1) };
+  }
+  return { direction: -1, speedIndex: 0 };
+}
+
+/** Signed playback rate from the shuttle: 0 when stopped, else ±speed. */
+export function shuttleRate(s: Shuttle): number {
+  if (s.direction === 0) return 0;
+  const idx = clamp(s.speedIndex, 0, SHUTTLE_SPEEDS.length - 1);
+  return s.direction * SHUTTLE_SPEEDS[idx];
+}
+
+// --- Timeline ruler -------------------------------------------------------
+
+/** A tick on the timeline ruler; major ticks carry a time label. */
+export interface RulerTick {
+  /** Position in seconds from the start. */
+  time: number;
+  /** Whether this is a labelled major tick (vs. an unlabelled minor tick). */
+  major: boolean;
+}
+
+/** "Nice" round seconds-per-major-tick steps for the ruler. */
+const NICE_RULER_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600];
+
+/**
+ * Pick a round interval (seconds) for the ruler's major ticks so that roughly
+ * `approxCount` of them span the clip. Returns the smallest NICE step at or above
+ * the raw spacing, capped at the largest step.
+ */
+export function niceTickInterval(duration: number, approxCount: number): number {
+  if (!Number.isFinite(duration) || duration <= 0) return 1;
+  const raw = duration / Math.max(1, approxCount);
+  for (const step of NICE_RULER_STEPS) {
+    if (step >= raw) return step;
+  }
+  return NICE_RULER_STEPS[NICE_RULER_STEPS.length - 1];
+}
+
+/**
+ * Lay out the timeline ruler: minor ticks every (major / 5) seconds with every
+ * fifth one flagged `major` (labelled). Spans [0, duration]. Returns [] for a
+ * non-positive duration.
+ */
+export function rulerTicks(duration: number, approxMajorCount = 8): RulerTick[] {
+  if (!Number.isFinite(duration) || duration <= 0) return [];
+  const major = niceTickInterval(duration, approxMajorCount);
+  const minor = major / 5;
+  const count = Math.floor(duration / minor + 1e-6);
+  const ticks: RulerTick[] = [];
+  for (let i = 0; i <= count; i++) {
+    ticks.push({ time: i * minor, major: i % 5 === 0 });
+  }
+  return ticks;
+}

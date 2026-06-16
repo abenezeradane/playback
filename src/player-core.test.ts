@@ -43,10 +43,27 @@ import {
   canFastForwardLive,
   behindLive,
   liveProgressFraction,
+  snapFps,
+  timeToFrame,
+  frameToTime,
+  formatSmpte,
+  formatFps,
+  lastFrameTime,
+  fractionToTime,
+  createShuttle,
+  shuttleStop,
+  shuttleForward,
+  shuttleReverse,
+  shuttleRate,
+  niceTickInterval,
+  rulerTicks,
+  DEFAULT_FPS,
+  SHUTTLE_SPEEDS,
   PLAYBACK_RATES,
   SKIP_SECONDS,
   LIVE_DELAY_SECONDS,
   type PlayerState,
+  type Shuttle,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -495,5 +512,156 @@ describe("livestream — live window", () => {
     expect(liveProgressFraction(0, w)).toBe(0);
     expect(liveProgressFraction(80, w)).toBe(1); // clamped
     expect(liveProgressFraction(10, createLiveWindow(0))).toBe(0); // nothing written yet
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Frame-accurate timeline / cut view (play-004)
+// ---------------------------------------------------------------------------
+describe("frame-accurate timecode — fps + SMPTE (play-004)", () => {
+  it("snapFps locks a noisy reading onto the nearest broadcast rate", () => {
+    expect(snapFps(29.9704)).toBe(29.97);
+    expect(snapFps(23.976023)).toBe(23.976);
+    expect(snapFps(30.0001)).toBe(30);
+    expect(snapFps(59.94)).toBe(59.94);
+  });
+  it("snapFps rounds an off-standard rate to a whole number, and guards bad input", () => {
+    expect(snapFps(12)).toBe(12); // far from any standard -> rounded whole number
+    expect(snapFps(0)).toBe(DEFAULT_FPS);
+    expect(snapFps(-5)).toBe(DEFAULT_FPS);
+    expect(snapFps(NaN)).toBe(DEFAULT_FPS);
+  });
+
+  it("timeToFrame floors to the frame index at the clip fps", () => {
+    expect(timeToFrame(0, 30)).toBe(0);
+    expect(timeToFrame(1, 30)).toBe(30); // exactly 1s = frame 30 (epsilon absorbs float error)
+    expect(timeToFrame(1.0334, 30)).toBe(31); // 31.0 -> 31
+    expect(timeToFrame(-2, 30)).toBe(0); // never negative
+    expect(timeToFrame(NaN, 30)).toBe(0);
+  });
+  it("frameToTime is the inverse (whole frames, never negative)", () => {
+    expect(frameToTime(30, 30)).toBeCloseTo(1);
+    expect(frameToTime(0, 24)).toBe(0);
+    expect(frameToTime(-4, 30)).toBe(0);
+    expect(frameToTime(48, 24)).toBeCloseTo(2);
+  });
+
+  it("formatSmpte renders HH:MM:SS:FF, counting frames within the second", () => {
+    expect(formatSmpte(0, 30)).toBe("00:00:00:00");
+    expect(formatSmpte(1, 30)).toBe("00:00:01:00");
+    expect(formatSmpte(1.5, 30)).toBe("00:00:01:15"); // half a second at 30fps = frame 15
+    expect(formatSmpte(61, 24)).toBe("00:01:01:00");
+    expect(formatSmpte(3661.5, 30)).toBe("01:01:01:15");
+  });
+  it("formatSmpte uses a whole-number timebase for fractional rates (29.97 -> 30)", () => {
+    // 29.97 counts 30 frames per labelled second (non-drop-frame).
+    expect(formatSmpte(1, 29.97)).toBe("00:00:01:00");
+    expect(formatSmpte(0.5, 29.97)).toBe("00:00:00:15"); // floor(0.5 * 30) = frame 15
+  });
+  it("formatSmpte guards negative / non-finite times", () => {
+    expect(formatSmpte(-3, 30)).toBe("00:00:00:00");
+    expect(formatSmpte(NaN, 24)).toBe("00:00:00:00");
+  });
+
+  it("formatFps renders a clean label", () => {
+    expect(formatFps(30)).toBe("30 fps");
+    expect(formatFps(24)).toBe("24 fps");
+    expect(formatFps(29.9704)).toBe("29.97 fps");
+    expect(formatFps(23.976023)).toBe("23.976 fps");
+  });
+
+  it("lastFrameTime lands on the clip's final whole frame, inside the clip", () => {
+    // 10s at 30fps = 300 frames (0..299); last frame index 299 -> 299/30 s.
+    expect(lastFrameTime(10, 30)).toBeCloseTo(299 / 30);
+    expect(lastFrameTime(10, 30)).toBeLessThan(10);
+    expect(lastFrameTime(0, 30)).toBe(0);
+    expect(lastFrameTime(-5, 30)).toBe(0);
+  });
+
+  it("fractionToTime maps a 0..1 timeline position to seconds (clamped)", () => {
+    expect(fractionToTime(0.5, 200)).toBe(100);
+    expect(fractionToTime(0, 200)).toBe(0);
+    expect(fractionToTime(1.4, 200)).toBe(200); // clamped
+    expect(fractionToTime(-1, 200)).toBe(0);
+    expect(fractionToTime(0.5, 0)).toBe(0); // unknown duration
+  });
+});
+
+describe("J/K/L shuttle transport (play-004)", () => {
+  it("starts stopped (rate 0)", () => {
+    const s = createShuttle();
+    expect(s.direction).toBe(0);
+    expect(shuttleRate(s)).toBe(0);
+  });
+
+  it("L plays forward at 1x, then steps the forward speed up the ladder", () => {
+    let s = shuttleForward(createShuttle());
+    expect(shuttleRate(s)).toBe(1);
+    s = shuttleForward(s);
+    expect(shuttleRate(s)).toBe(2);
+    s = shuttleForward(s);
+    expect(shuttleRate(s)).toBe(4);
+  });
+
+  it("forward speed clamps at the fastest rung (no overrun)", () => {
+    let s: Shuttle = { direction: 1, speedIndex: SHUTTLE_SPEEDS.length - 1 };
+    const max = SHUTTLE_SPEEDS[SHUTTLE_SPEEDS.length - 1];
+    expect(shuttleRate(s)).toBe(max);
+    s = shuttleForward(s);
+    expect(shuttleRate(s)).toBe(max); // still max
+  });
+
+  it("J plays in reverse at -1x, then steps the reverse speed up", () => {
+    let s = shuttleReverse(createShuttle());
+    expect(shuttleRate(s)).toBe(-1);
+    s = shuttleReverse(s);
+    expect(shuttleRate(s)).toBe(-2);
+    s = shuttleReverse(s);
+    expect(shuttleRate(s)).toBe(-4);
+  });
+
+  it("flipping direction restarts the new direction at the slowest speed", () => {
+    let s = shuttleForward(shuttleForward(shuttleForward(createShuttle()))); // forward 4x
+    expect(shuttleRate(s)).toBe(4);
+    s = shuttleReverse(s); // J flips to reverse, slowest
+    expect(shuttleRate(s)).toBe(-1);
+    s = shuttleForward(s); // L flips back to forward, slowest
+    expect(shuttleRate(s)).toBe(1);
+  });
+
+  it("K stops from any state (rate 0)", () => {
+    const fast = shuttleForward(shuttleForward(createShuttle()));
+    expect(shuttleRate(shuttleStop())).toBe(0);
+    expect(shuttleStop().direction).toBe(0);
+    // stop is independent of the prior state
+    expect(shuttleRate(shuttleStop())).toBe(0);
+    expect(shuttleRate(fast)).toBe(2);
+  });
+});
+
+describe("timeline ruler ticks (play-004)", () => {
+  it("niceTickInterval picks a round seconds-per-major spacing", () => {
+    expect(niceTickInterval(30, 6)).toBe(5); // 30/6 = 5 -> 5
+    expect(niceTickInterval(100, 10)).toBe(10); // 10 -> 10
+    expect(niceTickInterval(7, 8)).toBe(1); // raw < 1 -> smallest step
+    expect(niceTickInterval(0, 8)).toBe(1);
+  });
+
+  it("rulerTicks spans [0,duration] with every 5th tick flagged major", () => {
+    const ticks = rulerTicks(30, 6); // major every 5s, minor every 1s
+    expect(ticks[0]).toEqual({ time: 0, major: true });
+    expect(ticks.find((t) => t.major && t.time === 5)).toBeTruthy();
+    expect(ticks.find((t) => !t.major && t.time === 3)).toBeTruthy();
+    // last tick is within the clip
+    expect(ticks[ticks.length - 1].time).toBeLessThanOrEqual(30 + 1e-6);
+    // majors are every 5 minor steps
+    const majors = ticks.filter((t) => t.major).map((t) => t.time);
+    expect(majors).toEqual([0, 5, 10, 15, 20, 25, 30]);
+  });
+
+  it("rulerTicks returns [] for a non-positive duration", () => {
+    expect(rulerTicks(0)).toEqual([]);
+    expect(rulerTicks(-10)).toEqual([]);
+    expect(rulerTicks(NaN)).toEqual([]);
   });
 });
