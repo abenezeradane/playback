@@ -24,6 +24,7 @@ import {
   parseTimestampLine,
   parseTimestamps,
   mergeTimestamps,
+  clearTimestamps,
   markerFraction,
   previousTimestamp,
   nextTimestamp,
@@ -286,6 +287,11 @@ describe("timestamps — parsing", () => {
       { time: 12, title: "Mid" },
       { time: 20, title: "Second" },
     ]);
+  });
+  it("clearTimestamps returns an empty collection (bulk Clear all, play-008)", () => {
+    expect(clearTimestamps()).toEqual([]);
+    // Independent fresh array each call — never an aliased shared reference.
+    expect(clearTimestamps()).not.toBe(clearTimestamps());
   });
 });
 

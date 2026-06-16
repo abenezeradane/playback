@@ -233,7 +233,13 @@
             <span class="ts-setting__switch" aria-hidden="true"></span>
             <span class="ts-setting__text">Always show current chapter</span>
           </label>
-          <p class="ts-panel__label">JUMP TO CHAPTER</p>
+          <div class="ts-panel__list-head">
+            <p class="ts-panel__label">JUMP TO CHAPTER</p>
+            <button id="btn-clear-timestamps" class="ts-panel__clear" type="button" hidden>
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+              Clear all
+            </button>
+          </div>
           <ul id="timestamps-list" class="ts-list" aria-label="Timestamps"></ul>
         </aside>
       </main>

@@ -31,6 +31,7 @@ import {
   effectiveVolume,
   parseTimestamps,
   mergeTimestamps,
+  clearTimestamps,
   markerFraction,
   previousTimestamp,
   nextTimestamp,
@@ -114,6 +115,7 @@ const tsAddInput = $<HTMLInputElement>("timestamp-input");
 const tsAddHint = $<HTMLParagraphElement>("timestamp-hint");
 const tsList = $<HTMLUListElement>("timestamps-list");
 const tsCount = $<HTMLSpanElement>("timestamps-count");
+const btnClearTimestamps = $<HTMLButtonElement>("btn-clear-timestamps");
 const markerFlash = $<HTMLDivElement>("marker-flash");
 const markerFlashText = $<HTMLSpanElement>("marker-flash-text");
 const nowChapter = $<HTMLDivElement>("now-chapter");
@@ -398,6 +400,19 @@ function removeTimestamp(index: number): void {
   persistTimestamps();
 }
 
+/**
+ * Remove every timestamp at once (the bulk counterpart to per-row removal),
+ * re-render, and persist — which empties the saved set for the current video
+ * (writeStoredTimestamps drops the key on an empty list) so they don't reappear
+ * on the next open. A no-op when there's nothing to clear.
+ */
+function clearAllTimestamps(): void {
+  if (timestamps.length === 0) return;
+  timestamps = clearTimestamps();
+  renderTimestamps();
+  persistTimestamps();
+}
+
 // --- Per-video persistence (play-007) ---
 // Saved timestamps survive close+reopen and app restarts, scoped per video by a
 // stable key. The whole store lives under one localStorage key; pure (de)serialize
@@ -464,6 +479,9 @@ function renderTimestamps(): void {
 
   tsCount.textContent =
     timestamps.length === 0 ? "No timestamps yet." : String(timestamps.length);
+  // "Clear all" is only meaningful when there's something to clear (mirror the
+  // home screen's recents Clear button, which hides on the empty state).
+  btnClearTimestamps.hidden = timestamps.length === 0;
 
   timestamps.forEach((ts, index) => {
     // Scrubber marker (a clickable tick on top of the bar).
@@ -1575,6 +1593,8 @@ function wireControls(): void {
   // Timestamps panel (play-002)
   btnTimestamps.addEventListener("click", togglePanel);
   btnTimestampsClose.addEventListener("click", () => setPanelOpen(false));
+  // "Clear all" (play-008): bulk-remove every chapter on the current video.
+  btnClearTimestamps.addEventListener("click", clearAllTimestamps);
 
   // "Always show current chapter" setting: pin the pill to the bottom-left.
   // Blur after toggling so Space/hotkeys aren't swallowed by the focused input.

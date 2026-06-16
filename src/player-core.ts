@@ -274,6 +274,15 @@ export function mergeTimestamps(existing: Timestamp[], additions: Timestamp[]): 
   return dedupeByTime(all);
 }
 
+/**
+ * Clear every timestamp at once — the bulk counterpart to per-row removal. A
+ * pure helper (returns a fresh empty collection rather than mutating in place)
+ * so the "Clear all" control can be wired from the UI and unit-tested DOM-free.
+ */
+export function clearTimestamps(): Timestamp[] {
+  return [];
+}
+
 /** Marker position as a 0..1 fraction of duration, for placing it on the bar. */
 export function markerFraction(time: number, duration: number): number {
   if (duration <= 0) return 0;

@@ -1399,12 +1399,44 @@ body {
   border-color: var(--hairline-strong);
 }
 
+.ts-panel__list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .ts-panel__label {
   margin: 0;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 1px;
   color: var(--mute);
+}
+
+/* "Clear all" mirrors the home screen's recents Clear button (play-008). */
+.ts-panel__clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--mute);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  transition: color 120ms ease;
+}
+
+.ts-panel__clear:hover {
+  color: var(--live);
+}
+
+.ts-panel__clear .ic {
+  width: 13px;
+  height: 13px;
 }
 
 .ts-setting {
