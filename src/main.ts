@@ -340,15 +340,28 @@ function doStepRate(direction: number): void {
   showControls();
 }
 
+/**
+ * Drive the native window's fullscreen, NOT the HTML Fullscreen API. The WebView
+ * exits HTML fullscreen on Esc itself, and that can't be canceled from JS — so a
+ * single Esc would both close an open overlay (our handler) and drop out of
+ * fullscreen (the browser). Window-level fullscreen takes the whole webview
+ * fullscreen (overlays outside #stage stay visible, same as before) and leaves
+ * Esc entirely under our control. Requires `core:window:allow-set-fullscreen`.
+ */
+async function setFullscreen(on: boolean): Promise<void> {
+  try {
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    await getCurrentWindow().setFullscreen(on);
+  } catch {
+    /* fullscreen may be unavailable; ignore */
+  }
+}
+
 async function doToggleFullscreen(): Promise<void> {
   try {
-    if (!document.fullscreenElement) {
-      // Fullscreen the whole app, not just the stage, so overlays that live
-      // outside #stage (keyboard shortcuts, pinned chapter) stay visible.
-      await app.requestFullscreen();
-    } else {
-      await document.exitFullscreen();
-    }
+    const { getCurrentWindow } = await import("@tauri-apps/api/window");
+    const win = getCurrentWindow();
+    await win.setFullscreen(!(await win.isFullscreen()));
   } catch {
     /* fullscreen may be unavailable; ignore */
   }
@@ -1781,10 +1794,19 @@ function wireKeyboard(): void {
         e.preventDefault();
         toggleShortcuts();
         break;
-      case "Escape":
+      case "Escape": {
+        // Dismiss the topmost layer only. Close any open overlay first, and fall
+        // through to leaving fullscreen only when nothing was layered on top —
+        // so Esc-to-close the shortcuts modal (or chapters panel) no longer also
+        // drops the user out of fullscreen. A second Esc then exits fullscreen.
+        const hadOverlay =
+          shortcutsOverlay.dataset.open === "true" ||
+          tsPanel.dataset.open === "true";
         setShortcutsOpen(false);
         setPanelOpen(false);
+        if (!hadOverlay) void setFullscreen(false); // only ever leaves fullscreen
         break;
+      }
       default:
         // Number keys 0-9 jump to that tenth of the video (player-only). e.key
         // is "0".."9" for both the top row and the numpad; the single-char range
