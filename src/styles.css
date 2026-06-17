@@ -1900,13 +1900,22 @@ body {
   background: var(--canvas);
 }
 
+/* A <video> is a *replaced* element: with width/height `auto` an absolutely
+   positioned replaced box renders at its INTRINSIC resolution and ignores the
+   over-constrained right/bottom insets (CSS 2.1 §10.3.8 / §10.6.5) — so a clip
+   bigger than the window spilled past the viewer and only its top-left corner
+   showed (object-fit never engaged), unless the window was large enough to fit
+   the native frame (maximized / full screen). Give the viewer an explicit box
+   that tracks the viewport — the stage fills the whole window, so vw/vh equal
+   the inset region — and let object-fit: contain letterbox the frame inside it
+   at any window size. */
 .app[data-mode="cut"] .video {
   top: calc(var(--cut-appbar-h) + 14px);
-  bottom: calc(var(--cut-deck-h) + 14px);
   left: 24px;
-  right: 24px;
-  width: auto;
-  height: auto;
+  right: auto;
+  bottom: auto;
+  width: calc(100vw - 48px);
+  height: calc(100vh - var(--cut-appbar-h) - var(--cut-deck-h) - 28px);
   border: 1px solid var(--hairline);
   border-radius: var(--radius-lg);
   overflow: hidden;
