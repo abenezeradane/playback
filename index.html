@@ -414,6 +414,14 @@
       </div>
     </div>
 
+    <!-- Background filmstrip generator (play-004). A dedicated <video> scanned
+         off to the side on file open so the timeline's thumbnails are captured
+         WITHOUT seeking the main viewer out from under the user. Kept out of the
+         layout; shown only as a tiny, fully-opaque, on-screen square for the
+         duration of a scan (WebView2 draws BLACK to canvas from an off-screen /
+         occluded / transparent <video>, so it must be genuinely composited). -->
+    <video id="cut-gen" class="cut-gen" muted playsinline preload="auto" aria-hidden="true" tabindex="-1"></video>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

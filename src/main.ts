@@ -161,6 +161,8 @@ const cutLoopBtn = $<HTMLButtonElement>("cut-loop");
 const cutRateBtn = $<HTMLButtonElement>("cut-rate");
 const cutMuteBtn = $<HTMLButtonElement>("cut-mute");
 const cutVolume = $<HTMLInputElement>("cut-volume");
+/** Off-to-the-side <video> used to capture filmstrip frames on open (play-004). */
+const cutGen = $<HTMLVideoElement>("cut-gen");
 
 // ---------------------------------------------------------------------------
 // State
@@ -760,6 +762,9 @@ function b64ToBytes(b64: string): Uint8Array {
 const FILMSTRIP_CELLS = 12;
 const WAVEFORM_BARS = 240;
 const WAVEFORM_MAX_BYTES = 48 * 1024 * 1024; // decode real audio only below this
+/** Wait this long after a file opens before scanning the deck media, so the
+ *  generator <video> doesn't fight the main video's own startup decode. */
+const CUT_DECK_BUILD_DELAY_MS = 350;
 
 /** Enter/leave the timeline view. No-op to enter when no video is loaded. */
 function setCutMode(on: boolean): void {
@@ -771,9 +776,10 @@ function setCutMode(on: boolean): void {
   if (on) {
     setPanelOpen(false);
     setShortcutsOpen(false);
-    // Build the filmstrip + waveform on first open (deferred from load).
-    ensureCutDeckBuilt();
-    // The canvases only have a size once visible — draw them now.
+    // The deck media is generated in the background on file open (prepareCutDeck),
+    // so entering the view just draws whatever frames/peaks are ready so far — a
+    // partial filmstrip fills in as the rest stream in. The canvases only have a
+    // size once visible, so (re)draw them now.
     drawFilmstrip();
     drawWaveform();
     renderCut();
@@ -788,41 +794,52 @@ function toggleCutMode(): void {
   setCutMode(!cutMode);
 }
 
-/** Path of the clip whose deck is (to be) built, and whether it is built yet. */
+/** Path of the clip whose deck is being (or has been) built. */
 let cutDeckPath: string | null = null;
-let cutDeckBuilt = false;
 
 /**
- * Note the clip for the deck. The filmstrip + waveform builds are deferred to the
- * first time the timeline view is opened (ensureCutDeckBuilt): the filmstrip
- * captures frames from the main video, so deferring lets the main video settle
- * (loaded + composited) before we seek it around to grab thumbnails.
+ * Note the clip for the timeline-view deck and START generating its media in the
+ * BACKGROUND right now (on file open) — the filmstrip thumbnails and the audio
+ * waveform.
+ *
+ * This is deliberately NOT deferred to the first cut-view open, and the filmstrip
+ * is NOT captured from the main <video>. The old approach seeked the on-screen
+ * viewer through 12 points the moment you entered the timeline, visibly dragging
+ * the user along a scrub (the laggy/jittery feel). Now a dedicated generator
+ * <video> is scanned off to the side, so the viewer the user is watching is never
+ * touched; the deck just shows however many frames are ready and the rest stream
+ * in (see captureFilmstripFromGenerator). The scan is deferred a beat so it does
+ * not fight the main video's own startup decode for the hardware decoder.
  */
 function prepareCutDeck(path: string): void {
   cutDeckPath = path;
-  cutDeckBuilt = false;
   cutTitle.textContent = basename(path);
   cutMeta.textContent = "";
   resetFpsDetection();
+  // New clip: invalidate any in-flight scan, reset what the deck shows.
+  const ftoken = ++filmstripToken;
+  const wtoken = ++waveformToken;
+  filmFrames = new Array(FILMSTRIP_CELLS).fill(null);
+  waveformPeaks = [];
+  if (cutMode) {
+    drawFilmstrip();
+    drawWaveform();
+  }
   // The ruler is cheap (DOM ticks) and built from the loadedmetadata handler.
-  if (cutMode) ensureCutDeckBuilt();
-}
-
-/** Build the filmstrip + waveform once, on demand (first cut-view open). */
-function ensureCutDeckBuilt(): void {
-  if (cutDeckBuilt || !cutDeckPath) return;
-  cutDeckBuilt = true;
-  void buildCutMedia(cutDeckPath);
+  window.setTimeout(() => {
+    if (ftoken !== filmstripToken) return; // a newer clip took over before we ran
+    void captureFilmstripFromGenerator(path, ftoken);
+    void buildWaveform(path, wtoken);
+  }, CUT_DECK_BUILD_DELAY_MS);
 }
 
 /**
- * Build the deck media: the filmstrip (captured from the main video) and the
- * waveform (the real audio, decoded from the file bytes; synthesized as a
- * fallback for large/unreadable files so the deck always shows bars).
+ * Decode the clip's audio into waveform peaks in the background. Small/medium
+ * files decode their real audio; very large files fall back to a synthesized
+ * waveform so the deck always shows bars without a huge read. `token` guards
+ * against a stale build (a newer clip opened).
  */
-async function buildCutMedia(path: string): Promise<void> {
-  buildFilmstripFromMain();
-  const token = ++waveformToken;
+async function buildWaveform(path: string, token: number): Promise<void> {
   try {
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
     const size = status ? status.size : 0;
@@ -847,7 +864,11 @@ function clearCutDeck(): void {
   waveformPeaks = [];
   filmFrames = [];
   cutDeckPath = null;
-  cutDeckBuilt = false;
+  // Stop any in-flight background scan and release the generator video.
+  cutGen.pause();
+  cutGen.removeAttribute("src");
+  cutGen.load();
+  cutGen.classList.remove("cut-gen--active");
   cutRuler.replaceChildren();
   const fctx = cutFilmstrip.getContext("2d");
   if (fctx) fctx.clearRect(0, 0, cutFilmstrip.width, cutFilmstrip.height);
@@ -971,75 +992,130 @@ function drawFilmstrip(): void {
 
 /**
  * Build the filmstrip — N evenly-spaced thumbnails spanning the clip — by seeking
- * the MAIN <video> through the capture points and grabbing each presented frame.
+ * a DEDICATED generator <video> (#cut-gen) through the capture points and grabbing
+ * each presented frame into an offscreen 160×90 canvas. The main viewer is never
+ * touched, so the user is not dragged along the scrub; this runs in the background
+ * on file open.
  *
- * Why the main element and not an auxiliary one: WebView2/Chromium only reliably
- * PAINTS (and thus lets drawImage read a real frame from) the visibly-composited
- * video; a detached / off-screen / occluded generator <video> gets culled and
- * drawImage captures black (confirmed: it ran with a valid 1280px source yet
- * produced black). So we briefly scrub the on-screen viewer to grab frames into
- * offscreen 160×90 canvases, then restore the playhead + play state. Each frame
- * is grabbed on the next requestVideoFrameCallback (after the frame is actually
- * presented), not on 'seeked' (which only signals the seek data is ready).
+ * WebView2 caveat (hard-won): drawImage reads BLACK from a detached / off-screen /
+ * occluded / transparent <video>; it only paints a real frame for a video that is
+ * genuinely composited on-screen. So #cut-gen is shown as a tiny, fully-opaque,
+ * non-occluded square in the corner for the duration of the scan (then hidden),
+ * and each frame is grabbed on the next requestVideoFrameCallback after the seek —
+ * not on 'seeked', which only means the seek *data* (not a painted frame) is ready.
+ *
+ * Each captured frame is drawn immediately, so a cut view opened mid-build shows a
+ * partial filmstrip that fills in as the remaining frames arrive. `token` (the
+ * filmstrip generation) lets a newer clip / going home abort the scan.
  */
-function buildFilmstripFromMain(): void {
-  const token = ++filmstripToken;
-  filmFrames = new Array(FILMSTRIP_CELLS).fill(null);
-  drawFilmstrip();
-  const dur = video.duration;
-  if (!Number.isFinite(dur) || dur <= 0) return;
-
-  const rvfc = (video as unknown as { requestVideoFrameCallback?: (cb: () => void) => number })
-    .requestVideoFrameCallback;
-  const wasPaused = video.paused;
-  const savedTime = video.currentTime;
-  video.pause();
-
-  let k = 0;
-  let pending = false;
-  let safety: number | undefined;
-  const restore = (): void => {
-    if (token !== filmstripToken) return; // a newer build now owns the viewer
-    video.currentTime = savedTime;
-    if (!wasPaused) void video.play().catch(() => {});
-    render();
-  };
-  const grabAndNext = (): void => {
-    if (!pending) return;
-    pending = false;
-    window.clearTimeout(safety);
-    video.removeEventListener("seeked", onSeeked);
-    if (token !== filmstripToken) return; // aborted by a newer build / home
-    if (video.videoWidth > 0) {
-      const off = document.createElement("canvas");
-      off.width = 160;
-      off.height = 90;
-      const octx = off.getContext("2d");
-      if (octx) {
-        drawCover(octx, video, video.videoWidth, video.videoHeight, 0, 0, 160, 90);
-        filmFrames[k] = off;
-        drawFilmstrip();
+function captureFilmstripFromGenerator(path: string, token: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const gen = cutGen;
+    const rvfc = (
+      gen as unknown as {
+        requestVideoFrameCallback?: (cb: (now: number, meta: { mediaTime: number }) => void) => number;
       }
+    ).requestVideoFrameCallback;
+    let genDur = 0;
+    let k = 0;
+    let safety: number | undefined;
+    let done = false;
+
+    const stale = (): boolean => token !== filmstripToken;
+    const targetTime = (): number => ((k + 0.5) / FILMSTRIP_CELLS) * genDur;
+
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      window.clearTimeout(safety);
+      gen.removeEventListener("seeked", onSeeked);
+      gen.removeEventListener("loadedmetadata", onMeta);
+      gen.removeEventListener("error", finish);
+      // Only release the shared generator element if no newer scan has claimed it.
+      if (token === filmstripToken) {
+        gen.pause();
+        gen.removeAttribute("src");
+        gen.load();
+        gen.classList.remove("cut-gen--active");
+      }
+      resolve();
+    };
+
+    const grab = (): void => {
+      window.clearTimeout(safety);
+      if (stale()) return finish();
+      if (gen.videoWidth > 0) {
+        const off = document.createElement("canvas");
+        off.width = 160;
+        off.height = 90;
+        const octx = off.getContext("2d");
+        if (octx) {
+          drawCover(octx, gen, gen.videoWidth, gen.videoHeight, 0, 0, 160, 90);
+          filmFrames[k] = off;
+          if (cutMode) drawFilmstrip();
+        }
+      }
+      k++;
+      if (k < FILMSTRIP_CELLS) seekNext();
+      else finish();
+    };
+
+    const onSeeked = (): void => {
+      if (stale()) return finish();
+      // Capture on the next presented frame (requestVideoFrameCallback), not on
+      // 'seeked' itself — 'seeked' only means the seek data is ready; the frame
+      // may not be painted yet (drawImage would read black). The presented frame's
+      // mediaTime tells us whether the seek has actually landed: the FIRST frame
+      // after 'seeked' is occasionally still the PREVIOUS one (which used to
+      // produce duplicate thumbnails). A paused video only presents once per seek,
+      // so we can't wait for a *second* rVFC — instead, on a stale frame, let it
+      // settle briefly and then take whatever is current (the seek has landed by
+      // then). No rVFC → fall back to the same short settle.
+      const want = targetTime();
+      const tol = Math.min(0.4, genDur / FILMSTRIP_CELLS / 2);
+      if (typeof rvfc !== "function") {
+        window.setTimeout(grab, 80);
+        return;
+      }
+      rvfc.call(gen, (_now, meta) => {
+        if (stale()) return finish();
+        if (Math.abs(meta.mediaTime - want) <= tol) grab();
+        else window.setTimeout(grab, 80);
+      });
+    };
+
+    function seekNext(): void {
+      if (stale()) return finish();
+      gen.addEventListener("seeked", onSeeked, { once: true });
+      window.clearTimeout(safety);
+      safety = window.setTimeout(grab, 2500); // don't hang if a frame never lands
+      gen.currentTime = targetTime();
     }
-    k++;
-    if (k < FILMSTRIP_CELLS) seekNext();
-    else restore();
-  };
-  const onSeeked = (): void => {
-    // Grab on the next presented frame so drawImage reads a painted (non-black)
-    // frame rather than just seek-ready data.
-    if (typeof rvfc === "function") rvfc.call(video, grabAndNext);
-    else grabAndNext();
-  };
-  function seekNext(): void {
-    if (token !== filmstripToken) return;
-    pending = true;
-    video.addEventListener("seeked", onSeeked, { once: true });
-    window.clearTimeout(safety);
-    safety = window.setTimeout(grabAndNext, 1500); // don't hang if a frame never lands
-    video.currentTime = ((k + 0.5) / FILMSTRIP_CELLS) * dur;
-  }
-  seekNext();
+
+    function onMeta(): void {
+      if (stale()) return finish();
+      genDur = gen.duration;
+      if (!Number.isFinite(genDur) || genDur <= 0) return finish();
+      seekNext();
+    }
+
+    void (async () => {
+      try {
+        const { convertFileSrc } = await import("@tauri-apps/api/core");
+        if (stale()) return finish();
+        gen.classList.add("cut-gen--active");
+        gen.muted = true;
+        gen.addEventListener("loadedmetadata", onMeta, { once: true });
+        gen.addEventListener("error", finish, { once: true });
+        gen.src = convertFileSrc(path);
+        gen.load();
+        // Bail rather than hang if metadata never lands.
+        safety = window.setTimeout(finish, 8000);
+      } catch {
+        finish();
+      }
+    })();
+  });
 }
 
 // --- Waveform -------------------------------------------------------------

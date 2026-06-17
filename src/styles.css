@@ -1866,6 +1866,26 @@ body {
   pointer-events: none;
 }
 
+/* Background filmstrip generator <video> (play-004; see index.html). Idle it is
+   invisible and inert (no src). While a scan runs (.cut-gen--active) it must be a
+   real, fully-opaque, non-occluded, on-screen element or WebView2 paints it black
+   to canvas — so it sits as a tiny square in the corner, then hides again. */
+.cut-gen {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: 32px;
+  height: 18px;
+  opacity: 0;
+  pointer-events: none;
+  background: #000;
+  z-index: 0;
+}
+.cut-gen--active {
+  opacity: 1;
+  z-index: 9999;
+}
+
 .cut__appbar,
 .cut__deck {
   position: absolute;
