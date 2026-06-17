@@ -65,12 +65,16 @@ import {
   shuttleForward,
   shuttleReverse,
   shuttleRate,
+  looksLikeUrl,
+  detectStreamType,
+  streamSourceName,
   type PlayerState,
   type Timestamp,
   type TimestampStore,
   type LiveWindow,
   type Shuttle,
 } from "./player-core";
+import type HlsType from "hls.js";
 
 const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi"];
 
@@ -94,6 +98,15 @@ const centerToggle = $<HTMLDivElement>("center-toggle");
 const btnOpen = $<HTMLButtonElement>("btn-open");
 const btnOpenTop = $<HTMLButtonElement>("btn-open-top");
 const dropZone = $<HTMLButtonElement>("drop-zone");
+
+// Open from a URL (play-006)
+const homeUrl = $<HTMLDivElement>("home-url");
+const btnOpenUrl = $<HTMLButtonElement>("btn-open-url");
+const urlForm = $<HTMLFormElement>("url-form");
+const urlInput = $<HTMLInputElement>("url-input");
+const urlCancel = $<HTMLButtonElement>("url-cancel");
+const urlHint = $<HTMLParagraphElement>("url-hint");
+const urlError = $<HTMLParagraphElement>("url-error");
 const recentCards = $<HTMLDivElement>("recent-cards");
 const recentEmpty = $<HTMLDivElement>("recent-empty");
 const btnClearRecent = $<HTMLButtonElement>("btn-clear-recent");
@@ -182,6 +195,20 @@ let growthWatch: number | undefined;
 // When a live source has just been (auto-)opened, jump to the live edge as soon
 // as enough has buffered (so an upgraded recording starts at "now", not the past).
 let pendingGoLive = false;
+
+// --- URL / network streaming (play-006) ------------------------------------
+// The active MSE engine for a remote HLS/DASH URL (a direct progressive URL just
+// uses video.src and needs no engine). `urlLive` flags an ongoing live URL so the
+// play-003 live chrome applies; `urlLiveTimer` refreshes the edge readout while
+// paused (seekable grows between timeupdates). `currentSourceKind` distinguishes
+// a network source from a local file so the right teardown/error path is used.
+let hls: HlsType | null = null;
+let dash: { reset?: () => void; destroy?: () => void } | null = null;
+let urlLive = false;
+let urlLiveTimer: number | undefined;
+let currentSourceKind: "file" | "url" = "file";
+/** Guards a one-shot URL-failure handler so it doesn't fire repeatedly. */
+let urlFailed = false;
 
 // Parsed timestamps + the DOM nodes rendered for them (index-aligned), so the
 // active-chapter highlight can be updated cheaply on every timeupdate.
@@ -744,6 +771,7 @@ function togglePanel(): void {
 function goHome(): void {
   video.pause();
   stopLive();
+  stopUrlPlayback();
   stopGrowthWatch();
   setCutMode(false);
   clearCutDeck();
@@ -751,11 +779,13 @@ function goHome(): void {
   setLoop(false);
   setPanelOpen(false);
   setShortcutsOpen(false);
+  closeUrlInput();
   video.removeAttribute("src");
   video.load();
   state = createInitialState();
   loadTimestampsFor(null); // clear this video's chapters when returning home
   currentPath = null;
+  currentSourceKind = "file";
   app.dataset.state = "empty";
   stage.hidden = true;
   emptyState.hidden = false;
@@ -1330,7 +1360,18 @@ function stopLive(): void {
 
 /** The live window if (and only if) a stream is still being written, else null. */
 function activeLiveWindow(): LiveWindow | null {
-  return live && live.live ? live.window() : null;
+  if (live && live.live) return live.window();
+  // A live HLS/DASH URL (play-006): the MSE library manages the buffer, so the
+  // window is read straight off the media element's seekable DVR range. `available`
+  // is the end of that range (the playable live edge); the play-003 helpers then
+  // hold the playhead LIVE_DELAY_SECONDS behind it, gate fast-forward at the edge,
+  // and allow track-back through the window exactly as for a local growing file.
+  if (urlLive) {
+    const sk = video.seekable;
+    const end = sk.length > 0 ? sk.end(sk.length - 1) : 0;
+    return { available: end, delay: LIVE_DELAY_SECONDS, live: true };
+  }
+  return null;
 }
 
 /** Re-render on every poll/append tick so the LIVE badge + edge stay current. */
@@ -2033,10 +2074,13 @@ function showError(message: string): void {
 // localStorage; rendered as cards on the home, click to re-open.
 // ---------------------------------------------------------------------------
 interface RecentFile {
+  /** Identity of the source — a local file path, or a stream URL (play-006). */
   path: string;
   name: string;
   openedAt: number;
   duration?: number;
+  /** "url" for a network stream, "file" (default) for a local file. */
+  kind?: "file" | "url";
 }
 const RECENTS_KEY = "playback:recents";
 const RECENTS_MAX = 8;
@@ -2060,12 +2104,18 @@ function saveRecents(list: RecentFile[]): void {
   }
 }
 
-function addRecent(path: string, name: string): void {
+function addRecent(path: string, name: string, kind: "file" | "url" = "file"): void {
   const list = loadRecents().filter((r) => r.path !== path);
-  list.unshift({ path, name, openedAt: Date.now() });
+  list.unshift({ path, name, openedAt: Date.now(), kind });
   if (list.length > RECENTS_MAX) list.length = RECENTS_MAX;
   saveRecents(list);
   renderRecents();
+}
+
+/** Re-open a recent entry through the right path (local file vs. stream URL). */
+function openRecent(r: RecentFile): void {
+  if (r.kind === "url" || looksLikeUrl(r.path)) void loadFromUrl(r.path);
+  else void loadFromPath(r.path);
 }
 
 function setRecentDuration(path: string, duration: number): void {
@@ -2109,6 +2159,8 @@ function thumbGradient(name: string): string {
 
 const RECENT_PLAY_SVG =
   '<svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="8 5 19 12 8 19 8 5" /></svg>';
+const RECENT_LINK_SVG =
+  '<svg class="ic" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>';
 
 function renderRecents(): void {
   const list = loadRecents();
@@ -2124,12 +2176,13 @@ function renderRecents(): void {
     card.className = "recent-card";
     card.title = r.path;
 
+    const isUrl = r.kind === "url" || looksLikeUrl(r.path);
     const thumb = document.createElement("span");
     thumb.className = "recent-card__thumb";
     thumb.style.background = thumbGradient(r.name);
     const play = document.createElement("span");
     play.className = "recent-card__play";
-    play.innerHTML = RECENT_PLAY_SVG;
+    play.innerHTML = isUrl ? RECENT_LINK_SVG : RECENT_PLAY_SVG;
     thumb.appendChild(play);
     if (r.duration) {
       const dur = document.createElement("span");
@@ -2145,18 +2198,27 @@ function renderRecents(): void {
     nm.textContent = r.name;
     const sub = document.createElement("span");
     sub.className = "recent-card__sub";
-    sub.textContent = `Opened ${timeAgo(r.openedAt)}`;
+    // For a URL show its host; for a local file, when it was last opened.
+    sub.textContent = isUrl ? urlHost(r.path) : `Opened ${timeAgo(r.openedAt)}`;
     meta.append(nm, sub);
 
     card.append(thumb, meta);
-    card.addEventListener("click", () => void loadFromPath(r.path));
+    card.addEventListener("click", () => openRecent(r));
     recentCards.appendChild(card);
   }
 }
 
 async function loadFromPath(path: string): Promise<void> {
+  // A URL passed here (a launch arg, a drag, or a recents entry) is a network
+  // stream, not a local file — route it to the URL path (play-006).
+  if (looksLikeUrl(path)) {
+    await loadFromUrl(path);
+    return;
+  }
   stopGrowthWatch();
+  stopUrlPlayback(); // leave behind any remote stream that was playing
   currentPath = path;
+  currentSourceKind = "file";
   loadTimestampsFor(path); // seed this video's saved timestamps before it loads
   addRecent(path, basename(path));
   try {
@@ -2291,6 +2353,276 @@ async function loadLiveFromPath(path: string, autoLive = false): Promise<void> {
   render();
 }
 
+// ---------------------------------------------------------------------------
+// URL / network streaming (play-006)
+//
+// A user can paste a stream URL — a direct progressive media file, an HLS
+// playlist (.m3u8), or a DASH manifest (.mpd) — and play it without downloading
+// a local file first, including ongoing livestreams. The source is the network
+// (not the asset protocol), so the engine differs by kind: a direct URL plays in
+// the native <video>; HLS/DASH are fed through an MSE library (hls.js / dashjs),
+// since WebView2's <video> won't play .m3u8/.mpd natively. The pure detection in
+// player-core decides the kind; here we drive the library and reuse the same
+// player chrome — including the play-003 live window for live URLs.
+// ---------------------------------------------------------------------------
+
+/** Reveal the URL input (focused + empty) for a new entry. */
+function openUrlInput(): void {
+  homeUrl.dataset.open = "true";
+  urlForm.hidden = false;
+  urlHint.hidden = false;
+  urlError.hidden = true;
+  urlInput.value = "";
+  urlInput.focus();
+}
+
+/** Hide and clear the URL input. */
+function closeUrlInput(): void {
+  homeUrl.dataset.open = "false";
+  urlForm.hidden = true;
+  urlHint.hidden = true;
+  urlError.hidden = true;
+  urlInput.value = "";
+}
+
+/** Show an inline error under the URL input (for a syntactically bad URL). */
+function showUrlError(message: string): void {
+  urlError.textContent = message;
+  urlError.hidden = false;
+}
+
+/** Validate the typed URL and, if it is a real http(s) URL, load it. */
+function submitUrl(): void {
+  const raw = urlInput.value.trim();
+  if (!looksLikeUrl(raw)) {
+    showUrlError("Enter a full http(s) URL, e.g. https://example.com/stream.m3u8");
+    return;
+  }
+  closeUrlInput();
+  void loadFromUrl(raw);
+}
+
+/** The host of a URL, shown as the player subtitle / recents sub-line. */
+function urlHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "Stream URL";
+  }
+}
+
+/** Tear down any active URL stream engine (hls.js / dashjs) and the live timer. */
+function stopUrlPlayback(): void {
+  if (hls) {
+    try {
+      hls.destroy();
+    } catch {
+      /* already destroyed */
+    }
+    hls = null;
+  }
+  if (dash) {
+    try {
+      dash.reset?.();
+    } catch {
+      /* ignore */
+    }
+    try {
+      dash.destroy?.();
+    } catch {
+      /* ignore */
+    }
+    dash = null;
+  }
+  urlLive = false;
+  if (urlLiveTimer !== undefined) {
+    window.clearInterval(urlLiveTimer);
+    urlLiveTimer = undefined;
+  }
+}
+
+/** Flag (or clear) a live URL stream so the play-003 live chrome shows. */
+function setUrlLive(on: boolean): void {
+  urlLive = on;
+  app.dataset.live = String(on);
+  if (on && urlLiveTimer === undefined) {
+    // The DVR window grows between timeupdates (and while paused), so refresh the
+    // edge tick + "−Ns behind" readout on a light interval.
+    urlLiveTimer = window.setInterval(() => {
+      syncFromVideo();
+      render();
+    }, 1000);
+  } else if (!on && urlLiveTimer !== undefined) {
+    window.clearInterval(urlLiveTimer);
+    urlLiveTimer = undefined;
+  }
+  render();
+}
+
+/**
+ * A URL stream failed to load/play (bad or unreachable URL, unsupported format).
+ * Return to the home screen and show a clear error rather than hanging on a dead
+ * player. One-shot per load (hls.js + the <video> can both report the same fault).
+ */
+function handleUrlFailure(message: string): void {
+  if (currentSourceKind !== "url" || urlFailed) return;
+  urlFailed = true;
+  const failed = currentPath ?? "";
+  goHome();
+  // Re-open the URL input with the failed URL pre-filled and a prominent inline
+  // error right under it, so the failure is clear (and easy to edit + retry)
+  // rather than a buried message below the fold.
+  openUrlInput();
+  if (looksLikeUrl(failed)) urlInput.value = failed;
+  showUrlError(message);
+}
+
+/**
+ * Play a remote stream URL. Detects the kind (direct / HLS / DASH), sets up the
+ * player chrome, records it in Recent, then dispatches to the right engine. A
+ * live HLS/DASH stream lights up the live chrome via setUrlLive.
+ */
+async function loadFromUrl(url: string): Promise<void> {
+  const source = detectStreamType(url);
+  if (!source) {
+    showUrlError("That doesn't look like a playable http(s) URL.");
+    return;
+  }
+
+  // Reset prior playback of every kind.
+  stopGrowthWatch();
+  stopLive();
+  stopUrlPlayback();
+  setCutMode(false);
+  clearCutDeck();
+  resetShuttle();
+  setLoop(false);
+  setPanelOpen(false);
+  setShortcutsOpen(false);
+
+  const name = streamSourceName(source.url);
+  currentPath = source.url;
+  currentSourceKind = "url";
+  urlFailed = false;
+  loadTimestampsFor(source.url); // per-URL chapters (play-007 key is source-agnostic)
+  addRecent(source.url, name, "url");
+
+  emptyError.hidden = true;
+  titleLabel.textContent = name;
+  subtitleLabel.textContent = urlHost(source.url);
+  document.title = `${name} — Playback`;
+  app.dataset.state = "playing";
+  app.dataset.live = "false";
+  emptyState.hidden = true;
+  stage.hidden = false;
+  state = createInitialState();
+  applyAudioToVideo();
+  prepareCutDeck(source.url); // cut-view deck degrades gracefully for a URL
+
+  try {
+    if (source.kind === "hls") {
+      await setupHls(source.url);
+    } else if (source.kind === "dash") {
+      await setupDash(source.url);
+    } else {
+      // Direct progressive media: the native <video> streams it over HTTP itself.
+      video.src = source.url;
+      video.load();
+      void video.play().catch(() => {
+        /* autoplay may be blocked; user can press play */
+      });
+    }
+  } catch (err) {
+    handleUrlFailure(`Could not play this URL: ${String(err)}`);
+    return;
+  }
+  showControls();
+  render();
+}
+
+/** Attach hls.js to the <video> for an HLS (.m3u8) URL. */
+async function setupHls(url: string): Promise<void> {
+  const Hls = (await import("hls.js")).default;
+  if (!Hls.isSupported()) {
+    // Native HLS (e.g. Safari) — unlikely in WebView2, but degrade gracefully.
+    video.src = url;
+    video.load();
+    void video.play().catch(() => {});
+    return;
+  }
+  const h = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 90 });
+  hls = h;
+
+  h.on(Hls.Events.ERROR, (_event: unknown, data: { fatal: boolean; type: string; details: string }) => {
+    if (!data.fatal) return;
+    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+      // A manifest that can't be fetched/parsed = a bad/unreachable URL → fail.
+      // Other network faults (a dropped segment) are recoverable → retry the load.
+      if (
+        data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
+        data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
+        data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR
+      ) {
+        handleUrlFailure("Could not load the stream — check the URL and your connection.");
+      } else {
+        try {
+          h.startLoad();
+        } catch {
+          handleUrlFailure("The stream connection was lost.");
+        }
+      }
+    } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+      try {
+        h.recoverMediaError();
+      } catch {
+        handleUrlFailure("The stream's media could not be decoded.");
+      }
+    } else {
+      handleUrlFailure(`Could not play the stream (${data.details}).`);
+    }
+  });
+
+  h.on(Hls.Events.MANIFEST_PARSED, () => {
+    void video.play().catch(() => {});
+  });
+  // Each playlist refresh tells us whether this is a live or VOD playlist.
+  h.on(Hls.Events.LEVEL_LOADED, (_event: unknown, data: { details: { live: boolean } }) => {
+    setUrlLive(!!data.details.live);
+  });
+
+  h.loadSource(url);
+  h.attachMedia(video);
+}
+
+/** Attach dashjs to the <video> for a DASH (.mpd) URL. */
+async function setupDash(url: string): Promise<void> {
+  // dashjs's surface is loosely typed for our purposes; use `any` deliberately.
+  const mod = await import("dashjs");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const lib: any = (mod as { default?: unknown }).default ?? mod;
+  const MediaPlayer = lib.MediaPlayer;
+  const events = MediaPlayer.events; // static enum on the factory
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const player: any = MediaPlayer().create();
+  dash = player;
+
+  player.on(events.ERROR, () =>
+    handleUrlFailure("Could not load the DASH stream — check the URL and your connection."),
+  );
+  if (events.PLAYBACK_ERROR) {
+    player.on(events.PLAYBACK_ERROR, () => handleUrlFailure("The DASH stream could not be played."));
+  }
+  player.on(events.STREAM_INITIALIZED, () => {
+    try {
+      setUrlLive(!!player.isDynamic());
+    } catch {
+      /* ignore */
+    }
+    void video.play().catch(() => {});
+  });
+  player.initialize(video, url, true);
+}
+
 /** Open the native file picker (Tauri) and load the chosen file. */
 async function openFileDialog(): Promise<void> {
   try {
@@ -2343,6 +2675,22 @@ function wireControls(): void {
   btnOpenTop.addEventListener("click", () => void openFileDialog());
   dropZone.addEventListener("click", () => void openFileDialog());
   btnClearRecent.addEventListener("click", clearRecents);
+
+  // Open from a URL (play-006): reveal the input, submit on Enter / Play.
+  btnOpenUrl.addEventListener("click", openUrlInput);
+  urlForm.addEventListener("submit", (e) => {
+    e.preventDefault(); // never navigate the webview; play it instead
+    submitUrl();
+  });
+  urlCancel.addEventListener("click", closeUrlInput);
+  urlInput.addEventListener("keydown", (e) => {
+    // The global Escape handler is suppressed while a text field is focused, so
+    // close the input locally. (Enter is handled by the form's submit.)
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      closeUrlInput();
+    }
+  });
   btnPlay.addEventListener("click", doTogglePlay);
   btnRewind.addEventListener("click", () => doSkip(false));
   btnForward.addEventListener("click", () => doSkip(true));
@@ -2467,6 +2815,15 @@ function wireControls(): void {
     syncFromVideo();
     render();
     showControls();
+  });
+  // A failed media load on a remote URL (bad/unreachable direct URL, unsupported
+  // codec) surfaces a clear error instead of a dead player. Only acts on URL
+  // sources so local-file behavior is unchanged (HLS/DASH errors come through the
+  // library handlers; handleUrlFailure is one-shot to avoid double reporting).
+  video.addEventListener("error", () => {
+    if (currentSourceKind === "url") {
+      handleUrlFailure("Could not play this URL — it may be unreachable or an unsupported format.");
+    }
   });
 
   // Reveal controls on mouse activity over the stage.
@@ -2632,6 +2989,15 @@ function wireKeyboard(): void {
         break;
       case "o":
         void openFileDialog();
+        break;
+      case "u":
+      case "U":
+        // Open a stream URL (play-006). Scoped to the home screen, where the
+        // affordance lives; ignored in the player so it can't shadow other keys.
+        if (stage.hidden) {
+          e.preventDefault();
+          openUrlInput();
+        }
         break;
       case "a":
       case "A":

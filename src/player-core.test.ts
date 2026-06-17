@@ -59,6 +59,9 @@ import {
   niceTickInterval,
   rulerTicks,
   isTextEntryTarget,
+  looksLikeUrl,
+  detectStreamType,
+  streamSourceName,
   DEFAULT_FPS,
   SHUTTLE_SPEEDS,
   PLAYBACK_RATES,
@@ -739,5 +742,68 @@ describe("isTextEntryTarget — keyboard-shortcut focus guard (bugfix)", () => {
     expect(isTextEntryTarget({ tagName: "input", type: "RANGE" })).toBe(false);
     expect(isTextEntryTarget(null)).toBe(false);
     expect(isTextEntryTarget(undefined)).toBe(false);
+  });
+});
+
+describe("URL / network streaming (play-006)", () => {
+  it("looksLikeUrl accepts only absolute http(s) URLs", () => {
+    expect(looksLikeUrl("https://example.com/stream.m3u8")).toBe(true);
+    expect(looksLikeUrl("http://10.0.0.5:8080/video.mp4")).toBe(true);
+    expect(looksLikeUrl("  https://example.com/a.mp4  ")).toBe(true); // trimmed
+    // Rejects: blank, bare paths (no scheme), and non-network schemes.
+    expect(looksLikeUrl("")).toBe(false);
+    expect(looksLikeUrl("   ")).toBe(false);
+    expect(looksLikeUrl("example.com/video.mp4")).toBe(false);
+    expect(looksLikeUrl("/Users/me/video.mp4")).toBe(false);
+    expect(looksLikeUrl("C:\\Users\\me\\video.mp4")).toBe(false);
+    expect(looksLikeUrl("file:///c:/video.mp4")).toBe(false);
+    expect(looksLikeUrl("javascript:alert(1)")).toBe(false);
+    expect(looksLikeUrl("not a url at all")).toBe(false);
+  });
+
+  it("detectStreamType classifies by path extension", () => {
+    expect(detectStreamType("https://x.com/movie.mp4")?.kind).toBe("direct");
+    expect(detectStreamType("https://x.com/clip.webm")?.kind).toBe("direct");
+    expect(detectStreamType("https://x.com/live/index.m3u8")?.kind).toBe("hls");
+    expect(detectStreamType("https://x.com/live/manifest.mpd")?.kind).toBe("dash");
+    expect(detectStreamType("https://x.com/playlist.m3u")?.kind).toBe("hls");
+  });
+
+  it("detectStreamType ignores query/fragment and is case-insensitive on the extension", () => {
+    expect(detectStreamType("https://x.com/live.M3U8?token=abc123")?.kind).toBe("hls");
+    expect(detectStreamType("https://x.com/dash.MPD#t=30")?.kind).toBe("dash");
+    expect(detectStreamType("https://x.com/v.MP4?sig=1&exp=2")?.kind).toBe("direct");
+  });
+
+  it("detectStreamType lets a manifest content-type override a missing/ambiguous extension", () => {
+    // Extension-less CDN URL: the content-type decides.
+    expect(detectStreamType("https://cdn.x.com/live/stream", "application/vnd.apple.mpegurl")?.kind).toBe("hls");
+    expect(detectStreamType("https://cdn.x.com/live/stream", "application/x-mpegURL")?.kind).toBe("hls");
+    expect(detectStreamType("https://cdn.x.com/live/stream", "application/dash+xml")?.kind).toBe("dash");
+    // No extension and no hint -> direct (the safe default the <video> can attempt).
+    expect(detectStreamType("https://cdn.x.com/live/stream")?.kind).toBe("direct");
+  });
+
+  it("detectStreamType returns null for anything that is not a playable http(s) URL", () => {
+    expect(detectStreamType("")).toBeNull();
+    expect(detectStreamType("/local/path.mp4")).toBeNull();
+    expect(detectStreamType("file:///c:/video.mp4")).toBeNull();
+    expect(detectStreamType("ftp://host/video.mp4")).toBeNull();
+  });
+
+  it("detectStreamType carries the trimmed url through", () => {
+    expect(detectStreamType("  https://x.com/a.m3u8  ")).toEqual({
+      url: "https://x.com/a.m3u8",
+      kind: "hls",
+    });
+  });
+
+  it("streamSourceName uses the last path segment, decoded, or the host", () => {
+    expect(streamSourceName("https://host.tv/live/channel.m3u8")).toBe("channel.m3u8");
+    expect(streamSourceName("https://host.tv/path/")).toBe("path"); // trailing slash ignored
+    expect(streamSourceName("https://host.tv/")).toBe("host.tv"); // host fallback
+    expect(streamSourceName("https://host.tv")).toBe("host.tv");
+    expect(streamSourceName("https://host.tv/my%20stream.mp4")).toBe("my stream.mp4");
+    expect(streamSourceName("not a url")).toBe("not a url"); // returns input unchanged
   });
 });

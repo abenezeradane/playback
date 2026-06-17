@@ -413,6 +413,118 @@ body {
   font-size: 13px;
 }
 
+/* Open from a URL (play-006): a stream link instead of a local file. The hero
+   inner disables pointer events (so the full-card dropzone catches clicks), so
+   this whole block re-enables them. */
+.home-url {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+  pointer-events: auto;
+}
+
+.home-url__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--mute);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.home-url__toggle:hover {
+  color: var(--ink);
+}
+
+.home-url__toggle .ic {
+  width: 15px;
+  height: 15px;
+}
+
+/* The revealed URL input + Play, shown when data-open="true". */
+.home-url[data-open="true"] .home-url__toggle {
+  display: none;
+}
+
+.url-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(440px, 80vw);
+}
+
+.url-form__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-elevated);
+  border: 1px solid var(--hairline-strong);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.url-form__input::placeholder {
+  color: var(--stone);
+}
+
+.url-form__input:focus {
+  border-color: var(--on-dark);
+}
+
+.url-form__cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--mute);
+  cursor: pointer;
+}
+
+.url-form__cancel:hover {
+  color: var(--ink);
+  border-color: var(--hairline-strong);
+}
+
+.url-form__cancel .ic {
+  width: 16px;
+  height: 16px;
+}
+
+.url-form__hint {
+  font-size: 12px;
+  color: var(--mute);
+}
+
+.url-form__hint code {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--stone);
+}
+
+.url-form__error {
+  font-size: 13px;
+  color: var(--live);
+  max-width: min(440px, 80vw);
+  text-align: center;
+}
+
 .dropzone__formats {
   display: flex;
   gap: 8px;

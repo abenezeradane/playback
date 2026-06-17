@@ -827,3 +827,107 @@ export function isTextEntryTarget(target: FocusTarget | null | undefined): boole
   if (tag === "INPUT") return TEXT_INPUT_TYPES.has((target.type ?? "").toLowerCase());
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// URL / network streaming (play-006)
+//
+// Playback is no longer local-only: a user can paste a stream URL — a direct
+// progressive media file (http(s) .mp4/.webm/…), an HLS playlist (.m3u8), or a
+// DASH manifest (.mpd) — and play it, including ongoing livestreams. The source
+// is the network rather than the asset protocol, so the engine differs per
+// kind: a direct file plays in the native <video>; HLS/DASH are fed through an
+// MSE library (the WebView's <video> won't play .m3u8/.mpd natively). The pure
+// classification + naming below decides which path main.ts takes; main.ts owns
+// the library wiring and reuses the play-003 live chrome for live URLs.
+// ---------------------------------------------------------------------------
+
+/** Which engine plays a stream URL. */
+export type StreamKind = "direct" | "hls" | "dash";
+
+/** A playable stream URL plus the engine that should play it. */
+export interface StreamSource {
+  /** The (trimmed) URL to play. */
+  url: string;
+  /** Which engine plays it. */
+  kind: StreamKind;
+}
+
+/**
+ * Whether `text` looks like an http(s) URL we can attempt to play. Accepts only
+ * absolute http/https URLs (the network sources play-006 targets); rejects
+ * blank input, bare paths (no scheme), and non-network schemes (file:,
+ * javascript:, etc.). Used to validate the URL input and to tell a recents
+ * entry that is a URL from one that is a local file path.
+ */
+export function looksLikeUrl(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(t);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "http:" || parsed.protocol === "https:";
+}
+
+/** Lower-case file extension of a URL's path (ignoring query/fragment), or "". */
+function urlExtension(parsed: URL): string {
+  const path = parsed.pathname;
+  const dot = path.lastIndexOf(".");
+  const slash = path.lastIndexOf("/");
+  if (dot < 0 || dot < slash) return "";
+  return path.slice(dot + 1).toLowerCase();
+}
+
+/**
+ * Classify a stream URL into the engine that should play it, using the path
+ * extension and an optional `Content-Type` hint. A content-type that clearly
+ * names a manifest format is authoritative (a CDN may serve an extension-less
+ * URL with the right type); otherwise the extension decides. HLS (.m3u8/.m3u)
+ * and DASH (.mpd) need the MSE library; everything else is treated as a direct
+ * progressive file the native <video> can load (the safe default — a wrong
+ * guess surfaces as a normal playback error). Returns null when `url` is not a
+ * playable http(s) URL.
+ */
+export function detectStreamType(url: string, contentType?: string | null): StreamSource | null {
+  const trimmed = url.trim();
+  if (!looksLikeUrl(trimmed)) return null;
+  const parsed = new URL(trimmed);
+  const ct = (contentType ?? "").toLowerCase();
+
+  // A manifest content-type is authoritative (handles extension-less CDN URLs).
+  if (/mpegurl/.test(ct)) return { url: trimmed, kind: "hls" };
+  if (/dash\+xml/.test(ct)) return { url: trimmed, kind: "dash" };
+
+  const ext = urlExtension(parsed);
+  if (ext === "m3u8" || ext === "m3u") return { url: trimmed, kind: "hls" };
+  if (ext === "mpd") return { url: trimmed, kind: "dash" };
+
+  return { url: trimmed, kind: "direct" };
+}
+
+/**
+ * A human display name for a stream URL — the last non-empty path segment
+ * (percent-decoded), falling back to the host. Used as the player title and the
+ * recents label, mirroring basename() for local files.
+ */
+export function streamSourceName(url: string): string {
+  const t = url.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(t);
+  } catch {
+    return t;
+  }
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const last = segments[segments.length - 1];
+  if (last) {
+    try {
+      return decodeURIComponent(last);
+    } catch {
+      return last;
+    }
+  }
+  return parsed.host || t;
+}

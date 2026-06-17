@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost blob: data: https: http:; connect-src 'self' https: http: blob: data:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <title>Playback</title>
   </head>
@@ -46,6 +46,33 @@
                   </button>
                   <span class="home-hero__hint"><kbd class="kbd">O</kbd> to open</span>
                 </div>
+
+                <!-- Open from a URL (play-006): a stream link instead of a local file -->
+                <div id="home-url" class="home-url" data-open="false">
+                  <button id="btn-open-url" class="home-url__toggle" type="button">
+                    <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
+                    Open a URL
+                    <kbd class="kbd">U</kbd>
+                  </button>
+                  <form id="url-form" class="url-form" hidden>
+                    <input
+                      id="url-input"
+                      class="url-form__input"
+                      type="url"
+                      inputmode="url"
+                      spellcheck="false"
+                      autocomplete="off"
+                      placeholder="https://example.com/stream.m3u8"
+                    />
+                    <button id="url-go" class="pill pill--primary pill--sm" type="submit">Play</button>
+                    <button id="url-cancel" class="url-form__cancel" type="button" title="Cancel" aria-label="Cancel">
+                      <svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+                    </button>
+                  </form>
+                  <p id="url-hint" class="url-form__hint" hidden>Direct MP4/WebM, an HLS <code>.m3u8</code>, or a DASH <code>.mpd</code> — live or on-demand.</p>
+                  <p id="url-error" class="url-form__error" role="alert" hidden></p>
+                </div>
+
                 <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span></span>
               </div>
             </section>
@@ -360,6 +387,7 @@
                 <li><span>Mute</span><span class="keys__caps"><kbd class="kbd">M</kbd></span></li>
                 <li><span>Fullscreen</span><span class="keys__caps"><kbd class="kbd">F</kbd></span></li>
                 <li><span>Open a file</span><span class="keys__caps"><kbd class="kbd">O</kbd></span></li>
+                <li><span>Open a URL</span><span class="keys__caps"><kbd class="kbd">U</kbd></span></li>
               </ul>
             </div>
             <div class="shortcuts__col">
