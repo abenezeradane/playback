@@ -39,6 +39,12 @@ struct StreamStatus {
     /// True once a sibling `<path>.done` marker exists — writing has finished, so
     /// the frontend can finalize the MediaSource and treat it as a normal file.
     complete: bool,
+    /// Milliseconds since the file was last modified (saturating; `u64::MAX` if the
+    /// platform can't report it). The frontend uses this to recognise a recording
+    /// in progress *before* the first frame paints: a recently-written file is a
+    /// live candidate worth probing for growth, while a file last touched long ago
+    /// is static and opens normally with no probe delay (play-005 detect-before-play).
+    mtime_age_ms: u64,
 }
 
 /// Report the size of a media file plus whether it is a live capture in progress.
@@ -46,10 +52,17 @@ struct StreamStatus {
 /// stream has finalized.
 #[tauri::command]
 fn stream_status(path: String) -> Result<StreamStatus, String> {
-    let size = fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    let size = meta.len();
     let live = Path::new(&format!("{path}.live")).exists();
     let complete = Path::new(&format!("{path}.done")).exists();
-    Ok(StreamStatus { size, live, complete })
+    let mtime_age_ms = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .map(|age| age.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(u64::MAX);
+    Ok(StreamStatus { size, live, complete, mtime_age_ms })
 }
 
 /// Where a fragmented-MP4 livestream should begin appending so the viewer starts

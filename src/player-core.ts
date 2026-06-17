@@ -544,6 +544,33 @@ export function liveProgressFraction(currentTime: number, w: LiveWindow): number
   return clamp(currentTime / w.available, 0, 1);
 }
 
+/**
+ * A tiny guard (seconds) kept between the playhead and the very end of decoded
+ * media during live playback, so the playhead never sits exactly on the buffered
+ * end — which makes the media element flap between "playing" and "stalled".
+ */
+export const LIVE_STALL_GUARD = 0.5;
+
+/**
+ * The furthest the playhead may advance during live playback before it risks
+ * running into not-yet-decoded media: the write head (`available`) minus a small
+ * guard.
+ *
+ * This is deliberately distinct from `liveEdge` (the *target* live position, held
+ * a full `delay` behind the write head). The `delay` is headroom the playhead is
+ * allowed to spend for smooth playback — NOT a hard ceiling. Pinning the playhead
+ * to `liveEdge` every frame (as the first cut of play-003 did) fought live
+ * playback: the edge only advances in discrete poll-sized steps while the video
+ * plays continuously, so the playhead kept overshooting the frozen edge and being
+ * yanked back, producing a visible stutter at the live edge and a lag readout that
+ * never settled on "LIVE". Clamping only against this stall ceiling lets the
+ * playhead glide through the safety buffer and stay genuinely caught up.
+ */
+export function liveStallCeiling(w: LiveWindow, guard: number = LIVE_STALL_GUARD): number {
+  if (!w.live) return w.available;
+  return Math.max(0, w.available - guard);
+}
+
 // ---------------------------------------------------------------------------
 // Frame-accurate timeline / cut view (play-004)
 //

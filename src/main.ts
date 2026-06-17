@@ -43,7 +43,9 @@ import {
   readStoredTimestamps,
   writeStoredTimestamps,
   LIVE_DELAY_SECONDS,
+  LIVE_STALL_GUARD,
   liveEdge,
+  liveStallCeiling,
   clampToLiveWindow,
   skipLive,
   isCaughtUp,
@@ -787,6 +789,8 @@ interface StreamStatus {
   size: number;
   live: boolean;
   complete: boolean;
+  /** Milliseconds since the file was last written (see lib.rs). */
+  mtime_age_ms: number;
 }
 
 interface LiveStartLayout {
@@ -794,6 +798,18 @@ interface LiveStartLayout {
   init_end: number;
   start: number;
 }
+
+// --- Up-front live detection (play-005 detect-before-play) -----------------
+// A file last modified within this window is a live candidate worth probing for
+// active growth; anything older is treated as a finished/static file and opened
+// normally with no probe delay (so ordinary opens stay instant).
+const LIVE_RECENT_MS = 15_000;
+// How long to watch for growth when probing a recently-written file, and how many
+// new bytes must arrive in that window to count as "still being written". The
+// threshold only has to clear filesystem-metadata jitter — a real capture appends
+// far more — so it stays comfortably below one tick of a slow writer.
+const LIVE_GROWTH_SAMPLE_MS = 400;
+const LIVE_GROWTH_THRESHOLD = 8 * 1024;
 
 /** Bytes pulled per read; reads per poll (so a fresh window loads quickly). */
 const LIVE_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -1325,12 +1341,16 @@ function onLiveUpdate(): void {
     pendingGoLive = false;
     doJumpToLive();
   }
-  // Enforce the live delay: while playing, never let the playhead outrun the
-  // live edge into the trailing safety buffer (e.g. if writing momentarily
-  // stalls). Tracking back and seeking are untouched.
+  // Stall guard (play-005): only stop the playhead from running into
+  // not-yet-decoded media — i.e. clamp it against the buffered end (the stall
+  // ceiling), NOT against `liveEdge`. The `delay` is headroom playback is allowed
+  // to glide through; pinning to `liveEdge` every frame (the old behaviour) yanked
+  // the playhead back each tick (the edge only advances in discrete poll steps),
+  // which stuttered the picture and left the lag readout stuck behind. Tracking
+  // back and seeking are untouched.
   if (live && live.live && !video.paused) {
-    const edge = liveEdge(live.window());
-    if (video.currentTime > edge + 0.1) video.currentTime = edge;
+    const ceiling = liveStallCeiling(live.window());
+    if (video.currentTime > ceiling) video.currentTime = ceiling;
   }
   syncFromVideo();
   render();
@@ -1391,8 +1411,14 @@ function doJumpToLive(): void {
   if (!w) return;
   syncFromVideo();
   const edge = liveEdge(w);
-  state = { ...state, currentTime: edge };
-  video.currentTime = edge;
+  // The live edge sits a full `delay` inside the buffered range, so this is a seek
+  // *within* already-decoded media — it should not force a rebuffer. Skip it
+  // entirely when we're already essentially at the edge, so a redundant seek can't
+  // hitch the picture (play-005 smooth jump-to-live).
+  if (Math.abs(state.currentTime - edge) > LIVE_STALL_GUARD) {
+    state = { ...state, currentTime: edge };
+    video.currentTime = edge;
+  }
   flashMarker("LIVE");
   render();
   showControls();
@@ -2135,13 +2161,22 @@ async function loadFromPath(path: string): Promise<void> {
   addRecent(path, basename(path));
   try {
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
-    // A `.live` marker means a writer is actively appending — tail it right away.
-    if (status && status.live && !status.complete) {
+    // Decide live-vs-normal BEFORE the first frame paints, so a recording in
+    // progress shows live chrome from the start with no flash of normal-file
+    // chrome (play-005 detect-before-play).
+    const detected = status ? await detectLive(path, status) : "normal";
+    if (detected === "live-marker") {
+      // A `.live` marker means a writer is actively appending — start from the top.
       await loadLiveFromPath(path, false);
       return;
     }
-    // Otherwise play normally, but watch in the background: if the file turns out
-    // to be growing (a recording in progress), auto-upgrade to live playback.
+    if (detected === "live-grow") {
+      // No marker, but the file is actively growing — tail it and snap to live.
+      await loadLiveFromPath(path, true);
+      return;
+    }
+    // Static/finished file: play normally, but keep a lightweight background watch
+    // in case it only starts growing later (a recording that begins after open).
     const { convertFileSrc } = await import("@tauri-apps/api/core");
     const src = convertFileSrc(path);
     loadSrc(src, basename(path), parentDir(path));
@@ -2152,6 +2187,49 @@ async function loadFromPath(path: string): Promise<void> {
   } catch (err) {
     showError(`Could not open the file: ${String(err)}`);
   }
+}
+
+/**
+ * Probe whether `path` should open as a livestream, up front (before the first
+ * frame paints), so live chrome never flashes through normal-file chrome.
+ *
+ *  - `live-marker` — a `<path>.live` marker says a writer is appending; tail now.
+ *  - `live-grow`   — no marker, but the file is recently-written AND visibly grows
+ *                    during a short sample AND is a tailable fragmented MP4.
+ *  - `normal`      — everything else: a finished or static file.
+ *
+ * The growth sample (and the fragment scan it gates) only runs for a
+ * recently-modified file, so ordinary opens of a static file stay instant.
+ */
+async function detectLive(
+  path: string,
+  status: StreamStatus,
+): Promise<"live-marker" | "live-grow" | "normal"> {
+  if (status.complete) return "normal";
+  if (status.live) return "live-marker";
+  // Only spend time probing a file that was just written — a file last touched
+  // long ago is static, so open it normally without any added latency.
+  if (status.mtime_age_ms > LIVE_RECENT_MS) return "normal";
+  // Confirm the file is actually still being appended to (cheap double-stat).
+  await delay(LIVE_GROWTH_SAMPLE_MS);
+  const after = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
+  if (!after || after.complete) return "normal";
+  if (after.size <= status.size + LIVE_GROWTH_THRESHOLD) return "normal";
+  // It is growing — make sure it is a fragmented MP4 we can tail via MediaSource.
+  try {
+    const layout = await tauriInvoke<LiveStartLayout>("live_start", {
+      path,
+      windowBytes: LIVE_WINDOW_BYTES,
+    });
+    return layout.init_end < layout.size ? "live-grow" : "normal";
+  } catch {
+    return "normal";
+  }
+}
+
+/** Promise-based delay used by the up-front live probe. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 /** Load a media file from an already-resolved URL (asset:// or blob:). */

@@ -37,6 +37,7 @@ import {
   writeStoredTimestamps,
   createLiveWindow,
   liveEdge,
+  liveStallCeiling,
   clampToLiveWindow,
   skipLive,
   isCaughtUp,
@@ -63,6 +64,7 @@ import {
   PLAYBACK_RATES,
   SKIP_SECONDS,
   LIVE_DELAY_SECONDS,
+  LIVE_STALL_GUARD,
   type PlayerState,
   type Shuttle,
 } from "./player-core";
@@ -513,6 +515,47 @@ describe("livestream — live window", () => {
     expect(liveProgressFraction(0, w)).toBe(0);
     expect(liveProgressFraction(80, w)).toBe(1); // clamped
     expect(liveProgressFraction(10, createLiveWindow(0))).toBe(0); // nothing written yet
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Livestream bugfixes (play-005): the stall ceiling + honest lag readout
+// ---------------------------------------------------------------------------
+describe("livestream — stall ceiling + honest lag (play-005)", () => {
+  it("liveStallCeiling guards the buffered end, NOT the live edge", () => {
+    const w = createLiveWindow(30); // available 30, liveEdge 25
+    // The ceiling is the write head minus a tiny guard (0.5) — well past liveEdge,
+    // so the playhead may glide through the whole `delay` safety buffer instead of
+    // being pinned 5s back every frame (which is what stuttered live playback).
+    expect(liveStallCeiling(w)).toBeCloseTo(30 - LIVE_STALL_GUARD);
+    expect(liveStallCeiling(w)).toBeGreaterThan(liveEdge(w));
+  });
+
+  it("liveStallCeiling never goes negative and honours a custom guard", () => {
+    expect(liveStallCeiling(createLiveWindow(0.2))).toBe(0); // available below the guard
+    expect(liveStallCeiling(createLiveWindow(10), 2)).toBe(8);
+  });
+
+  it("liveStallCeiling opens up the whole file once finalized", () => {
+    expect(liveStallCeiling(createLiveWindow(30, false))).toBe(30); // not live: no ceiling
+  });
+
+  it("caught up reads LIVE (lag 0), even gliding through the safety buffer", () => {
+    const w = createLiveWindow(30); // liveEdge 25, ceiling 29.5
+    // At the live edge, and anywhere in the safety buffer up to the ceiling, the
+    // playhead counts as caught up and the lag is 0 — so the readout is a true
+    // "LIVE", not a permanent "-5s" pinned behind the write head.
+    for (const t of [25, 27, 29, 29.5]) {
+      expect(isCaughtUp(t, w)).toBe(true);
+      expect(behindLive(t, w)).toBe(0);
+    }
+  });
+
+  it("the -Ns lag is the genuine distance behind the live edge", () => {
+    const w = createLiveWindow(30); // liveEdge 25
+    expect(behindLive(15, w)).toBe(10); // 10s behind the playable edge
+    expect(isCaughtUp(15, w)).toBe(false);
+    expect(behindLive(25, w)).toBe(0); // exactly at the edge → caught up
   });
 });
 
