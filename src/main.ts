@@ -57,6 +57,7 @@ import {
   lastFrameTime,
   fractionToTime,
   rulerTicks,
+  isTextEntryTarget,
   createShuttle,
   shuttleStop,
   shuttleForward,
@@ -2451,15 +2452,49 @@ function wireCut(): void {
   });
 }
 
+/** DOM adapter: is this focused element a text-entry field? (See player-core.) */
+function isFocusTextEntry(el: HTMLElement | null): boolean {
+  return isTextEntryTarget(
+    el && {
+      tagName: el.tagName,
+      type: (el as HTMLInputElement).type,
+      isContentEditable: el.isContentEditable,
+    },
+  );
+}
+
+/**
+ * Bugfix: after a UI element is clicked it keeps keyboard focus, which "steals"
+ * the hotkeys — a focused <input type=range> (the scrubber / volume) trips
+ * wireKeyboard's text-entry guard and silences every shortcut, and a focused
+ * <button> re-fires on Space/Enter. So after any pointer click on a control,
+ * hand focus back to the document body. Text-entry fields (the add-timestamp
+ * input) are left focused so the user can keep typing.
+ *
+ * Bound on the document in the bubble phase so a control's own click handler
+ * (e.g. "Add timestamp" focusing its input) has already run; we only blur when
+ * focus did NOT land on a text field. Keyboard-synthesized clicks (Enter/Space
+ * on a focused button, detail === 0) are left alone so Tab navigation keeps its
+ * focus ring.
+ */
+function wireFocusReturn(): void {
+  document.addEventListener("click", (e) => {
+    if (e.detail === 0) return; // keyboard-activated click — keep focus for a11y
+    const active = document.activeElement as HTMLElement | null;
+    if (active && active !== document.body && !isFocusTextEntry(active)) {
+      active.blur();
+    }
+  });
+}
+
 function wireKeyboard(): void {
   window.addEventListener("keydown", (e) => {
-    // Don't hijack typing in inputs.
-    const target = e.target as HTMLElement | null;
-    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
-      // Keystrokes inside a text field are handled locally (the add-timestamp
-      // input owns its Enter/Escape); never trigger player shortcuts here.
-      return;
-    }
+    // Don't hijack typing in a text field — but ONLY a true text-entry field.
+    // Range sliders (the scrubber / volume), checkboxes and buttons are also
+    // <input>/focusable, and a stale focus on one of those must not disable
+    // every shortcut (see isTextEntryTarget). The add-timestamp input owns its
+    // own Enter/Escape locally, so we never reach the player shortcuts here.
+    if (isFocusTextEntry(e.target as HTMLElement | null)) return;
 
     // Timeline / cut view (play-004): J/K/L drive the shuttle transport,
     // overriding their normal-mode meanings (k = play/pause, l = jump-to-live)
@@ -2614,6 +2649,7 @@ async function loadLaunchFile(): Promise<void> {
 // ---------------------------------------------------------------------------
 wireControls();
 wireKeyboard();
+wireFocusReturn();
 loadPinChapter();
 void registerDragAndDrop();
 void loadLaunchFile();

@@ -748,3 +748,55 @@ export function rulerTicks(duration: number, approxMajorCount = 8): RulerTick[] 
   }
   return ticks;
 }
+
+// ---------------------------------------------------------------------------
+// Focus / keyboard targeting
+// ---------------------------------------------------------------------------
+
+/** The bits of a focused element needed to classify it (DOM-free for testing). */
+export interface FocusTarget {
+  /** element.tagName (case-insensitive). */
+  tagName: string;
+  /** input.type for an <input>; ignored for other tags. */
+  type?: string;
+  /** element.isContentEditable. */
+  isContentEditable?: boolean;
+}
+
+/**
+ * <input> types that accept free text and so should swallow keyboard shortcuts
+ * while focused. Everything NOT in this set — range, checkbox, radio, button,
+ * etc. — must keep player hotkeys live even when it holds focus.
+ */
+const TEXT_INPUT_TYPES = new Set([
+  "text",
+  "search",
+  "url",
+  "tel",
+  "email",
+  "password",
+  "number",
+  "date",
+  "datetime-local",
+  "month",
+  "week",
+  "time",
+  "", // no type attribute reflects as "text" in the DOM, but guard the raw "" too
+]);
+
+/**
+ * Whether a focused element is a text-entry field that should capture typing
+ * (and therefore suppress player hotkeys). True for <textarea>, a
+ * contentEditable host, and <input> of a text-like type — but deliberately
+ * FALSE for range sliders (the scrubber / volume), checkboxes, and buttons, so
+ * that clicking one of those and leaving it focused does not silently disable
+ * every keyboard shortcut. Pure (no DOM) so it can be unit tested.
+ */
+export function isTextEntryTarget(target: FocusTarget | null | undefined): boolean {
+  if (!target) return false;
+  if (target.isContentEditable) return true;
+  const tag = target.tagName.toUpperCase();
+  if (tag === "TEXTAREA") return true;
+  if (tag === "INPUT") return TEXT_INPUT_TYPES.has((target.type ?? "").toLowerCase());
+  return false;
+}

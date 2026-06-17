@@ -57,6 +57,7 @@ import {
   shuttleRate,
   niceTickInterval,
   rulerTicks,
+  isTextEntryTarget,
   DEFAULT_FPS,
   SHUTTLE_SPEEDS,
   PLAYBACK_RATES,
@@ -663,5 +664,37 @@ describe("timeline ruler ticks (play-004)", () => {
     expect(rulerTicks(0)).toEqual([]);
     expect(rulerTicks(-10)).toEqual([]);
     expect(rulerTicks(NaN)).toEqual([]);
+  });
+});
+
+describe("isTextEntryTarget — keyboard-shortcut focus guard (bugfix)", () => {
+  it("is true for text-entry fields that should swallow shortcuts", () => {
+    expect(isTextEntryTarget({ tagName: "TEXTAREA" })).toBe(true);
+    expect(isTextEntryTarget({ tagName: "INPUT", type: "text" })).toBe(true);
+    expect(isTextEntryTarget({ tagName: "INPUT", type: "search" })).toBe(true);
+    expect(isTextEntryTarget({ tagName: "INPUT", type: "number" })).toBe(true);
+    // no type attribute reflects as "text" in the DOM
+    expect(isTextEntryTarget({ tagName: "INPUT", type: "" })).toBe(true);
+    expect(isTextEntryTarget({ tagName: "INPUT" })).toBe(true);
+    // contentEditable host, regardless of tag
+    expect(isTextEntryTarget({ tagName: "DIV", isContentEditable: true })).toBe(true);
+  });
+
+  it("is false for sliders / checkboxes / buttons — these must NOT kill hotkeys", () => {
+    // The core of the bug: a focused range slider (scrubber / volume) used to
+    // swallow every shortcut.
+    expect(isTextEntryTarget({ tagName: "INPUT", type: "range" })).toBe(false);
+    expect(isTextEntryTarget({ tagName: "INPUT", type: "checkbox" })).toBe(false);
+    expect(isTextEntryTarget({ tagName: "INPUT", type: "radio" })).toBe(false);
+    expect(isTextEntryTarget({ tagName: "INPUT", type: "button" })).toBe(false);
+    expect(isTextEntryTarget({ tagName: "BUTTON" })).toBe(false);
+    expect(isTextEntryTarget({ tagName: "DIV" })).toBe(false);
+  });
+
+  it("is case-insensitive on tag and type, and false for no target", () => {
+    expect(isTextEntryTarget({ tagName: "input", type: "TEXT" })).toBe(true);
+    expect(isTextEntryTarget({ tagName: "input", type: "RANGE" })).toBe(false);
+    expect(isTextEntryTarget(null)).toBe(false);
+    expect(isTextEntryTarget(undefined)).toBe(false);
   });
 });

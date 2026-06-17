@@ -32,6 +32,11 @@ control bar, chapters panel, and overlays once a video is loaded.
 - **Fullscreen** — button or `F`.
 - **Keyboard shortcuts overlay** — press `?` (or the keyboard button) for a full,
   grouped list of shortcuts; `Esc` (or the backdrop / close button) dismisses it.
+  Shortcuts stay live after you use a control: clicking a button, the scrubber,
+  or a volume slider hands focus back to the player, so a key press still drives
+  playback rather than being swallowed by the last-clicked element. (Typing into
+  a text field — e.g. the add-timestamp box — still goes to the field, not the
+  player.)
 - **Auto-hiding controls** during playback.
 - **Timestamps / chapters** — open the panel (`T` or the ☰ button) and click
   **Add timestamp** to enter one as `HH:MM:SS Title` (Enter adds it and keeps the
