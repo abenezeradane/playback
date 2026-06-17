@@ -413,118 +413,6 @@ body {
   font-size: 13px;
 }
 
-/* Open from a URL (play-006): a stream link instead of a local file. The hero
-   inner disables pointer events (so the full-card dropzone catches clicks), so
-   this whole block re-enables them. */
-.home-url {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  margin-top: 2px;
-  pointer-events: auto;
-}
-
-.home-url__toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border: 0;
-  background: transparent;
-  border-radius: var(--radius-sm);
-  color: var(--mute);
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: color 120ms ease;
-}
-
-.home-url__toggle:hover {
-  color: var(--ink);
-}
-
-.home-url__toggle .ic {
-  width: 15px;
-  height: 15px;
-}
-
-/* The revealed URL input + Play, shown when data-open="true". */
-.home-url[data-open="true"] .home-url__toggle {
-  display: none;
-}
-
-.url-form {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: min(440px, 80vw);
-}
-
-.url-form__input {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: 9px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-elevated);
-  border: 1px solid var(--hairline-strong);
-  color: var(--ink);
-  font-family: inherit;
-  font-size: 13px;
-  outline: none;
-}
-
-.url-form__input::placeholder {
-  color: var(--stone);
-}
-
-.url-form__input:focus {
-  border-color: var(--on-dark);
-}
-
-.url-form__cancel {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  flex: 0 0 auto;
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--mute);
-  cursor: pointer;
-}
-
-.url-form__cancel:hover {
-  color: var(--ink);
-  border-color: var(--hairline-strong);
-}
-
-.url-form__cancel .ic {
-  width: 16px;
-  height: 16px;
-}
-
-.url-form__hint {
-  font-size: 12px;
-  color: var(--mute);
-}
-
-.url-form__hint code {
-  font-family: var(--mono, ui-monospace, monospace);
-  font-size: 11px;
-  color: var(--stone);
-}
-
-.url-form__error {
-  font-size: 13px;
-  color: var(--live);
-  max-width: min(440px, 80vw);
-  text-align: center;
-}
-
 .dropzone__formats {
   display: flex;
   gap: 8px;
@@ -1103,18 +991,6 @@ body {
 
 .timerow .t-tot {
   color: var(--mute);
-}
-
-.timerow .t-live {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--mute);
-}
-
-/* LIVE lights red while following the edge; dims when the viewer is backtracked. */
-.timerow .t-live[data-live="true"] {
-  color: var(--live);
 }
 
 /* Controls row: left (transport handled below) · center · right */
@@ -1728,126 +1604,44 @@ body {
 }
 
 /* ===================================================================== */
-/* LIVE CHROME (frame 04)                                                */
+/* LIVESTREAM NOTICE (playback temporarily deprecated)                   */
 /* ===================================================================== */
-.scrubber__live-edge {
+/* Shown centered over the empty player when a detected livestream is opened. */
+.live-notice {
   position: absolute;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  width: 3px;
-  height: 20px;
-  border-radius: var(--radius-pill);
-  background: var(--live);
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
   pointer-events: none;
-  z-index: 4;
 }
 
-.scrubber__live-tag {
-  position: absolute;
-  bottom: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 3px 7px;
-  border-radius: var(--radius-pill);
-  background: var(--live);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  line-height: 1;
+.live-notice[hidden] {
+  display: none;
 }
 
-.live-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 0;
-  cursor: pointer;
-  border-radius: var(--radius-pill);
-  font-family: inherit;
-  font-weight: 700;
-  letter-spacing: 0.6px;
-  font-size: 12px;
-  padding: 5px 11px;
-  color: #fff;
-  background: var(--live);
-  white-space: nowrap;
+.live-notice .ic {
+  width: 34px;
+  height: 34px;
+  color: var(--stone);
+  margin-bottom: 4px;
 }
 
-.live-badge::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-pill);
-  background: #fff;
-  flex-shrink: 0;
+.live-notice__title {
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 600;
 }
 
-.live-badge[data-caught="true"] {
-  animation: live-pulse 2s ease-in-out infinite;
-}
-
-/* Backtracked: a ghosted badge so it reads as "off live" — the GO LIVE pill and
-   the L hotkey are the way back to the edge. */
-.live-badge[data-caught="false"] {
-  background: color-mix(in srgb, var(--live) 16%, transparent);
-  color: var(--live);
-}
-
-.live-badge[data-caught="false"]::before {
-  background: var(--live);
-}
-
-@keyframes live-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgba(255, 97, 97, 0.5);
-  }
-  50% {
-    box-shadow: 0 0 0 6px rgba(255, 97, 97, 0);
-  }
-}
-
-.golive {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  border: 0;
-  cursor: pointer;
-  border-radius: var(--radius-md);
-  font-family: inherit;
-  font-weight: 500;
-  letter-spacing: 0.2px;
-  font-size: 14px;
-  padding: 8px 14px;
-  color: #fff;
-  background: var(--live);
-  white-space: nowrap;
-  transition: transform 80ms ease, background 120ms ease;
-}
-
-.golive:active {
-  transform: scale(0.97);
-  background: color-mix(in srgb, var(--live) 85%, #000 15%);
-}
-
-.golive__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: var(--radius-pill);
-  background: #fff;
-  flex-shrink: 0;
-}
-
-.golive .kbd {
-  background: rgba(255, 255, 255, 0.18);
-  border: 1px solid rgba(255, 255, 255, 0.28);
-  color: #fff;
-  border-radius: var(--radius-xs);
-  min-width: 18px;
-  height: 18px;
-  font-size: 11px;
-  padding: 0 5px;
+.live-notice__sub {
+  color: var(--mute);
+  font-size: 13px;
+  max-width: 360px;
 }
 
 /* ===================================================================== */

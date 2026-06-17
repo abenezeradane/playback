@@ -35,16 +35,6 @@ import {
   serializeTimestampStore,
   readStoredTimestamps,
   writeStoredTimestamps,
-  createLiveWindow,
-  liveEdge,
-  liveStallCeiling,
-  clampToLiveWindow,
-  skipLive,
-  isCaughtUp,
-  canFastForwardLive,
-  behindLive,
-  shouldResyncToLive,
-  liveProgressFraction,
   snapFps,
   timeToFrame,
   frameToTime,
@@ -60,16 +50,10 @@ import {
   niceTickInterval,
   rulerTicks,
   isTextEntryTarget,
-  looksLikeUrl,
-  detectStreamType,
-  streamSourceName,
   DEFAULT_FPS,
   SHUTTLE_SPEEDS,
   PLAYBACK_RATES,
   SKIP_SECONDS,
-  LIVE_DELAY_SECONDS,
-  LIVE_STALL_GUARD,
-  LIVE_RESYNC_BEHIND,
   type PlayerState,
   type Shuttle,
 } from "./player-core";
@@ -456,139 +440,6 @@ describe("timestamps — persistence (play-007)", () => {
   });
 });
 
-describe("livestream — live window", () => {
-  it("createLiveWindow uses the default delay and is live by default", () => {
-    const w = createLiveWindow(30);
-    expect(w).toEqual({ available: 30, delay: LIVE_DELAY_SECONDS, live: true });
-    expect(createLiveWindow().available).toBe(0);
-    expect(createLiveWindow(10, false).live).toBe(false);
-  });
-
-  it("liveEdge holds the edge `delay` seconds behind the write head", () => {
-    expect(liveEdge(createLiveWindow(30))).toBe(30 - LIVE_DELAY_SECONDS);
-    expect(liveEdge(createLiveWindow(12))).toBe(7);
-  });
-
-  it("liveEdge never goes below zero before enough is written", () => {
-    expect(liveEdge(createLiveWindow(3))).toBe(0);
-    expect(liveEdge(createLiveWindow(0))).toBe(0);
-  });
-
-  it("a finalized stream exposes its whole length as the edge", () => {
-    expect(liveEdge(createLiveWindow(30, false))).toBe(30);
-  });
-
-  it("clampToLiveWindow keeps seeks inside [0, liveEdge]", () => {
-    const w = createLiveWindow(30); // edge = 25
-    expect(clampToLiveWindow(10, w)).toBe(10);
-    expect(clampToLiveWindow(-5, w)).toBe(0);
-    expect(clampToLiveWindow(40, w)).toBe(25); // cannot pass the live edge
-  });
-
-  it("skipLive tracks back freely but fast-forward stops at the live edge", () => {
-    const w = createLiveWindow(30); // edge = 25
-    expect(skipLive(10, 10, w)).toBe(20);
-    expect(skipLive(20, 10, w)).toBe(25); // clamped to the edge, not 30
-    expect(skipLive(4, -10, w)).toBe(0); // clamped to start
-  });
-
-  it("isCaughtUp is true only at/after the live edge while live", () => {
-    const w = createLiveWindow(30); // edge = 25
-    expect(isCaughtUp(10, w)).toBe(false);
-    expect(isCaughtUp(25, w)).toBe(true);
-    expect(isCaughtUp(24.9, w)).toBe(true); // within the epsilon tolerance
-    expect(isCaughtUp(25, createLiveWindow(30, false))).toBe(false); // finalized: never "live"
-  });
-
-  it("canFastForwardLive gates FF on the live edge but never blocks a finished stream", () => {
-    const w = createLiveWindow(30); // edge = 25
-    expect(canFastForwardLive(10, w)).toBe(true);
-    expect(canFastForwardLive(25, w)).toBe(false);
-    expect(canFastForwardLive(25, createLiveWindow(30, false))).toBe(true);
-  });
-
-  it("behindLive reports the gap back to the live edge", () => {
-    const w = createLiveWindow(30); // edge = 25
-    expect(behindLive(10, w)).toBe(15);
-    expect(behindLive(25, w)).toBe(0);
-    expect(behindLive(30, w)).toBe(0); // never negative
-  });
-
-  it("liveProgressFraction maps the playhead onto the [0, available] window", () => {
-    const w = createLiveWindow(40);
-    expect(liveProgressFraction(10, w)).toBeCloseTo(0.25);
-    expect(liveProgressFraction(0, w)).toBe(0);
-    expect(liveProgressFraction(80, w)).toBe(1); // clamped
-    expect(liveProgressFraction(10, createLiveWindow(0))).toBe(0); // nothing written yet
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Livestream bugfixes (play-005): the stall ceiling + honest lag readout
-// ---------------------------------------------------------------------------
-describe("livestream — stall ceiling + honest lag (play-005)", () => {
-  it("liveStallCeiling guards the buffered end, NOT the live edge", () => {
-    const w = createLiveWindow(30); // available 30, liveEdge 25
-    // The ceiling is the write head minus a tiny guard (0.5) — well past liveEdge,
-    // so the playhead may glide through the whole `delay` safety buffer instead of
-    // being pinned 5s back every frame (which is what stuttered live playback).
-    expect(liveStallCeiling(w)).toBeCloseTo(30 - LIVE_STALL_GUARD);
-    expect(liveStallCeiling(w)).toBeGreaterThan(liveEdge(w));
-  });
-
-  it("liveStallCeiling never goes negative and honours a custom guard", () => {
-    expect(liveStallCeiling(createLiveWindow(0.2))).toBe(0); // available below the guard
-    expect(liveStallCeiling(createLiveWindow(10), 2)).toBe(8);
-  });
-
-  it("liveStallCeiling opens up the whole file once finalized", () => {
-    expect(liveStallCeiling(createLiveWindow(30, false))).toBe(30); // not live: no ceiling
-  });
-
-  it("caught up reads LIVE (lag 0), even gliding through the safety buffer", () => {
-    const w = createLiveWindow(30); // liveEdge 25, ceiling 29.5
-    // At the live edge, and anywhere in the safety buffer up to the ceiling, the
-    // playhead counts as caught up and the lag is 0 — so the readout is a true
-    // "LIVE", not a permanent "-5s" pinned behind the write head.
-    for (const t of [25, 27, 29, 29.5]) {
-      expect(isCaughtUp(t, w)).toBe(true);
-      expect(behindLive(t, w)).toBe(0);
-    }
-  });
-
-  it("the -Ns lag is the genuine distance behind the live edge", () => {
-    const w = createLiveWindow(30); // liveEdge 25
-    expect(behindLive(15, w)).toBe(10); // 10s behind the playable edge
-    expect(isCaughtUp(15, w)).toBe(false);
-    expect(behindLive(25, w)).toBe(0); // exactly at the edge → caught up
-  });
-});
-
-describe("livestream — two-state follow + jitter-free re-sync", () => {
-  it("a following playhead near the edge never re-syncs (no per-poll seek)", () => {
-    const w = createLiveWindow(30); // liveEdge 25
-    // Free-running keeps the playhead within ~a poll of the edge; tiny gaps (and
-    // even being slightly AHEAD of the edge through the safety buffer) must not
-    // trigger a seek — that re-seek-every-poll was the old sawtooth stutter.
-    expect(shouldResyncToLive(25, w)).toBe(false); // exactly at the edge
-    expect(shouldResyncToLive(27, w)).toBe(false); // ahead, inside the buffer
-    expect(shouldResyncToLive(23, w)).toBe(false); // 2s behind — still poll jitter
-  });
-
-  it("a genuine fall-behind (a stall) past the threshold does re-sync", () => {
-    const w = createLiveWindow(30); // liveEdge 25
-    // Only once the gap back to the edge clearly exceeds poll jitter do we catch up.
-    expect(shouldResyncToLive(25 - LIVE_RESYNC_BEHIND - 0.01, w)).toBe(true);
-    expect(shouldResyncToLive(10, w)).toBe(true); // 15s behind → a real stall
-    // The threshold sits comfortably above one poll's worth of advance.
-    expect(LIVE_RESYNC_BEHIND).toBeGreaterThan(2);
-  });
-
-  it("a finalized stream never re-syncs (it is just a file)", () => {
-    expect(shouldResyncToLive(0, createLiveWindow(30, false))).toBe(false);
-  });
-});
-
 // ---------------------------------------------------------------------------
 // Frame-accurate timeline / cut view (play-004)
 // ---------------------------------------------------------------------------
@@ -769,68 +620,5 @@ describe("isTextEntryTarget — keyboard-shortcut focus guard (bugfix)", () => {
     expect(isTextEntryTarget({ tagName: "input", type: "RANGE" })).toBe(false);
     expect(isTextEntryTarget(null)).toBe(false);
     expect(isTextEntryTarget(undefined)).toBe(false);
-  });
-});
-
-describe("URL / network streaming (play-006)", () => {
-  it("looksLikeUrl accepts only absolute http(s) URLs", () => {
-    expect(looksLikeUrl("https://example.com/stream.m3u8")).toBe(true);
-    expect(looksLikeUrl("http://10.0.0.5:8080/video.mp4")).toBe(true);
-    expect(looksLikeUrl("  https://example.com/a.mp4  ")).toBe(true); // trimmed
-    // Rejects: blank, bare paths (no scheme), and non-network schemes.
-    expect(looksLikeUrl("")).toBe(false);
-    expect(looksLikeUrl("   ")).toBe(false);
-    expect(looksLikeUrl("example.com/video.mp4")).toBe(false);
-    expect(looksLikeUrl("/Users/me/video.mp4")).toBe(false);
-    expect(looksLikeUrl("C:\\Users\\me\\video.mp4")).toBe(false);
-    expect(looksLikeUrl("file:///c:/video.mp4")).toBe(false);
-    expect(looksLikeUrl("javascript:alert(1)")).toBe(false);
-    expect(looksLikeUrl("not a url at all")).toBe(false);
-  });
-
-  it("detectStreamType classifies by path extension", () => {
-    expect(detectStreamType("https://x.com/movie.mp4")?.kind).toBe("direct");
-    expect(detectStreamType("https://x.com/clip.webm")?.kind).toBe("direct");
-    expect(detectStreamType("https://x.com/live/index.m3u8")?.kind).toBe("hls");
-    expect(detectStreamType("https://x.com/live/manifest.mpd")?.kind).toBe("dash");
-    expect(detectStreamType("https://x.com/playlist.m3u")?.kind).toBe("hls");
-  });
-
-  it("detectStreamType ignores query/fragment and is case-insensitive on the extension", () => {
-    expect(detectStreamType("https://x.com/live.M3U8?token=abc123")?.kind).toBe("hls");
-    expect(detectStreamType("https://x.com/dash.MPD#t=30")?.kind).toBe("dash");
-    expect(detectStreamType("https://x.com/v.MP4?sig=1&exp=2")?.kind).toBe("direct");
-  });
-
-  it("detectStreamType lets a manifest content-type override a missing/ambiguous extension", () => {
-    // Extension-less CDN URL: the content-type decides.
-    expect(detectStreamType("https://cdn.x.com/live/stream", "application/vnd.apple.mpegurl")?.kind).toBe("hls");
-    expect(detectStreamType("https://cdn.x.com/live/stream", "application/x-mpegURL")?.kind).toBe("hls");
-    expect(detectStreamType("https://cdn.x.com/live/stream", "application/dash+xml")?.kind).toBe("dash");
-    // No extension and no hint -> direct (the safe default the <video> can attempt).
-    expect(detectStreamType("https://cdn.x.com/live/stream")?.kind).toBe("direct");
-  });
-
-  it("detectStreamType returns null for anything that is not a playable http(s) URL", () => {
-    expect(detectStreamType("")).toBeNull();
-    expect(detectStreamType("/local/path.mp4")).toBeNull();
-    expect(detectStreamType("file:///c:/video.mp4")).toBeNull();
-    expect(detectStreamType("ftp://host/video.mp4")).toBeNull();
-  });
-
-  it("detectStreamType carries the trimmed url through", () => {
-    expect(detectStreamType("  https://x.com/a.m3u8  ")).toEqual({
-      url: "https://x.com/a.m3u8",
-      kind: "hls",
-    });
-  });
-
-  it("streamSourceName uses the last path segment, decoded, or the host", () => {
-    expect(streamSourceName("https://host.tv/live/channel.m3u8")).toBe("channel.m3u8");
-    expect(streamSourceName("https://host.tv/path/")).toBe("path"); // trailing slash ignored
-    expect(streamSourceName("https://host.tv/")).toBe("host.tv"); // host fallback
-    expect(streamSourceName("https://host.tv")).toBe("host.tv");
-    expect(streamSourceName("https://host.tv/my%20stream.mp4")).toBe("my stream.mp4");
-    expect(streamSourceName("not a url")).toBe("not a url"); // returns input unchanged
   });
 });

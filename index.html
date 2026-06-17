@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost blob: data: https: http:; connect-src 'self' https: http: blob: data:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' asset: http://asset.localhost data:; media-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <title>Playback</title>
   </head>
   <body>
-    <div id="app" class="app" data-state="empty" data-live="false">
+    <div id="app" class="app" data-state="empty">
       <!-- ===================== HOME / EMPTY STATE (frame 01) ===================== -->
       <section id="empty-state" class="home">
         <div class="home__ambient" aria-hidden="true"></div>
@@ -47,32 +47,6 @@
                   <span class="home-hero__hint"><kbd class="kbd">O</kbd> to open</span>
                 </div>
 
-                <!-- Open from a URL (play-006): a stream link instead of a local file -->
-                <div id="home-url" class="home-url" data-open="false">
-                  <button id="btn-open-url" class="home-url__toggle" type="button">
-                    <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>
-                    Open a URL
-                    <kbd class="kbd">U</kbd>
-                  </button>
-                  <form id="url-form" class="url-form" hidden>
-                    <input
-                      id="url-input"
-                      class="url-form__input"
-                      type="url"
-                      inputmode="url"
-                      spellcheck="false"
-                      autocomplete="off"
-                      placeholder="https://example.com/stream.m3u8"
-                    />
-                    <button id="url-go" class="pill pill--primary pill--sm" type="submit">Play</button>
-                    <button id="url-cancel" class="url-form__cancel" type="button" title="Cancel" aria-label="Cancel">
-                      <svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
-                    </button>
-                  </form>
-                  <p id="url-hint" class="url-form__hint" hidden>Direct MP4/WebM, an HLS <code>.m3u8</code>, or a DASH <code>.mpd</code> — live or on-demand.</p>
-                  <p id="url-error" class="url-form__error" role="alert" hidden></p>
-                </div>
-
                 <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span></span>
               </div>
             </section>
@@ -106,7 +80,7 @@
               <div class="feature-card">
                 <span class="feature-card__chip" aria-hidden="true"><svg class="ic" viewBox="0 0 24 24"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9" /><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5" /><circle cx="12" cy="12" r="2" /><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5" /><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" /></svg></span>
                 <h3 class="feature-card__title">Livestream</h3>
-                <p class="feature-card__desc">Watch a file play back live as it's being written.</p>
+                <p class="feature-card__desc">Livestream playback is temporarily unavailable.</p>
               </div>
               <div class="feature-card">
                 <span class="feature-card__chip" aria-hidden="true"><svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg></span>
@@ -127,7 +101,7 @@
         <div class="scrim scrim--top" aria-hidden="true"></div>
         <div class="scrim scrim--bottom" aria-hidden="true"></div>
 
-        <!-- Top overlay: back + title + live badge -->
+        <!-- Top overlay: back + title -->
         <div class="overlay-top" data-tauri-drag-region>
           <button id="btn-back" class="glass-btn" type="button" title="Back to library">
             <svg class="ic" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
@@ -135,10 +109,17 @@
           <div class="overlay-top__title">
             <div class="overlay-top__heading">
               <span id="title-label" class="title-main"></span>
-              <button id="live-badge" class="live-badge" type="button" title="Jump to live (L)" data-caught="false" hidden>LIVE</button>
             </div>
             <span id="subtitle-label" class="title-sub"></span>
           </div>
+        </div>
+
+        <!-- Livestream playback is temporarily deprecated: a detected livestream
+             opens this empty player with a short notice instead of playing. -->
+        <div id="live-notice" class="live-notice" hidden>
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.9 19.1C1 15.2 1 8.8 4.9 4.9" /><path d="M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5" /><circle cx="12" cy="12" r="2" /><path d="M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5" /><path d="M19.1 4.9C23 8.8 23 15.1 19.1 19" /></svg>
+          <span class="live-notice__title">Livestream playback is temporarily unavailable</span>
+          <span class="live-notice__sub">This source was detected as a live stream. Live playback is disabled for now.</span>
         </div>
 
         <!-- Big center play/pause flash -->
@@ -177,10 +158,6 @@
             </div>
             <!-- Timestamp markers (play-002) injected here. -->
             <div id="markers" class="scrubber__markers"></div>
-            <!-- Live-edge tick (play-003). -->
-            <div id="live-edge" class="scrubber__live-edge" aria-hidden="true" hidden>
-              <span class="scrubber__live-tag">LIVE</span>
-            </div>
             <input id="seek" class="scrubber__range" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek" />
           </div>
 
@@ -209,9 +186,6 @@
             </div>
 
             <div class="controls__right">
-              <button id="btn-golive" class="golive" type="button" title="Jump to live (L)" hidden>
-                <span class="golive__dot" aria-hidden="true"></span>GO LIVE<kbd class="kbd">L</kbd>
-              </button>
               <button id="btn-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed">1&times;</button>
               <button id="btn-cut" class="iconbtn iconbtn--sm" type="button" title="Timeline view (C)" aria-pressed="false">
                 <svg class="ic" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M7 3v18" /><path d="M3 7.5h4" /><path d="M3 12h18" /><path d="M3 16.5h4" /><path d="M17 3v18" /><path d="M17 7.5h4" /><path d="M17 16.5h4" /></svg>
@@ -387,7 +361,6 @@
                 <li><span>Mute</span><span class="keys__caps"><kbd class="kbd">M</kbd></span></li>
                 <li><span>Fullscreen</span><span class="keys__caps"><kbd class="kbd">F</kbd></span></li>
                 <li><span>Open a file</span><span class="keys__caps"><kbd class="kbd">O</kbd></span></li>
-                <li><span>Open a URL</span><span class="keys__caps"><kbd class="kbd">U</kbd></span></li>
               </ul>
             </div>
             <div class="shortcuts__col">
@@ -395,10 +368,6 @@
               <ul class="keys">
                 <li><span>Previous / next chapter</span><span class="keys__caps"><kbd class="kbd">A</kbd><kbd class="kbd">D</kbd></span></li>
                 <li><span>Toggle chapters panel</span><span class="keys__caps"><kbd class="kbd">T</kbd></span></li>
-              </ul>
-              <p class="shortcuts__group">LIVESTREAM</p>
-              <ul class="keys">
-                <li><span>Jump to live edge</span><span class="keys__caps"><kbd class="kbd">L</kbd></span></li>
               </ul>
               <p class="shortcuts__group">TIMELINE (CUT VIEW)</p>
               <ul class="keys">

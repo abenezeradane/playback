@@ -20,7 +20,6 @@ import {
   rewind,
   seekTo,
   sectionSeekTime,
-  SKIP_SECONDS,
   sliderToTime,
   timeToSlider,
   progressFraction,
@@ -42,16 +41,6 @@ import {
   serializeTimestampStore,
   readStoredTimestamps,
   writeStoredTimestamps,
-  LIVE_DELAY_SECONDS,
-  LIVE_STALL_GUARD,
-  liveEdge,
-  liveStallCeiling,
-  clampToLiveWindow,
-  skipLive,
-  isCaughtUp,
-  canFastForwardLive,
-  shouldResyncToLive,
-  liveProgressFraction,
   DEFAULT_FPS,
   snapFps,
   formatSmpte,
@@ -65,16 +54,11 @@ import {
   shuttleForward,
   shuttleReverse,
   shuttleRate,
-  looksLikeUrl,
-  detectStreamType,
-  streamSourceName,
   type PlayerState,
   type Timestamp,
   type TimestampStore,
-  type LiveWindow,
   type Shuttle,
 } from "./player-core";
-import type HlsType from "hls.js";
 
 const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi"];
 
@@ -94,19 +78,14 @@ const stage = $<HTMLElement>("stage");
 const video = $<HTMLVideoElement>("video");
 const controls = $<HTMLDivElement>("controls");
 const centerToggle = $<HTMLDivElement>("center-toggle");
+// Shown over an empty player when a livestream is opened (livestream playback is
+// temporarily deprecated — we detect it but do not attempt to tail/play it).
+const liveNotice = $<HTMLDivElement>("live-notice");
 
 const btnOpen = $<HTMLButtonElement>("btn-open");
 const btnOpenTop = $<HTMLButtonElement>("btn-open-top");
 const dropZone = $<HTMLButtonElement>("drop-zone");
 
-// Open from a URL (play-006)
-const homeUrl = $<HTMLDivElement>("home-url");
-const btnOpenUrl = $<HTMLButtonElement>("btn-open-url");
-const urlForm = $<HTMLFormElement>("url-form");
-const urlInput = $<HTMLInputElement>("url-input");
-const urlCancel = $<HTMLButtonElement>("url-cancel");
-const urlHint = $<HTMLParagraphElement>("url-hint");
-const urlError = $<HTMLParagraphElement>("url-error");
 const recentCards = $<HTMLDivElement>("recent-cards");
 const recentEmpty = $<HTMLDivElement>("recent-empty");
 const btnClearRecent = $<HTMLButtonElement>("btn-clear-recent");
@@ -125,11 +104,6 @@ const buffered = $<HTMLDivElement>("buffered");
 const timeLabel = $<HTMLElement>("time");
 const titleLabel = $<HTMLSpanElement>("title-label");
 const subtitleLabel = $<HTMLSpanElement>("subtitle-label");
-
-// Livestream (play-003)
-const liveBadge = $<HTMLButtonElement>("live-badge");
-const btnGoLive = $<HTMLButtonElement>("btn-golive");
-const liveEdgeTick = $<HTMLDivElement>("live-edge");
 
 // Keyboard shortcuts overlay (frame 05)
 const shortcutsOverlay = $<HTMLDivElement>("shortcuts-overlay");
@@ -188,34 +162,6 @@ const cutVolume = $<HTMLInputElement>("cut-volume");
 let state: PlayerState = createInitialState();
 let isScrubbing = false;
 
-// The active livestream controller (play-003), or null for a normal file.
-let live: LiveStream | null = null;
-// Background watcher that auto-upgrades a normal open to live if the file grows.
-let growthWatch: number | undefined;
-// When a live source has just been (auto-)opened, jump to the live edge as soon
-// as enough has buffered (so an upgraded recording starts at "now", not the past).
-let pendingGoLive = false;
-// A livestream is shown as one of two states, never a counting lag number:
-// `true` = following the live edge ("LIVE"); `false` = the viewer has tracked
-// back ("BACKTRACKED"). Intent-driven (set by L / track-back / catching up),
-// never recomputed per-frame from the measured distance — that flicker was the
-// "jitter" the two-state model removes.
-let liveFollowing = false;
-
-// --- URL / network streaming (play-006) ------------------------------------
-// The active MSE engine for a remote HLS/DASH URL (a direct progressive URL just
-// uses video.src and needs no engine). `urlLive` flags an ongoing live URL so the
-// play-003 live chrome applies; `urlLiveTimer` refreshes the edge readout while
-// paused (seekable grows between timeupdates). `currentSourceKind` distinguishes
-// a network source from a local file so the right teardown/error path is used.
-let hls: HlsType | null = null;
-let dash: { reset?: () => void; destroy?: () => void } | null = null;
-let urlLive = false;
-let urlLiveTimer: number | undefined;
-let currentSourceKind: "file" | "url" = "file";
-/** Guards a one-shot URL-failure handler so it doesn't fire repeatedly. */
-let urlFailed = false;
-
 // Parsed timestamps + the DOM nodes rendered for them (index-aligned), so the
 // active-chapter highlight can be updated cheaply on every timeupdate.
 let timestamps: Timestamp[] = [];
@@ -272,28 +218,17 @@ function render(): void {
   btnPlay.dataset.playing = String(state.isPlaying);
   centerToggle.dataset.playing = String(state.isPlaying);
 
-  const w = activeLiveWindow();
-  if (w) {
-    renderLive(w);
-  } else {
-    // Normal file: time + scrubber against a fixed duration.
-    if (!isScrubbing) {
-      seek.value = String(timeToSlider(state.currentTime, state.duration, 1000));
-    }
-    progress.style.width = `${progressFraction(state) * 100}%`;
-    timeLabel.innerHTML = `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-sep">/</span><span class="t-tot">${formatTime(state.duration)}</span>`;
+  // Time + scrubber against a fixed duration.
+  if (!isScrubbing) {
+    seek.value = String(timeToSlider(state.currentTime, state.duration, 1000));
+  }
+  progress.style.width = `${progressFraction(state) * 100}%`;
+  timeLabel.innerHTML = `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-sep">/</span><span class="t-tot">${formatTime(state.duration)}</span>`;
 
-    // Buffered indicator
-    if (video.buffered.length > 0 && state.duration > 0) {
-      const end = video.buffered.end(video.buffered.length - 1);
-      buffered.style.width = `${bufferedFraction(end, state.duration) * 100}%`;
-    }
-
-    // Live chrome only applies in live mode.
-    if (!liveBadge.hidden) liveBadge.hidden = true;
-    if (!btnGoLive.hidden) btnGoLive.hidden = true;
-    if (!liveEdgeTick.hidden) liveEdgeTick.hidden = true;
-    if (btnForward.disabled) btnForward.disabled = false;
+  // Buffered indicator
+  if (video.buffered.length > 0 && state.duration > 0) {
+    const end = video.buffered.end(video.buffered.length - 1);
+    buffered.style.width = `${bufferedFraction(end, state.duration) * 100}%`;
   }
 
   // Volume + mute
@@ -309,39 +244,6 @@ function render(): void {
 
   // Timeline / cut view mirrors the same state (play-004).
   if (cutMode) renderCut();
-}
-
-/**
- * Render the scrubber, time, and LIVE chrome for a still-growing stream. The
- * stream is in exactly one of two states — `liveFollowing` (LIVE) or backtracked
- * — so the readout never shows a per-frame counting lag (no "−Ns" jitter).
- */
-function renderLive(w: LiveWindow): void {
-  const edge = liveEdge(w);
-  const following = liveFollowing;
-
-  // Scrubber maps the playhead onto the [0, available] DVR window; the buffered
-  // bar fills the whole window and a tick marks the reachable live edge.
-  const frac = liveProgressFraction(state.currentTime, w);
-  if (!isScrubbing) seek.value = String(Math.round(frac * 1000));
-  progress.style.width = `${frac * 100}%`;
-  buffered.style.width = "100%";
-  const edgeFrac = w.available > 0 ? clamp(edge / w.available, 0, 1) : 1;
-  liveEdgeTick.hidden = false;
-  liveEdgeTick.style.left = `${edgeFrac * 100}%`;
-
-  // Time reads as "position / LIVE": LIVE lights red while following, dims when
-  // backtracked. No lag number — the state is binary, so nothing flickers.
-  timeLabel.innerHTML = `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-sep">/</span><span class="t-live" data-live="${following}">LIVE</span>`;
-
-  // Status badge (top overlay): "LIVE" (pulsing) when following, else "BACKTRACKED".
-  liveBadge.hidden = false;
-  liveBadge.dataset.caught = String(following);
-  liveBadge.textContent = following ? "LIVE" : "BACKTRACKED";
-
-  // "GO LIVE" action + free fast-forward appear only while backtracked.
-  btnGoLive.hidden = following;
-  btnForward.disabled = following;
 }
 
 // ---------------------------------------------------------------------------
@@ -363,24 +265,6 @@ function doTogglePlay(): void {
 
 function doSkip(forward: boolean): void {
   syncFromVideo();
-  const w = activeLiveWindow();
-  if (w) {
-    // Live: track back freely, but fast-forward stops at the live edge.
-    if (forward && !canFastForwardLive(state.currentTime, w)) {
-      flashMarker("LIVE");
-      render();
-      showControls();
-      return;
-    }
-    const next = skipLive(state.currentTime, forward ? SKIP_SECONDS : -SKIP_SECONDS, w);
-    // Reaching the edge resumes LIVE; tracking back enters BACKTRACKED.
-    liveFollowing = isCaughtUp(next, w);
-    state = { ...state, currentTime: next };
-    video.currentTime = next;
-    render();
-    showControls();
-    return;
-  }
   state = forward ? fastForward(state) : rewind(state);
   video.currentTime = state.currentTime;
   render();
@@ -389,16 +273,6 @@ function doSkip(forward: boolean): void {
 
 function doSeekTo(seconds: number): void {
   syncFromVideo();
-  const w = activeLiveWindow();
-  if (w) {
-    const next = clampToLiveWindow(seconds, w);
-    // Seeking to the edge counts as LIVE; anywhere behind it is BACKTRACKED.
-    liveFollowing = isCaughtUp(next, w);
-    state = { ...state, currentTime: next };
-    video.currentTime = next;
-    render();
-    return;
-  }
   state = seekTo(state, seconds);
   video.currentTime = state.currentTime;
   render();
@@ -406,16 +280,13 @@ function doSeekTo(seconds: number): void {
 
 /**
  * Jump to a tenth of the video with the 0-9 number keys (play-009): digit n
- * seeks to n/10 of the duration. For a growing-file livestream we map against
- * the written window (`available`) and route through doSeekTo, which clamps to
- * the live window — so a digit past the live edge lands at the edge, never
- * beyond. The split is a seek convention only; nothing is drawn on the timeline.
+ * seeks to n/10 of the duration, routed through doSeekTo (which clamps to
+ * [0, duration]). The split is a seek convention only; nothing is drawn on the
+ * timeline.
  */
 function doSectionSeek(digit: number): void {
   syncFromVideo();
-  const w = activeLiveWindow();
-  const basis = w ? w.available : state.duration;
-  doSeekTo(sectionSeekTime(digit, basis));
+  doSeekTo(sectionSeekTime(digit, state.duration));
   showControls();
 }
 
@@ -783,22 +654,18 @@ function togglePanel(): void {
 /** Back button: tear down the current video and return to the home screen. */
 function goHome(): void {
   video.pause();
-  stopLive();
-  stopUrlPlayback();
-  stopGrowthWatch();
   setCutMode(false);
   clearCutDeck();
   resetShuttle();
   setLoop(false);
   setPanelOpen(false);
   setShortcutsOpen(false);
-  closeUrlInput();
+  liveNotice.hidden = true;
   video.removeAttribute("src");
   video.load();
   state = createInitialState();
   loadTimestampsFor(null); // clear this video's chapters when returning home
   currentPath = null;
-  currentSourceKind = "file";
   app.dataset.state = "empty";
   stage.hidden = true;
   emptyState.hidden = false;
@@ -818,14 +685,13 @@ function toggleShortcuts(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Livestream (play-003)
+// Livestream detection (play-003 / play-005)
 //
-// The asset protocol only sees a file's bytes as of load time, so a file that is
-// still being written never grows in a plain <video src>. To watch a live
-// capture we instead tail the file ourselves: poll the Rust `stream_status`
-// command for the current size, pull new bytes with `read_stream_chunk`, and
-// append them to a MediaSource SourceBuffer. The live edge advances as bytes
-// arrive; player-core owns the windowing decisions (edge, FF gating, clamps).
+// Livestream PLAYBACK is temporarily deprecated. We still DETECT a livestream —
+// a file still being written on disk (a `.live` marker or a file that visibly
+// grows) — but we no longer tail it into a MediaSource. A detected livestream
+// opens the player with no media loaded (see openEmptyLivePlayer); the detection
+// below decides whether a file is live before the first frame would paint.
 // ---------------------------------------------------------------------------
 
 interface StreamStatus {
@@ -834,12 +700,6 @@ interface StreamStatus {
   complete: boolean;
   /** Milliseconds since the file was last written (see lib.rs). */
   mtime_age_ms: number;
-}
-
-interface LiveStartLayout {
-  size: number;
-  init_end: number;
-  start: number;
 }
 
 // --- Up-front live detection (play-005 detect-before-play) -----------------
@@ -854,31 +714,8 @@ const LIVE_RECENT_MS = 15_000;
 const LIVE_GROWTH_SAMPLE_MS = 400;
 const LIVE_GROWTH_THRESHOLD = 8 * 1024;
 
-/** Bytes pulled per read; reads per poll (so a fresh window loads quickly). */
-const LIVE_CHUNK_BYTES = 4 * 1024 * 1024;
-const LIVE_READS_PER_POLL = 6;
-const LIVE_POLL_MS = 700;
-// How much of the tail to load up front — the back-trackable DVR window. Keeps a
-// multi-GB stream from reading/buffering its whole history just to reach live.
-const LIVE_WINDOW_BYTES = 16 * 1024 * 1024;
-// Treat the stream as ended (and finalize) once it has not grown for this long
-// AND has no `.live` marker. Generous, so HLS segment gaps don't trip it.
-const LIVE_STALL_MS = 8000;
-// Cap the buffered span to stay under the MediaSource quota on long streams;
-// evict from the oldest end when exceeded (limits how far back you can track).
-const LIVE_MAX_BUFFER_SECONDS = 120;
-const LIVE_EVICT_SECONDS = 30;
-
-// Fallback MediaSource MIME types if the codec can't be read from the init
-// segment; the first one the WebView reports as supported wins.
-const LIVE_MIME_CANDIDATES = [
-  'video/mp4; codecs="avc1.64002a,mp4a.40.2"', // H.264 High@4.2 (1080p60) + AAC
-  'video/mp4; codecs="avc1.64001f,mp4a.40.2"', // High@3.1 + AAC-LC
-  'video/mp4; codecs="avc1.4d401f,mp4a.40.2"', // Main@3.1 + AAC-LC
-  'video/mp4; codecs="avc1.42e01e,mp4a.40.2"', // Baseline@3.0 + AAC-LC
-  'video/mp4; codecs="avc1.64002a"', // video-only fallbacks
-  'video/mp4; codecs="avc1.64001f"',
-];
+/** Bytes pulled per Rust read_stream_chunk call (used by the cut-view waveform). */
+const READ_CHUNK_BYTES = 4 * 1024 * 1024;
 
 async function tauriInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
@@ -891,599 +728,6 @@ function b64ToBytes(b64: string): Uint8Array {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
-}
-
-/** Index of an ASCII needle (e.g. a box type) within a byte array, or -1. */
-function indexOfAscii(bytes: Uint8Array, needle: string): number {
-  outer: for (let i = 0; i + needle.length <= bytes.length; i++) {
-    for (let j = 0; j < needle.length; j++) {
-      if (bytes[i + j] !== needle.charCodeAt(j)) continue outer;
-    }
-    return i;
-  }
-  return -1;
-}
-
-// ---------------------------------------------------------------------------
-// Minimal fragmented-MP4 transmuxing.
-//
-// Some real-world recorders (e.g. Streamlink capturing Twitch) write fMP4 that
-// ffprobe accepts but the WebView's MediaSource refuses, for two reasons:
-//   1. the audio `esds` is missing its AudioSpecificConfig (DecoderSpecificInfo),
-//   2. each `tfhd` uses absolute `base-data-offset` addressing, which MSE forbids
-//      (it requires movie-fragment-relative addressing).
-// We fix both on the fly: inject the AAC config into the init segment, and
-// rewrite each `moof` to use `default-base-is-moof`. Streams that are already
-// MSE-compliant (e.g. our ffmpeg fixture) pass through these untouched.
-// ---------------------------------------------------------------------------
-
-interface Box {
-  type: string;
-  start: number;
-  size: number;
-  hs: number;
-}
-
-/** Walk the top-level boxes of `b` within [start, end). */
-function walkBoxes(b: Uint8Array, start: number, end: number): Box[] {
-  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
-  const out: Box[] = [];
-  let i = start;
-  while (i + 8 <= end) {
-    let size = dv.getUint32(i);
-    let hs = 8;
-    if (size === 1) {
-      if (i + 16 > end) break;
-      size = Number(dv.getBigUint64(i + 8));
-      hs = 16;
-    }
-    if (size < 8 || i + size > end) break;
-    out.push({ type: boxType(b, i), start: i, size, hs });
-    i += size;
-  }
-  return out;
-}
-
-function boxType(b: Uint8Array, i: number): string {
-  return String.fromCharCode(b[i + 4], b[i + 5], b[i + 6], b[i + 7]);
-}
-
-/** Read a 4-character code at an absolute offset (not a box header). */
-function fourCC(b: Uint8Array, off: number): string {
-  return String.fromCharCode(b[off], b[off + 1], b[off + 2], b[off + 3]);
-}
-
-const AAC_FREQS = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
-
-/** Read an MPEG-4 descriptor header at `p` (tag + expandable length). */
-function readDescriptor(b: Uint8Array, p: number): { tag: number; len: number; payload: number; lenLastByte: number } {
-  const tag = b[p];
-  p++;
-  let len = 0;
-  let lenLastByte = p;
-  let c: number;
-  do {
-    c = b[p];
-    lenLastByte = p;
-    p++;
-    len = (len << 7) | (c & 0x7f);
-  } while (c & 0x80);
-  return { tag, len, payload: p, lenLastByte };
-}
-
-/**
- * Inject the AudioSpecificConfig into the audio track's `esds` if it is missing,
- * so MSE can decode the AAC. Derives the config (AAC-LC, sample rate, channels)
- * from the `mp4a` sample entry. Returns the (possibly unchanged) init segment.
- */
-function patchInitSegment(init: Uint8Array): Uint8Array {
-  const dv = new DataView(init.buffer, init.byteOffset, init.byteLength);
-  const moov = walkBoxes(init, 0, init.length).find((b) => b.type === "moov");
-  if (!moov) return init;
-
-  let mp4a: Box | undefined;
-  let esds: Box | undefined;
-  const chain: Box[] = [moov];
-  for (const trak of walkBoxes(init, moov.start + moov.hs, moov.start + moov.size).filter((b) => b.type === "trak")) {
-    const mdia = walkBoxes(init, trak.start + trak.hs, trak.start + trak.size).find((b) => b.type === "mdia");
-    if (!mdia) continue;
-    const mdiaKids = walkBoxes(init, mdia.start + mdia.hs, mdia.start + mdia.size);
-    const hdlr = mdiaKids.find((b) => b.type === "hdlr");
-    if (!hdlr || fourCC(init, hdlr.start + hdlr.hs + 8) !== "soun") continue;
-    const minf = mdiaKids.find((b) => b.type === "minf");
-    if (!minf) continue;
-    const stbl = walkBoxes(init, minf.start + minf.hs, minf.start + minf.size).find((b) => b.type === "stbl");
-    if (!stbl) continue;
-    const stsd = walkBoxes(init, stbl.start + stbl.hs, stbl.start + stbl.size).find((b) => b.type === "stsd");
-    if (!stsd) continue;
-    mp4a = walkBoxes(init, stsd.start + stsd.hs + 8, stsd.start + stsd.size)[0];
-    if (!mp4a) continue;
-    esds = walkBoxes(init, mp4a.start + 36, mp4a.start + mp4a.size).find((b) => b.type === "esds");
-    if (esds) chain.push(trak, mdia, minf, stbl, stsd, mp4a, esds);
-    break;
-  }
-  if (!esds || !mp4a) return init;
-
-  // Walk the descriptors: ES_Descriptor(0x03) -> DecoderConfig(0x04) -> [DecSpecificInfo(0x05)?]
-  const es = readDescriptor(init, esds.start + esds.hs + 4);
-  if (es.tag !== 0x03) return init;
-  let q = es.payload + 2; // skip ES_ID
-  const flags = init[q];
-  q++;
-  if (flags & 0x80) q += 2;
-  if (flags & 0x40) q += 1 + init[q];
-  if (flags & 0x20) q += 2;
-  const dc = readDescriptor(init, q);
-  if (dc.tag !== 0x04) return init;
-  const dcConfigEnd = dc.payload + 13; // oti(1)+streamType(1)+buffer(3)+maxBR(4)+avgBR(4)
-  if (dcConfigEnd < init.length && init[dcConfigEnd] === 0x05) return init; // already has the config
-
-  const channels = dv.getUint16(mp4a.start + 24) || 2;
-  const hz = dv.getUint16(mp4a.start + 32);
-  const freqIdx = AAC_FREQS.indexOf(hz) >= 0 ? AAC_FREQS.indexOf(hz) : 4;
-  const asc = (2 << 11) | (freqIdx << 7) | (channels << 3); // AAC-LC
-  const ascDesc = new Uint8Array([0x05, 0x02, (asc >> 8) & 0xff, asc & 0xff]);
-
-  const out = new Uint8Array(init.length + 4);
-  out.set(init.subarray(0, dcConfigEnd), 0);
-  out.set(ascDesc, dcConfigEnd);
-  out.set(init.subarray(dcConfigEnd), dcConfigEnd + 4);
-  // Grow the two descriptor lengths and every container box that holds the esds.
-  out[dc.lenLastByte] += 4;
-  out[es.lenLastByte] += 4;
-  const odv = new DataView(out.buffer, out.byteOffset, out.byteLength);
-  for (const box of chain) odv.setUint32(box.start, odv.getUint32(box.start) + 4);
-  return out;
-}
-
-/**
- * Rewrite a `moof` so its `tfhd`s use movie-fragment-relative addressing: drop
- * the absolute `base-data-offset` field, set `default-base-is-moof`, and shift
- * each `trun.data_offset` to account for the removed bytes. Returns the moof
- * unchanged if it is already compliant. Assumes the original `base_data_offset`
- * equals the moof's own offset (verified for the target streams).
- */
-function transmuxFragment(moof: Uint8Array): Uint8Array {
-  // First pass over the unmodified moof: locate the tfhds that use absolute
-  // addressing and the truns that carry a data_offset. (Box sizes must not be
-  // mutated before this, or re-walking would land misaligned.)
-  const src = new DataView(moof.buffer, moof.byteOffset, moof.byteLength);
-  const tfhds: Box[] = [];
-  const trafsToShrink: Box[] = [];
-  const trunOffsets: number[] = [];
-  for (const traf of walkBoxes(moof, 8, moof.length).filter((b) => b.type === "traf")) {
-    const kids = walkBoxes(moof, traf.start + 8, traf.start + traf.size);
-    const tfhd = kids.find((b) => b.type === "tfhd");
-    const trun = kids.find((b) => b.type === "trun");
-    if (tfhd && src.getUint32(tfhd.start + 8) & 0x1) {
-      tfhds.push(tfhd);
-      trafsToShrink.push(traf);
-    }
-    if (trun && src.getUint32(trun.start + 8) & 0x1) trunOffsets.push(trun.start);
-  }
-  if (tfhds.length === 0) return moof; // already MSE-compliant
-  const removed = tfhds.length * 8;
-
-  const m = moof.slice();
-  const dv = new DataView(m.buffer, m.byteOffset, m.byteLength);
-  // The moof shrinks by `removed`, so the trailing mdat moves up — shift every
-  // moof-relative data_offset to match.
-  for (const ts of trunOffsets) dv.setInt32(ts + 16, dv.getInt32(ts + 16) - removed);
-  const removeRanges: number[] = [];
-  for (let i = 0; i < tfhds.length; i++) {
-    const tfhd = tfhds[i];
-    const fpos = tfhd.start + 8; // version+flags
-    dv.setUint32(fpos, (dv.getUint32(fpos) & ~0x1) | 0x20000); // clear base-data-offset, set default-base-is-moof
-    removeRanges.push(tfhd.start + 16); // base_data_offset sits right after track_ID
-    dv.setUint32(tfhd.start, dv.getUint32(tfhd.start) - 8); // shrink tfhd
-    dv.setUint32(trafsToShrink[i].start, dv.getUint32(trafsToShrink[i].start) - 8); // shrink traf
-  }
-  dv.setUint32(0, dv.getUint32(0) - removed); // shrink moof
-  // Physically drop the base_data_offset byte ranges.
-  const out = new Uint8Array(m.length - removed);
-  let w = 0;
-  let r = 0;
-  for (const cut of removeRanges.sort((a, b) => a - b)) {
-    out.set(m.subarray(r, cut), w);
-    w += cut - r;
-    r = cut + 8;
-  }
-  out.set(m.subarray(r), w);
-  return out;
-}
-
-/**
- * Derive the exact MediaSource MIME type from the init segment by reading the
- * H.264 parameters out of the `avcC` box (`avc1.PPCCLL`) and detecting an AAC
- * track. Returns null if it can't be parsed or the WebView can't play it.
- */
-function mimeFromInit(initBytes: Uint8Array): string | null {
-  const p = indexOfAscii(initBytes, "avcC");
-  if (p < 0) return null;
-  const hex = (n: number) => n.toString(16).padStart(2, "0");
-  const codec = `avc1.${hex(initBytes[p + 5])}${hex(initBytes[p + 6])}${hex(initBytes[p + 7])}`;
-  const hasAudio = indexOfAscii(initBytes, "mp4a") >= 0;
-  const withAudio = `video/mp4; codecs="${codec},mp4a.40.2"`;
-  if (hasAudio && MediaSource.isTypeSupported(withAudio)) return withAudio;
-  const videoOnly = `video/mp4; codecs="${codec}"`;
-  if (MediaSource.isTypeSupported(videoOnly)) return videoOnly;
-  return null;
-}
-
-/**
- * Tails a growing fragmented-MP4 file into a MediaSource. Appends the init
- * segment, then starts near the live edge (so a multi-GB stream doesn't replay
- * its whole history) and keeps appending new fragments as they are written.
- * Exposes `window()` (the snapshot the UI renders) and whether it is still `live`.
- */
-class LiveStream {
-  readonly path: string;
-  private readonly onUpdate: () => void;
-  private mediaSource = new MediaSource();
-  private sourceBuffer?: SourceBuffer;
-  private objectUrl = "";
-  private offset = 0; // next byte to read from the file
-  private queue: ArrayBuffer[] = [];
-  private pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0); // bytes not yet forming a complete box
-  private pollTimer?: number;
-  private stopped = false;
-  private finalized = false;
-  private lastSize = 0;
-  private lastGrowthAt = Date.now();
-  /** Seconds of media available (buffered end). Read by the UI each render. */
-  available = 0;
-  /** True while the file is still being written. */
-  live = true;
-
-  constructor(path: string, onUpdate: () => void) {
-    this.path = path;
-    this.onUpdate = onUpdate;
-  }
-
-  async start(): Promise<void> {
-    // Find the init segment + a recent fragment boundary to start from.
-    const layout = await tauriInvoke<LiveStartLayout>("live_start", {
-      path: this.path,
-      windowBytes: LIVE_WINDOW_BYTES,
-    });
-    if (layout.init_end >= layout.size) {
-      throw new Error("This file is not a fragmented MP4 — cannot play it live.");
-    }
-    const initBytes = await this.readRange(0, layout.init_end);
-    const mime =
-      mimeFromInit(initBytes) ?? LIVE_MIME_CANDIDATES.find((m) => MediaSource.isTypeSupported(m));
-    if (!mime) throw new Error("This stream's format is not supported for live playback.");
-
-    this.objectUrl = URL.createObjectURL(this.mediaSource);
-    video.src = this.objectUrl;
-    await new Promise<void>((resolve) => {
-      this.mediaSource.addEventListener("sourceopen", () => resolve(), { once: true });
-    });
-    const sb = this.mediaSource.addSourceBuffer(mime);
-    // "sequence" rebases appended fragments onto a 0-based timeline, so starting
-    // mid-file (not from byte 0) still yields a clean buffered range from 0.
-    sb.mode = "sequence";
-    this.sourceBuffer = sb;
-    sb.addEventListener("updateend", () => {
-      this.refreshAvailable();
-      this.pump();
-      this.maybeFinalize();
-      this.onUpdate();
-    });
-
-    // Queue the (possibly patched) init segment, then tail from the windowed start.
-    const patchedInit = patchInitSegment(initBytes);
-    this.queue.push(patchedInit.slice().buffer as ArrayBuffer);
-    this.offset = layout.start;
-    this.lastSize = layout.size;
-    this.lastGrowthAt = Date.now();
-    this.pump();
-    void this.poll();
-  }
-
-  /** Read the byte range [from, to) from the file, decoding the base64 chunks. */
-  private async readRange(from: number, to: number): Promise<Uint8Array> {
-    const parts: Uint8Array[] = [];
-    let cur = from;
-    while (cur < to && !this.stopped) {
-      const b64 = await tauriInvoke<string>("read_stream_chunk", {
-        path: this.path,
-        offset: cur,
-        maxLen: Math.min(LIVE_CHUNK_BYTES, to - cur),
-      });
-      const bytes = b64ToBytes(b64);
-      if (bytes.length === 0) break;
-      parts.push(bytes);
-      cur += bytes.length;
-    }
-    const total = parts.reduce((n, p) => n + p.length, 0);
-    const out = new Uint8Array(total);
-    let at = 0;
-    for (const p of parts) {
-      out.set(p, at);
-      at += p.length;
-    }
-    return out;
-  }
-
-  /**
-   * Accumulate freshly-read bytes and extract complete top-level boxes. Each
-   * `moof` is transmuxed to be MSE-compliant; everything else is passed through.
-   * Partial boxes are held in `pending` until the rest arrives.
-   */
-  private feed(bytes: Uint8Array): void {
-    if (this.pending.length > 0) {
-      const merged = new Uint8Array(this.pending.length + bytes.length);
-      merged.set(this.pending, 0);
-      merged.set(bytes, this.pending.length);
-      this.pending = merged;
-    } else {
-      this.pending = bytes;
-    }
-
-    const buf = this.pending;
-    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-    let off = 0;
-    while (buf.length - off >= 8) {
-      let size = dv.getUint32(off);
-      if (size === 1) {
-        if (buf.length - off < 16) break;
-        size = Number(dv.getBigUint64(off + 8));
-      }
-      if (size < 8) {
-        off = buf.length; // malformed; resync by dropping the rest of this batch
-        break;
-      }
-      if (buf.length - off < size) break; // box not fully arrived yet
-      const box = buf.subarray(off, off + size);
-      const out = boxType(buf, off) === "moof" ? transmuxFragment(box) : box;
-      this.queue.push(out.slice().buffer as ArrayBuffer);
-      off += size;
-    }
-    this.pending = off > 0 ? buf.slice(off) : buf;
-    this.pump();
-  }
-
-  private async poll(): Promise<void> {
-    if (this.stopped || this.finalized) return;
-    try {
-      const status = await tauriInvoke<StreamStatus>("stream_status", { path: this.path });
-      if (status.size > this.lastSize) {
-        this.lastSize = status.size;
-        this.lastGrowthAt = Date.now();
-      }
-      // Live while a `.live` marker is set or the file is still growing; ended
-      // once `.done` or it has been stalled past the grace window.
-      if (status.complete) this.live = false;
-      else if (status.live) this.live = true;
-      else this.live = Date.now() - this.lastGrowthAt < LIVE_STALL_MS;
-
-      // Pull whatever new bytes exist (bounded per poll so we don't hog).
-      let reads = 0;
-      while (status.size > this.offset && reads < LIVE_READS_PER_POLL && !this.stopped) {
-        const b64 = await tauriInvoke<string>("read_stream_chunk", {
-          path: this.path,
-          offset: this.offset,
-          maxLen: LIVE_CHUNK_BYTES,
-        });
-        const bytes = b64ToBytes(b64);
-        if (bytes.length === 0) break;
-        this.offset += bytes.length;
-        this.feed(bytes);
-        reads++;
-      }
-    } catch {
-      /* transient read error (e.g. mid-write); retry next tick */
-    }
-    this.refreshAvailable();
-    this.maybeFinalize();
-    this.onUpdate();
-    if (!this.stopped && !this.finalized) {
-      this.pollTimer = window.setTimeout(() => void this.poll(), LIVE_POLL_MS);
-    }
-  }
-
-  /** Evict the oldest buffered range / append the next chunk when idle. */
-  private pump(): void {
-    const sb = this.sourceBuffer;
-    if (!sb || sb.updating || this.mediaSource.readyState !== "open") return;
-
-    // Keep the buffered span bounded so long streams don't hit the MSE quota.
-    if (sb.buffered.length > 0) {
-      const span = sb.buffered.end(sb.buffered.length - 1) - sb.buffered.start(0);
-      if (span > LIVE_MAX_BUFFER_SECONDS && video.currentTime > sb.buffered.start(0) + LIVE_EVICT_SECONDS) {
-        try {
-          sb.remove(sb.buffered.start(0), sb.buffered.start(0) + LIVE_EVICT_SECONDS);
-          return; // resume appending after the remove completes (updateend)
-        } catch {
-          /* fall through to append */
-        }
-      }
-    }
-
-    if (this.queue.length === 0) return;
-    const chunk = this.queue.shift()!;
-    try {
-      sb.appendBuffer(chunk);
-    } catch (err) {
-      // Out of quota — put the chunk back and evict the oldest data, then retry.
-      this.queue.unshift(chunk);
-      if (err instanceof Error && err.name === "QuotaExceededError" && sb.buffered.length > 0) {
-        try {
-          sb.remove(sb.buffered.start(0), sb.buffered.start(0) + LIVE_EVICT_SECONDS);
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-  }
-
-  private refreshAvailable(): void {
-    const sb = this.sourceBuffer;
-    if (sb && sb.buffered.length > 0) {
-      this.available = sb.buffered.end(sb.buffered.length - 1);
-    }
-  }
-
-  /** Once the stream has ended and everything is appended, end the MediaSource. */
-  private maybeFinalize(): void {
-    if (this.finalized || this.live) return;
-    const sb = this.sourceBuffer;
-    if (!sb || sb.updating || this.queue.length > 0 || this.offset < this.lastSize) return;
-    if (this.mediaSource.readyState !== "open") return;
-    this.finalized = true;
-    window.clearTimeout(this.pollTimer);
-    try {
-      this.mediaSource.endOfStream();
-    } catch {
-      /* already ended */
-    }
-  }
-
-  /** The live-window snapshot the UI renders against. */
-  window(): LiveWindow {
-    return { available: this.available, delay: LIVE_DELAY_SECONDS, live: this.live };
-  }
-
-  stop(): void {
-    this.stopped = true;
-    window.clearTimeout(this.pollTimer);
-    if (this.objectUrl) {
-      try {
-        URL.revokeObjectURL(this.objectUrl);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-}
-
-/** Tear down any active livestream (when opening another file or a normal one). */
-function stopLive(): void {
-  if (live) {
-    live.stop();
-    live = null;
-  }
-  pendingGoLive = false;
-  liveFollowing = false;
-  app.dataset.live = "false";
-  btnForward.disabled = false;
-  liveBadge.hidden = true;
-  btnGoLive.hidden = true;
-}
-
-/** The live window if (and only if) a stream is still being written, else null. */
-function activeLiveWindow(): LiveWindow | null {
-  if (live && live.live) return live.window();
-  // A live HLS/DASH URL (play-006): the MSE library manages the buffer, so the
-  // window is read straight off the media element's seekable DVR range. `available`
-  // is the end of that range (the playable live edge); the play-003 helpers then
-  // hold the playhead LIVE_DELAY_SECONDS behind it, gate fast-forward at the edge,
-  // and allow track-back through the window exactly as for a local growing file.
-  if (urlLive) {
-    const sk = video.seekable;
-    const end = sk.length > 0 ? sk.end(sk.length - 1) : 0;
-    return { available: end, delay: LIVE_DELAY_SECONDS, live: true };
-  }
-  return null;
-}
-
-/** Re-render on every poll/append tick so the LIVE badge + edge stay current. */
-function onLiveUpdate(): void {
-  // A freshly opened/upgraded live source: once there's more than the delay
-  // buffered, snap to the live edge so we start at "now".
-  if (pendingGoLive && live && live.live && live.available > LIVE_DELAY_SECONDS) {
-    pendingGoLive = false;
-    doJumpToLive();
-  }
-  if (live && live.live && !video.paused) {
-    const w = live.window();
-    // Upper safety (play-005): never run the playhead into not-yet-decoded media —
-    // clamp against the buffered end (the stall ceiling), NOT against `liveEdge`.
-    const ceiling = liveStallCeiling(w);
-    if (video.currentTime > ceiling) {
-      video.currentTime = ceiling;
-    } else if (liveFollowing && shouldResyncToLive(video.currentTime, w)) {
-      // Following the edge: free-run keeps pace with it, so we DON'T re-seek every
-      // poll (that sawtoothed the picture). Only when a real stall has dropped us
-      // well behind the edge do we catch up — always forward, never a backward yank.
-      video.currentTime = liveEdge(w);
-    }
-  }
-  syncFromVideo();
-  render();
-}
-
-/** Stop the background growth watcher, if any. */
-function stopGrowthWatch(): void {
-  window.clearTimeout(growthWatch);
-  growthWatch = undefined;
-}
-
-/**
- * Watch a normally-opened file for growth; if it is being written and is a
- * fragmented MP4 (so MediaSource can tail it), upgrade to live playback. This is
- * how a real recorder's file (no `.live` marker) is recognised as a livestream.
- */
-function startGrowthWatch(path: string, baseSize: number): void {
-  stopGrowthWatch();
-  let last = baseSize;
-  let ticks = 0;
-  const GROWTH_WATCH_MS = 2000;
-  const GROWTH_WATCH_MAX = 8; // give up after ~16s of no growth
-  const GROWTH_THRESHOLD = 64 * 1024;
-  const tick = async () => {
-    ticks++;
-    try {
-      const s = await tauriInvoke<StreamStatus>("stream_status", { path });
-      if (s.complete) return; // finished writing — it's a normal file
-      if (s.size > last + GROWTH_THRESHOLD) {
-        const layout = await tauriInvoke<LiveStartLayout>("live_start", {
-          path,
-          windowBytes: LIVE_WINDOW_BYTES,
-        });
-        if (layout.init_end < layout.size) await upgradeToLive(path); // fragmented -> tail it
-        return; // either upgraded, or not fragmented — stop watching
-      }
-      last = Math.max(last, s.size);
-    } catch {
-      /* ignore; try again */
-    }
-    if (ticks < GROWTH_WATCH_MAX) growthWatch = window.setTimeout(() => void tick(), GROWTH_WATCH_MS);
-  };
-  growthWatch = window.setTimeout(() => void tick(), GROWTH_WATCH_MS);
-}
-
-/** Switch a file that turned out to be growing from normal to live playback. */
-async function upgradeToLive(path: string): Promise<void> {
-  if (live) return;
-  await loadLiveFromPath(path, true);
-}
-
-/**
- * Jump to the live edge (hotkey L, or clicking the LIVE badge). Preserves the
- * play/pause state — snapping to live while paused leaves a stable frame.
- */
-function doJumpToLive(): void {
-  const w = activeLiveWindow();
-  if (!w) return;
-  syncFromVideo();
-  const wasFollowing = liveFollowing;
-  liveFollowing = true;
-  const edge = liveEdge(w);
-  // Jump to "the livestream minus the buffer" = the live edge (a full `delay`
-  // inside the buffered range, so it's a seek within decoded media, not a
-  // rebuffer). Seek ONLY when we were backtracked: pressing L while already LIVE
-  // must not move the playhead — that redundant seek (it overshot to the buffered
-  // end, then yanked back to the edge) was the jump-to-live jitter. Following then
-  // free-runs at the edge without per-poll re-seeks.
-  if (!wasFollowing || Math.abs(state.currentTime - edge) > LIVE_STALL_GUARD) {
-    state = { ...state, currentTime: edge };
-    video.currentTime = edge;
-  }
-  flashMarker("LIVE");
-  render();
-  showControls();
 }
 
 // ---------------------------------------------------------------------------
@@ -1791,7 +1035,7 @@ async function readWholeFile(path: string, size: number): Promise<Uint8Array> {
     const b64 = await tauriInvoke<string>("read_stream_chunk", {
       path,
       offset: off,
-      maxLen: Math.min(LIVE_CHUNK_BYTES, size - off),
+      maxLen: Math.min(READ_CHUNK_BYTES, size - off),
     });
     const bytes = b64ToBytes(b64);
     if (bytes.length === 0) break;
@@ -2095,13 +1339,11 @@ function showError(message: string): void {
 // localStorage; rendered as cards on the home, click to re-open.
 // ---------------------------------------------------------------------------
 interface RecentFile {
-  /** Identity of the source — a local file path, or a stream URL (play-006). */
+  /** Identity of the source — a local file path. */
   path: string;
   name: string;
   openedAt: number;
   duration?: number;
-  /** "url" for a network stream, "file" (default) for a local file. */
-  kind?: "file" | "url";
 }
 const RECENTS_KEY = "playback:recents";
 const RECENTS_MAX = 8;
@@ -2125,18 +1367,17 @@ function saveRecents(list: RecentFile[]): void {
   }
 }
 
-function addRecent(path: string, name: string, kind: "file" | "url" = "file"): void {
+function addRecent(path: string, name: string): void {
   const list = loadRecents().filter((r) => r.path !== path);
-  list.unshift({ path, name, openedAt: Date.now(), kind });
+  list.unshift({ path, name, openedAt: Date.now() });
   if (list.length > RECENTS_MAX) list.length = RECENTS_MAX;
   saveRecents(list);
   renderRecents();
 }
 
-/** Re-open a recent entry through the right path (local file vs. stream URL). */
+/** Re-open a recent local file. */
 function openRecent(r: RecentFile): void {
-  if (r.kind === "url" || looksLikeUrl(r.path)) void loadFromUrl(r.path);
-  else void loadFromPath(r.path);
+  void loadFromPath(r.path);
 }
 
 function setRecentDuration(path: string, duration: number): void {
@@ -2180,8 +1421,6 @@ function thumbGradient(name: string): string {
 
 const RECENT_PLAY_SVG =
   '<svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="8 5 19 12 8 19 8 5" /></svg>';
-const RECENT_LINK_SVG =
-  '<svg class="ic" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg>';
 
 function renderRecents(): void {
   const list = loadRecents();
@@ -2197,13 +1436,12 @@ function renderRecents(): void {
     card.className = "recent-card";
     card.title = r.path;
 
-    const isUrl = r.kind === "url" || looksLikeUrl(r.path);
     const thumb = document.createElement("span");
     thumb.className = "recent-card__thumb";
     thumb.style.background = thumbGradient(r.name);
     const play = document.createElement("span");
     play.className = "recent-card__play";
-    play.innerHTML = isUrl ? RECENT_LINK_SVG : RECENT_PLAY_SVG;
+    play.innerHTML = RECENT_PLAY_SVG;
     thumb.appendChild(play);
     if (r.duration) {
       const dur = document.createElement("span");
@@ -2219,8 +1457,7 @@ function renderRecents(): void {
     nm.textContent = r.name;
     const sub = document.createElement("span");
     sub.className = "recent-card__sub";
-    // For a URL show its host; for a local file, when it was last opened.
-    sub.textContent = isUrl ? urlHost(r.path) : `Opened ${timeAgo(r.openedAt)}`;
+    sub.textContent = `Opened ${timeAgo(r.openedAt)}`;
     meta.append(nm, sub);
 
     card.append(thumb, meta);
@@ -2230,59 +1467,42 @@ function renderRecents(): void {
 }
 
 async function loadFromPath(path: string): Promise<void> {
-  // A URL passed here (a launch arg, a drag, or a recents entry) is a network
-  // stream, not a local file — route it to the URL path (play-006).
-  if (looksLikeUrl(path)) {
-    await loadFromUrl(path);
-    return;
-  }
-  stopGrowthWatch();
-  stopUrlPlayback(); // leave behind any remote stream that was playing
   currentPath = path;
-  currentSourceKind = "file";
   loadTimestampsFor(path); // seed this video's saved timestamps before it loads
   addRecent(path, basename(path));
   try {
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
-    // Decide live-vs-normal BEFORE the first frame paints, so a recording in
-    // progress shows live chrome from the start with no flash of normal-file
-    // chrome (play-005 detect-before-play).
+    // Decide live-vs-normal BEFORE the first frame paints. Livestream playback is
+    // temporarily deprecated, so a recording in progress opens an empty player
+    // instead of being tailed.
     const detected = status ? await detectLive(path, status) : "normal";
-    if (detected === "live-marker") {
-      // A `.live` marker means a writer is actively appending — start from the top.
-      await loadLiveFromPath(path, false);
+    if (detected === "live-marker" || detected === "live-grow") {
+      openEmptyLivePlayer(path);
       return;
     }
-    if (detected === "live-grow") {
-      // No marker, but the file is actively growing — tail it and snap to live.
-      await loadLiveFromPath(path, true);
-      return;
-    }
-    // Static/finished file: play normally, but keep a lightweight background watch
-    // in case it only starts growing later (a recording that begins after open).
+    // Static/finished file: play normally.
     const { convertFileSrc } = await import("@tauri-apps/api/core");
     const src = convertFileSrc(path);
     loadSrc(src, basename(path), parentDir(path));
     // Note the clip for the timeline-view deck (play-004); the filmstrip + waveform
     // are built lazily on first cut-view open.
     prepareCutDeck(path);
-    if (status && !status.complete) startGrowthWatch(path, status.size);
   } catch (err) {
     showError(`Could not open the file: ${String(err)}`);
   }
 }
 
 /**
- * Probe whether `path` should open as a livestream, up front (before the first
- * frame paints), so live chrome never flashes through normal-file chrome.
+ * Probe whether `path` is a livestream, up front (before the first frame would
+ * paint), so it routes to the empty player instead of trying to play.
  *
- *  - `live-marker` — a `<path>.live` marker says a writer is appending; tail now.
+ *  - `live-marker` — a `<path>.live` marker says a writer is appending.
  *  - `live-grow`   — no marker, but the file is recently-written AND visibly grows
- *                    during a short sample AND is a tailable fragmented MP4.
+ *                    during a short sample.
  *  - `normal`      — everything else: a finished or static file.
  *
- * The growth sample (and the fragment scan it gates) only runs for a
- * recently-modified file, so ordinary opens of a static file stay instant.
+ * The growth sample only runs for a recently-modified file, so ordinary opens of
+ * a static file stay instant.
  */
 async function detectLive(
   path: string,
@@ -2297,17 +1517,7 @@ async function detectLive(
   await delay(LIVE_GROWTH_SAMPLE_MS);
   const after = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
   if (!after || after.complete) return "normal";
-  if (after.size <= status.size + LIVE_GROWTH_THRESHOLD) return "normal";
-  // It is growing — make sure it is a fragmented MP4 we can tail via MediaSource.
-  try {
-    const layout = await tauriInvoke<LiveStartLayout>("live_start", {
-      path,
-      windowBytes: LIVE_WINDOW_BYTES,
-    });
-    return layout.init_end < layout.size ? "live-grow" : "normal";
-  } catch {
-    return "normal";
-  }
+  return after.size > status.size + LIVE_GROWTH_THRESHOLD ? "live-grow" : "normal";
 }
 
 /** Promise-based delay used by the up-front live probe. */
@@ -2315,11 +1525,10 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-/** Load a media file from an already-resolved URL (asset:// or blob:). */
+/** Load a media file from an already-resolved URL (asset://). */
 function loadSrc(src: string, title: string, subtitle = ""): void {
-  stopLive(); // leaving any previous livestream behind
-  // Note: a growth watch may be (re)started by the caller after this returns.
   emptyError.hidden = true;
+  liveNotice.hidden = true;
   video.src = src;
   titleLabel.textContent = title;
   subtitleLabel.textContent = subtitle;
@@ -2340,312 +1549,29 @@ function loadSrc(src: string, title: string, subtitle = ""): void {
 }
 
 /**
- * Open a still-being-written file as a livestream, fed through MediaSource.
- * `autoLive` snaps to the live edge once buffered (used when auto-upgrading a
- * detected-growing file); the marker path passes false to start from the top.
+ * Livestream playback is temporarily deprecated. A file detected as a livestream
+ * (a `.live` marker or an actively-growing recording) still opens the player, but
+ * we do NOT attempt to play it — the viewer is left on an empty player with a
+ * short notice rather than a tailing MediaSource.
  */
-async function loadLiveFromPath(path: string, autoLive = false): Promise<void> {
-  stopGrowthWatch();
-  stopLive();
-  emptyError.hidden = true;
+function openEmptyLivePlayer(path: string): void {
   const title = basename(path);
+  emptyError.hidden = true;
+  video.removeAttribute("src");
+  video.load();
   titleLabel.textContent = title;
   subtitleLabel.textContent = "Live recording";
-  document.title = `${title} — Playback (live)`;
+  document.title = `${title} — Playback`;
   app.dataset.state = "playing";
-  app.dataset.live = "true";
   emptyState.hidden = true;
   stage.hidden = false;
+  liveNotice.hidden = false;
   state = createInitialState();
   applyAudioToVideo();
-  try {
-    live = new LiveStream(path, onLiveUpdate);
-    pendingGoLive = autoLive;
-    await live.start();
-  } catch (err) {
-    stopLive();
-    showError(`Could not play the livestream: ${String(err)}`);
-    return;
-  }
-  void video.play().catch(() => {
-    /* autoplay may be blocked; user can press play */
-  });
-  showControls();
-  render();
-}
-
-// ---------------------------------------------------------------------------
-// URL / network streaming (play-006)
-//
-// A user can paste a stream URL — a direct progressive media file, an HLS
-// playlist (.m3u8), or a DASH manifest (.mpd) — and play it without downloading
-// a local file first, including ongoing livestreams. The source is the network
-// (not the asset protocol), so the engine differs by kind: a direct URL plays in
-// the native <video>; HLS/DASH are fed through an MSE library (hls.js / dashjs),
-// since WebView2's <video> won't play .m3u8/.mpd natively. The pure detection in
-// player-core decides the kind; here we drive the library and reuse the same
-// player chrome — including the play-003 live window for live URLs.
-// ---------------------------------------------------------------------------
-
-/** Reveal the URL input (focused + empty) for a new entry. */
-function openUrlInput(): void {
-  homeUrl.dataset.open = "true";
-  urlForm.hidden = false;
-  urlHint.hidden = false;
-  urlError.hidden = true;
-  urlInput.value = "";
-  urlInput.focus();
-}
-
-/** Hide and clear the URL input. */
-function closeUrlInput(): void {
-  homeUrl.dataset.open = "false";
-  urlForm.hidden = true;
-  urlHint.hidden = true;
-  urlError.hidden = true;
-  urlInput.value = "";
-}
-
-/** Show an inline error under the URL input (for a syntactically bad URL). */
-function showUrlError(message: string): void {
-  urlError.textContent = message;
-  urlError.hidden = false;
-}
-
-/** Validate the typed URL and, if it is a real http(s) URL, load it. */
-function submitUrl(): void {
-  const raw = urlInput.value.trim();
-  if (!looksLikeUrl(raw)) {
-    showUrlError("Enter a full http(s) URL, e.g. https://example.com/stream.m3u8");
-    return;
-  }
-  closeUrlInput();
-  void loadFromUrl(raw);
-}
-
-/** The host of a URL, shown as the player subtitle / recents sub-line. */
-function urlHost(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return "Stream URL";
-  }
-}
-
-/** Tear down any active URL stream engine (hls.js / dashjs) and the live timer. */
-function stopUrlPlayback(): void {
-  if (hls) {
-    try {
-      hls.destroy();
-    } catch {
-      /* already destroyed */
-    }
-    hls = null;
-  }
-  if (dash) {
-    try {
-      dash.reset?.();
-    } catch {
-      /* ignore */
-    }
-    try {
-      dash.destroy?.();
-    } catch {
-      /* ignore */
-    }
-    dash = null;
-  }
-  urlLive = false;
-  liveFollowing = false;
-  if (urlLiveTimer !== undefined) {
-    window.clearInterval(urlLiveTimer);
-    urlLiveTimer = undefined;
-  }
-}
-
-/** Flag (or clear) a live URL stream so the play-003 live chrome shows. */
-function setUrlLive(on: boolean): void {
-  urlLive = on;
-  // A live URL opens positioned at the edge (the MSE library starts there), so it
-  // begins in the LIVE (following) state; tracking back flips it to BACKTRACKED.
-  if (on) liveFollowing = true;
-  app.dataset.live = String(on);
-  if (on && urlLiveTimer === undefined) {
-    // The DVR window grows between timeupdates (and while paused), so refresh the
-    // edge tick + LIVE/BACKTRACKED state on a light interval.
-    urlLiveTimer = window.setInterval(() => {
-      syncFromVideo();
-      render();
-    }, 1000);
-  } else if (!on && urlLiveTimer !== undefined) {
-    window.clearInterval(urlLiveTimer);
-    urlLiveTimer = undefined;
-  }
-  render();
-}
-
-/**
- * A URL stream failed to load/play (bad or unreachable URL, unsupported format).
- * Return to the home screen and show a clear error rather than hanging on a dead
- * player. One-shot per load (hls.js + the <video> can both report the same fault).
- */
-function handleUrlFailure(message: string): void {
-  if (currentSourceKind !== "url" || urlFailed) return;
-  urlFailed = true;
-  const failed = currentPath ?? "";
-  goHome();
-  // Re-open the URL input with the failed URL pre-filled and a prominent inline
-  // error right under it, so the failure is clear (and easy to edit + retry)
-  // rather than a buried message below the fold.
-  openUrlInput();
-  if (looksLikeUrl(failed)) urlInput.value = failed;
-  showUrlError(message);
-}
-
-/**
- * Play a remote stream URL. Detects the kind (direct / HLS / DASH), sets up the
- * player chrome, records it in Recent, then dispatches to the right engine. A
- * live HLS/DASH stream lights up the live chrome via setUrlLive.
- */
-async function loadFromUrl(url: string): Promise<void> {
-  const source = detectStreamType(url);
-  if (!source) {
-    showUrlError("That doesn't look like a playable http(s) URL.");
-    return;
-  }
-
-  // Reset prior playback of every kind.
-  stopGrowthWatch();
-  stopLive();
-  stopUrlPlayback();
-  setCutMode(false);
-  clearCutDeck();
   resetShuttle();
   setLoop(false);
-  setPanelOpen(false);
-  setShortcutsOpen(false);
-
-  const name = streamSourceName(source.url);
-  currentPath = source.url;
-  currentSourceKind = "url";
-  urlFailed = false;
-  loadTimestampsFor(source.url); // per-URL chapters (play-007 key is source-agnostic)
-  addRecent(source.url, name, "url");
-
-  emptyError.hidden = true;
-  titleLabel.textContent = name;
-  subtitleLabel.textContent = urlHost(source.url);
-  document.title = `${name} — Playback`;
-  app.dataset.state = "playing";
-  app.dataset.live = "false";
-  emptyState.hidden = true;
-  stage.hidden = false;
-  state = createInitialState();
-  applyAudioToVideo();
-  prepareCutDeck(source.url); // cut-view deck degrades gracefully for a URL
-
-  try {
-    if (source.kind === "hls") {
-      await setupHls(source.url);
-    } else if (source.kind === "dash") {
-      await setupDash(source.url);
-    } else {
-      // Direct progressive media: the native <video> streams it over HTTP itself.
-      video.src = source.url;
-      video.load();
-      void video.play().catch(() => {
-        /* autoplay may be blocked; user can press play */
-      });
-    }
-  } catch (err) {
-    handleUrlFailure(`Could not play this URL: ${String(err)}`);
-    return;
-  }
   showControls();
   render();
-}
-
-/** Attach hls.js to the <video> for an HLS (.m3u8) URL. */
-async function setupHls(url: string): Promise<void> {
-  const Hls = (await import("hls.js")).default;
-  if (!Hls.isSupported()) {
-    // Native HLS (e.g. Safari) — unlikely in WebView2, but degrade gracefully.
-    video.src = url;
-    video.load();
-    void video.play().catch(() => {});
-    return;
-  }
-  const h = new Hls({ enableWorker: true, lowLatencyMode: true, backBufferLength: 90 });
-  hls = h;
-
-  h.on(Hls.Events.ERROR, (_event: unknown, data: { fatal: boolean; type: string; details: string }) => {
-    if (!data.fatal) return;
-    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-      // A manifest that can't be fetched/parsed = a bad/unreachable URL → fail.
-      // Other network faults (a dropped segment) are recoverable → retry the load.
-      if (
-        data.details === Hls.ErrorDetails.MANIFEST_LOAD_ERROR ||
-        data.details === Hls.ErrorDetails.MANIFEST_LOAD_TIMEOUT ||
-        data.details === Hls.ErrorDetails.MANIFEST_PARSING_ERROR
-      ) {
-        handleUrlFailure("Could not load the stream — check the URL and your connection.");
-      } else {
-        try {
-          h.startLoad();
-        } catch {
-          handleUrlFailure("The stream connection was lost.");
-        }
-      }
-    } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-      try {
-        h.recoverMediaError();
-      } catch {
-        handleUrlFailure("The stream's media could not be decoded.");
-      }
-    } else {
-      handleUrlFailure(`Could not play the stream (${data.details}).`);
-    }
-  });
-
-  h.on(Hls.Events.MANIFEST_PARSED, () => {
-    void video.play().catch(() => {});
-  });
-  // Each playlist refresh tells us whether this is a live or VOD playlist.
-  h.on(Hls.Events.LEVEL_LOADED, (_event: unknown, data: { details: { live: boolean } }) => {
-    setUrlLive(!!data.details.live);
-  });
-
-  h.loadSource(url);
-  h.attachMedia(video);
-}
-
-/** Attach dashjs to the <video> for a DASH (.mpd) URL. */
-async function setupDash(url: string): Promise<void> {
-  // dashjs's surface is loosely typed for our purposes; use `any` deliberately.
-  const mod = await import("dashjs");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const lib: any = (mod as { default?: unknown }).default ?? mod;
-  const MediaPlayer = lib.MediaPlayer;
-  const events = MediaPlayer.events; // static enum on the factory
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const player: any = MediaPlayer().create();
-  dash = player;
-
-  player.on(events.ERROR, () =>
-    handleUrlFailure("Could not load the DASH stream — check the URL and your connection."),
-  );
-  if (events.PLAYBACK_ERROR) {
-    player.on(events.PLAYBACK_ERROR, () => handleUrlFailure("The DASH stream could not be played."));
-  }
-  player.on(events.STREAM_INITIALIZED, () => {
-    try {
-      setUrlLive(!!player.isDynamic());
-    } catch {
-      /* ignore */
-    }
-    void video.play().catch(() => {});
-  });
-  player.initialize(video, url, true);
 }
 
 /** Open the native file picker (Tauri) and load the chosen file. */
@@ -2701,21 +1627,6 @@ function wireControls(): void {
   dropZone.addEventListener("click", () => void openFileDialog());
   btnClearRecent.addEventListener("click", clearRecents);
 
-  // Open from a URL (play-006): reveal the input, submit on Enter / Play.
-  btnOpenUrl.addEventListener("click", openUrlInput);
-  urlForm.addEventListener("submit", (e) => {
-    e.preventDefault(); // never navigate the webview; play it instead
-    submitUrl();
-  });
-  urlCancel.addEventListener("click", closeUrlInput);
-  urlInput.addEventListener("keydown", (e) => {
-    // The global Escape handler is suppressed while a text field is focused, so
-    // close the input locally. (Enter is handled by the form's submit.)
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      closeUrlInput();
-    }
-  });
   btnPlay.addEventListener("click", doTogglePlay);
   btnRewind.addEventListener("click", () => doSkip(false));
   btnForward.addEventListener("click", () => doSkip(true));
@@ -2723,7 +1634,6 @@ function wireControls(): void {
   btnRate.addEventListener("click", doCycleRate);
   btnFs.addEventListener("click", () => void doToggleFullscreen());
   btnBack.addEventListener("click", goHome);
-  btnGoLive.addEventListener("click", doJumpToLive);
 
   // Keyboard shortcuts overlay (frame 05)
   btnKeys.addEventListener("click", toggleShortcuts);
@@ -2779,31 +1689,20 @@ function wireControls(): void {
     else doTogglePlay();
   });
 
-  // Scrubber: live-preview while dragging, commit on release. In live mode the
-  // slider maps onto the [0, available] DVR window instead of a fixed duration.
-  const sliderSeconds = (): number => {
-    const w = activeLiveWindow();
-    return w
-      ? (Number(seek.value) / 1000) * w.available
-      : sliderToTime(Number(seek.value), 1000, state.duration);
-  };
+  // Scrubber: live-preview while dragging, commit on release.
+  const sliderSeconds = (): number => sliderToTime(Number(seek.value), 1000, state.duration);
   const previewSeek = () => {
     isScrubbing = true;
-    const w = activeLiveWindow();
     const t = sliderSeconds();
-    const right = w ? "LIVE" : formatTime(state.duration);
-    timeLabel.innerHTML = `${formatTime(t)}&nbsp;/&nbsp;${right}`;
+    timeLabel.innerHTML = `${formatTime(t)}&nbsp;/&nbsp;${formatTime(state.duration)}`;
     progress.style.width = `${(Number(seek.value) / 1000) * 100}%`;
   };
   const commitSeek = () => {
-    doSeekTo(sliderSeconds()); // doSeekTo clamps into the live window when live
+    doSeekTo(sliderSeconds());
     isScrubbing = false;
   };
   seek.addEventListener("input", previewSeek);
   seek.addEventListener("change", commitSeek);
-
-  // LIVE badge → jump to the live edge.
-  liveBadge.addEventListener("click", doJumpToLive);
 
   volume.addEventListener("input", () => doSetVolume(Number(volume.value)));
 
@@ -2840,15 +1739,6 @@ function wireControls(): void {
     syncFromVideo();
     render();
     showControls();
-  });
-  // A failed media load on a remote URL (bad/unreachable direct URL, unsupported
-  // codec) surfaces a clear error instead of a dead player. Only acts on URL
-  // sources so local-file behavior is unchanged (HLS/DASH errors come through the
-  // library handlers; handleUrlFailure is one-shot to avoid double reporting).
-  video.addEventListener("error", () => {
-    if (currentSourceKind === "url") {
-      handleUrlFailure("Could not play this URL — it may be unreachable or an unsupported format.");
-    }
   });
 
   // Reveal controls on mouse activity over the stage.
@@ -2957,8 +1847,8 @@ function wireKeyboard(): void {
     if (isFocusTextEntry(e.target as HTMLElement | null)) return;
 
     // Timeline / cut view (play-004): J/K/L drive the shuttle transport,
-    // overriding their normal-mode meanings (k = play/pause, l = jump-to-live)
-    // only while the timeline view is open. Skip when a modifier is held.
+    // overriding the normal-mode meaning of k (play/pause) only while the
+    // timeline view is open. Skip when a modifier is held.
     if (cutMode && !stage.hidden && !e.ctrlKey && !e.altKey && !e.metaKey) {
       const k = e.key.toLowerCase();
       if (k === "j") {
@@ -3015,15 +1905,6 @@ function wireKeyboard(): void {
       case "o":
         void openFileDialog();
         break;
-      case "u":
-      case "U":
-        // Open a stream URL (play-006). Scoped to the home screen, where the
-        // affordance lives; ignored in the player so it can't shadow other keys.
-        if (stage.hidden) {
-          e.preventDefault();
-          openUrlInput();
-        }
-        break;
       case "a":
       case "A":
         doPrevTimestamp();
@@ -3031,10 +1912,6 @@ function wireKeyboard(): void {
       case "d":
       case "D":
         doNextTimestamp();
-        break;
-      case "l":
-      case "L":
-        if (!stage.hidden) doJumpToLive();
         break;
       case "Home":
         if (!stage.hidden) {
