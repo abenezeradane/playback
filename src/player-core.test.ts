@@ -47,6 +47,8 @@ import {
   shuttleForward,
   shuttleReverse,
   shuttleRate,
+  abLoopActive,
+  abLoopNext,
   niceTickInterval,
   rulerTicks,
   isTextEntryTarget,
@@ -561,6 +563,38 @@ describe("J/K/L shuttle transport (play-004)", () => {
     // stop is independent of the prior state
     expect(shuttleRate(shuttleStop())).toBe(0);
     expect(shuttleRate(fast)).toBe(2);
+  });
+});
+
+describe("A-B section loop (play-011)", () => {
+  it("abLoopActive needs both points set and ordered A < B", () => {
+    expect(abLoopActive(2, 8)).toBe(true);
+    expect(abLoopActive(null, 8)).toBe(false);
+    expect(abLoopActive(2, null)).toBe(false);
+    expect(abLoopActive(null, null)).toBe(false);
+    // B at or behind A is not a valid region
+    expect(abLoopActive(8, 2)).toBe(false);
+    expect(abLoopActive(5, 5)).toBe(false);
+    // A at 0 is a legitimate in-point
+    expect(abLoopActive(0, 4)).toBe(true);
+  });
+
+  it("abLoopNext seeks back to A once the playhead reaches B", () => {
+    // Before B: keep playing.
+    expect(abLoopNext(2, 2, 8)).toBe(null);
+    expect(abLoopNext(7.99, 2, 8)).toBe(null);
+    // At/past B: jump back to A.
+    expect(abLoopNext(8, 2, 8)).toBe(2);
+    expect(abLoopNext(9.5, 2, 8)).toBe(2);
+  });
+
+  it("abLoopNext is inert without an active region", () => {
+    expect(abLoopNext(10, null, 8)).toBe(null);
+    expect(abLoopNext(10, 2, null)).toBe(null);
+    expect(abLoopNext(10, null, null)).toBe(null);
+    // Inverted / zero-length span never loops, even past 'B'.
+    expect(abLoopNext(10, 8, 2)).toBe(null);
+    expect(abLoopNext(5, 5, 5)).toBe(null);
   });
 });
 

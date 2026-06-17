@@ -54,6 +54,8 @@ import {
   shuttleForward,
   shuttleReverse,
   shuttleRate,
+  abLoopActive,
+  abLoopNext,
   type PlayerState,
   type Timestamp,
   type TimestampStore,
@@ -103,6 +105,11 @@ const btnMute = $<HTMLButtonElement>("btn-mute");
 const btnRate = $<HTMLButtonElement>("btn-rate");
 const btnFs = $<HTMLButtonElement>("btn-fs");
 const btnKeys = $<HTMLButtonElement>("btn-keys");
+// Loop / repeat (play-011)
+const btnLoop = $<HTMLButtonElement>("btn-loop");
+const btnLoopA = $<HTMLButtonElement>("btn-loop-a");
+const btnLoopB = $<HTMLButtonElement>("btn-loop-b");
+const abMarkers = $<HTMLDivElement>("ab-markers");
 const seek = $<HTMLInputElement>("seek");
 const volume = $<HTMLInputElement>("volume");
 const progress = $<HTMLDivElement>("progress");
@@ -185,7 +192,12 @@ let detectedFps = DEFAULT_FPS;
 let shuttle: Shuttle = createShuttle();
 let shuttleRAF: number | undefined;
 let shuttleLast = 0;
+// Loop / repeat (play-011). `loopOn` is the whole-clip loop — a persisted global
+// preference shared with the cut-view loop toggle. `abA`/`abB` are the optional
+// A-B section-loop points (per clip, not persisted).
 let loopOn = false;
+let abA: number | null = null;
+let abB: number | null = null;
 /** Cached audio peaks for the waveform (0..1), redrawn on enter/resize. */
 let waveformPeaks: number[] = [];
 /** Captured filmstrip thumbnails (160×90 offscreen canvases), composited on draw. */
@@ -665,7 +677,9 @@ function goHome(): void {
   setCutMode(false);
   clearCutDeck();
   resetShuttle();
-  setLoop(false);
+  // Drop the per-clip A-B region but KEEP the persisted whole-clip loop pref.
+  clearAbLoop();
+  applyLoopState();
   setPanelOpen(false);
   setShortcutsOpen(false);
   liveUnavailable.hidden = true;
@@ -1385,16 +1399,114 @@ function doJumpEnd(): void {
   showControls();
 }
 
-/** Loop toggle: repeat playback at the clip's end. */
+// ---------------------------------------------------------------------------
+// Loop / repeat (play-011)
+// ---------------------------------------------------------------------------
+const LOOP_STORAGE_KEY = "playback:loop";
+
+/** Restore the persisted whole-clip loop preference at boot. */
+function loadLoopPref(): void {
+  try {
+    loopOn = localStorage.getItem(LOOP_STORAGE_KEY) === "true";
+  } catch {
+    loopOn = false;
+  }
+  applyLoopState();
+}
+
+function persistLoopPref(): void {
+  try {
+    localStorage.setItem(LOOP_STORAGE_KEY, String(loopOn));
+  } catch {
+    /* storage unavailable — keep the in-memory state */
+  }
+}
+
+/**
+ * Native `video.loop` does whole-clip repeat, but ONLY when no A-B region is
+ * active — an A-B section loop drives its own seek-back (maybeAbLoop) and would
+ * otherwise fight a clip-end native loop when B sits at the very end.
+ */
+function applyLoopToVideo(): void {
+  video.loop = loopOn && !abLoopActive(abA, abB);
+}
+
+/** Reflect loop + A-B state onto every loop control and the scrubber markers. */
+function applyLoopState(): void {
+  applyLoopToVideo();
+  // Whole-clip loop button (control bar) + the cut-view loop toggle share state.
+  btnLoop.setAttribute("aria-pressed", String(loopOn));
+  cutSection.dataset.loop = String(loopOn);
+  cutLoopBtn.setAttribute("aria-pressed", String(loopOn));
+  // A-B in/out point buttons light up when their point is set.
+  btnLoopA.setAttribute("aria-pressed", String(abA !== null));
+  btnLoopB.setAttribute("aria-pressed", String(abB !== null));
+  renderAbMarkers();
+}
+
+/** Whole-clip loop: persisted, shared with the cut-view toggle. */
 function setLoop(on: boolean): void {
   loopOn = on;
-  video.loop = on;
-  cutSection.dataset.loop = String(on);
-  cutLoopBtn.setAttribute("aria-pressed", String(on));
+  persistLoopPref();
+  applyLoopState();
 }
 
 function toggleLoop(): void {
   setLoop(!loopOn);
+}
+
+/** Toggle the A-B in-point (A): set it at the current time, or clear if set. */
+function toggleAbA(): void {
+  abA = abA === null ? video.currentTime || 0 : null;
+  applyLoopState();
+  showControls();
+}
+
+/** Toggle the A-B out-point (B): set it at the current time, or clear if set. */
+function toggleAbB(): void {
+  abB = abB === null ? video.currentTime || 0 : null;
+  applyLoopState();
+  showControls();
+}
+
+/** Drop the A-B region (used when the clip changes / returning home). */
+function clearAbLoop(): void {
+  abA = null;
+  abB = null;
+}
+
+/** Repeat [A,B]: when the playhead reaches B, jump back to A (play-011). Skipped
+ *  while the user is dragging the scrubber so a manual seek isn't fought. */
+function maybeAbLoop(): void {
+  if (isScrubbing) return;
+  const target = abLoopNext(video.currentTime, abA, abB);
+  if (target !== null) video.currentTime = target;
+}
+
+/** Draw the A-B region band + end flags on the scrubber (distinct from chapters). */
+function renderAbMarkers(): void {
+  abMarkers.replaceChildren();
+  const dur = state.duration;
+  if (dur <= 0) return;
+  if (abLoopActive(abA, abB)) {
+    const left = markerFraction(abA as number, dur) * 100;
+    const right = markerFraction(abB as number, dur) * 100;
+    const region = document.createElement("div");
+    region.className = "ab-region";
+    region.style.left = `${left}%`;
+    region.style.width = `${Math.max(0, right - left)}%`;
+    abMarkers.appendChild(region);
+  }
+  if (abA !== null) abMarkers.appendChild(makeAbFlag(abA, dur, "A"));
+  if (abB !== null) abMarkers.appendChild(makeAbFlag(abB, dur, "B"));
+}
+
+function makeAbFlag(time: number, dur: number, label: string): HTMLDivElement {
+  const flag = document.createElement("div");
+  flag.className = "ab-flag";
+  flag.dataset.label = label;
+  flag.style.left = `${markerFraction(time, dur) * 100}%`;
+  return flag;
 }
 
 /** Scrub the timeline from a pointer position (shared by click + drag). */
@@ -1647,7 +1759,9 @@ function loadSrc(src: string, title: string, subtitle = ""): void {
   applyAudioToVideo();
   // Reset the cut-view transport for the new clip (play-004).
   resetShuttle();
-  setLoop(false);
+  // New clip: drop any A-B region but re-apply the persisted loop pref (play-011).
+  clearAbLoop();
+  applyLoopState();
   video.load();
   void video.play().catch(() => {
     /* autoplay may be blocked; user can press play */
@@ -1743,6 +1857,11 @@ function wireControls(): void {
   btnFs.addEventListener("click", () => void doToggleFullscreen());
   btnBack.addEventListener("click", goHome);
 
+  // Loop / repeat (play-011)
+  btnLoop.addEventListener("click", toggleLoop);
+  btnLoopA.addEventListener("click", toggleAbA);
+  btnLoopB.addEventListener("click", toggleAbB);
+
   // Livestream · Unavailable screen (frame 04b): both back affordances go home and
   // the primary opens a recorded file (the shortcuts overlay is reached via ?).
   liveoffBack.addEventListener("click", goHome);
@@ -1827,12 +1946,15 @@ function wireControls(): void {
     if (currentPath) setRecentDuration(currentPath, video.duration);
     // Duration is now known — reposition markers against the real timeline.
     renderTimestamps();
+    // A-B loop markers also need the real duration to position (play-011).
+    renderAbMarkers();
     // Cut view (play-004): build the ruler now the duration + dimensions exist.
     buildRuler(video.duration);
     updateCutMeta();
     if (cutMode) renderCut();
   });
   video.addEventListener("timeupdate", () => {
+    maybeAbLoop();
     syncFromVideo();
     render();
   });
@@ -2005,6 +2127,21 @@ function wireKeyboard(): void {
       case "m":
         doToggleMute();
         break;
+      case "r":
+      case "R":
+        // Loop / repeat toggle (play-011), player-only.
+        if (!stage.hidden) toggleLoop();
+        break;
+      case "i":
+      case "I":
+        // Set / clear the A-B loop in-point (play-011), player-only.
+        if (!stage.hidden) toggleAbA();
+        break;
+      case "b":
+      case "B":
+        // Set / clear the A-B loop out-point (play-011), player-only.
+        if (!stage.hidden) toggleAbB();
+        break;
       case "+":
       case "=":
         if (!stage.hidden) doStepRate(1);
@@ -2111,6 +2248,7 @@ wireControls();
 wireKeyboard();
 wireFocusReturn();
 loadPinChapter();
+loadLoopPref();
 void registerDragAndDrop();
 void loadLaunchFile();
 renderTimestamps();

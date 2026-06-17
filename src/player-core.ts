@@ -599,6 +599,35 @@ export function shuttleRate(s: Shuttle): number {
   return s.direction * SHUTTLE_SPEEDS[idx];
 }
 
+// --- A-B section loop (play-011) ------------------------------------------
+// Whole-clip looping is the native `video.loop` property. The optional A-B
+// section loop repeats only the range [A, B]: when the playhead reaches B it
+// seeks back to A. Both decisions are pure so they can be unit-tested and the
+// runtime stays a thin driver around `abLoopNext`.
+
+/**
+ * An A-B loop is engaged only when both points are set and ordered (A strictly
+ * before B). A null point — or B at/behind A (a zero-or-negative span) — means
+ * no section loop, so playback falls back to the whole-clip loop / normal end.
+ */
+export function abLoopActive(a: number | null, b: number | null): boolean {
+  return a !== null && b !== null && b > a;
+}
+
+/**
+ * Decide where an A-B loop should seek back to, or null to keep playing. Once the
+ * playhead reaches/passes B the loop jumps back to A; before B (or with no active
+ * region) it returns null. Forward-only: tracking back below A is left alone.
+ */
+export function abLoopNext(
+  currentTime: number,
+  a: number | null,
+  b: number | null,
+): number | null {
+  if (!abLoopActive(a, b)) return null;
+  return currentTime >= (b as number) ? (a as number) : null;
+}
+
 // --- Timeline ruler -------------------------------------------------------
 
 /** A tick on the timeline ruler; major ticks carry a time label. */

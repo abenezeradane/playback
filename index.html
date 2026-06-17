@@ -148,6 +148,9 @@
               <div id="buffered" class="scrubber__buffered"></div>
               <div id="progress" class="scrubber__progress"></div>
             </div>
+            <!-- A-B section-loop region + flags (play-011), drawn beneath the
+                 chapter ticks and distinct from them. Injected here. -->
+            <div id="ab-markers" class="scrubber__ab" aria-hidden="true"></div>
             <!-- Timestamp markers (play-002) injected here. -->
             <div id="markers" class="scrubber__markers"></div>
             <input id="seek" class="scrubber__range" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek" />
@@ -179,6 +182,13 @@
 
             <div class="controls__right">
               <button id="btn-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed">1&times;</button>
+              <!-- Loop / repeat (play-011): whole-clip loop toggle + A-B section
+                   loop in-/out-point buttons. -->
+              <button id="btn-loop-a" class="iconbtn iconbtn--sm loopbtn loopbtn--ab" type="button" title="Set / clear A-B loop in point (I)" aria-pressed="false">A</button>
+              <button id="btn-loop-b" class="iconbtn iconbtn--sm loopbtn loopbtn--ab" type="button" title="Set / clear A-B loop out point (B)" aria-pressed="false">B</button>
+              <button id="btn-loop" class="iconbtn iconbtn--sm" type="button" title="Loop (R)" aria-pressed="false">
+                <svg class="ic" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" /><path d="m7 22-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" /></svg>
+              </button>
               <button id="btn-cut" class="iconbtn iconbtn--sm" type="button" title="Timeline view (C)" aria-pressed="false">
                 <svg class="ic" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M7 3v18" /><path d="M3 7.5h4" /><path d="M3 12h18" /><path d="M3 16.5h4" /><path d="M17 3v18" /><path d="M17 7.5h4" /><path d="M17 16.5h4" /></svg>
               </button>
@@ -387,6 +397,8 @@
                 <li><span>Volume up / down</span><span class="keys__caps"><kbd class="kbd">&uarr;</kbd><kbd class="kbd">&darr;</kbd></span></li>
                 <li><span>Speed up / down</span><span class="keys__caps"><kbd class="kbd">+</kbd><kbd class="kbd">&minus;</kbd></span></li>
                 <li><span>Mute</span><span class="keys__caps"><kbd class="kbd">M</kbd></span></li>
+                <li><span>Loop / repeat</span><span class="keys__caps"><kbd class="kbd">R</kbd></span></li>
+                <li><span>Set A-B loop in / out</span><span class="keys__caps"><kbd class="kbd">I</kbd><kbd class="kbd">B</kbd></span></li>
                 <li><span>Fullscreen</span><span class="keys__caps"><kbd class="kbd">F</kbd></span></li>
                 <li><span>Open a file</span><span class="keys__caps"><kbd class="kbd">O</kbd></span></li>
               </ul>

@@ -1263,6 +1263,76 @@ body {
   transform: translateX(-50%) translateY(0);
 }
 
+/* ---- A-B section loop (play-011) ------------------------------------- */
+/* Drawn UNDER the chapter ticks (z-index 1 vs. .scrubber__markers' 2) and in
+   the reserved accent yellow so the loop region reads distinctly from the white
+   chapter ticks. */
+.scrubber__ab {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* The highlighted [A,B] span sitting on the track. */
+.ab-region {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 6px;
+  background: var(--accent-yellow-soft);
+  border: 1px solid var(--accent-yellow);
+  border-radius: var(--radius-pill);
+  box-sizing: border-box;
+}
+
+/* A / B end flags: a full-height accent line with a small lettered chip. */
+.ab-flag {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--accent-yellow);
+  border-radius: 1px;
+}
+
+.ab-flag::before {
+  content: attr(data-label);
+  position: absolute;
+  bottom: 15px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--canvas);
+  background: var(--accent-yellow);
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+/* The A / B in-/out-point buttons in the control bar: small bold letters that
+   light up (accent yellow) when their point is set, matching the scrubber. */
+.loopbtn--ab {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.loopbtn--ab[aria-pressed="true"] {
+  background: var(--accent-yellow-soft);
+  color: var(--accent-yellow);
+}
+
+.loopbtn--ab[aria-pressed="true"]:hover {
+  background: var(--accent-yellow-soft);
+  color: var(--accent-yellow);
+}
+
 /* ===================================================================== */
 /* CHAPTERS PANEL (frame 03)                                             */
 /* ===================================================================== */
