@@ -1604,44 +1604,109 @@ body {
 }
 
 /* ===================================================================== */
-/* LIVESTREAM NOTICE (playback temporarily deprecated)                   */
+/* LIVESTREAM · UNAVAILABLE (frame 04b — playback temporarily deprecated) */
 /* ===================================================================== */
-/* Shown centered over the empty player when a detected livestream is opened. */
-.live-notice {
+/* A purpose-built screen shown when a detected livestream is opened (live
+   playback is temporarily off). Replaces the old empty-player + notice. */
+.liveoff {
   position: absolute;
   inset: 0;
-  z-index: 3;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: var(--canvas);
+}
+
+/* The header reuses the normal player's floating .overlay-top (glass back chip +
+   .title-main / .title-sub), so it needs no bespoke app-bar styles. It is
+   absolutely positioned, so .liveoff__body below is the only in-flow child and
+   centers the notice in the full screen height. */
+.liveoff__body {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 48px;
+  min-height: 0;
+}
+
+.liveoff__notice {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 24px;
+  gap: 18px;
+  width: 460px;
+  max-width: 100%;
   text-align: center;
-  pointer-events: none;
 }
 
-.live-notice[hidden] {
-  display: none;
-}
-
-.live-notice .ic {
-  width: 34px;
-  height: 34px;
-  color: var(--stone);
-  margin-bottom: 4px;
-}
-
-.live-notice__title {
-  color: var(--ink);
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.live-notice__sub {
+.liveoff__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-xl);
+  background: var(--surface-card);
+  border: 1px solid var(--hairline);
   color: var(--mute);
+}
+
+.liveoff__icon .ic {
+  width: 30px;
+  height: 30px;
+}
+
+.liveoff__text {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.liveoff__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 11px;
+  border-radius: var(--radius-full);
+  background: var(--accent-yellow-soft);
+  color: var(--accent-yellow);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.liveoff__heading {
+  margin: 0;
+  color: var(--ink);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.3px;
+}
+
+.liveoff__copy {
+  margin: 0;
+  color: var(--mute);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.liveoff__actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding-top: 6px;
+}
+
+.liveoff__hint {
+  margin: 0;
+  color: var(--ash);
   font-size: 13px;
-  max-width: 360px;
+  line-height: 1.4;
 }
 
 /* ===================================================================== */

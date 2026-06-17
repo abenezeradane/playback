@@ -44,6 +44,40 @@ struct StreamStatus {
     /// live candidate worth probing for growth, while a file last touched long ago
     /// is static and opens normally with no probe delay (play-005 detect-before-play).
     mtime_age_ms: u64,
+    /// True when another process currently holds the file open for writing — i.e. a
+    /// recorder (Streamlink/OBS) is still appending to it. This is the most reliable
+    /// "still being written" signal: it is instant and, unlike a size-growth sample,
+    /// it is not fooled by the multi-second flat gaps between an HLS recorder's
+    /// segment-write bursts. Windows-only; always false elsewhere (the frontend then
+    /// falls back to the growth probe).
+    being_written: bool,
+}
+
+/// True when another process holds `path` open for writing. We probe by asking for
+/// our own write handle while sharing only reads: an active writer's handle then
+/// collides with ours and Windows denies the open with a sharing violation
+/// (ERROR_SHARING_VIOLATION, raw OS error 32). The open is never used to write —
+/// it is closed immediately — so it neither modifies the file nor its mtime. Any
+/// other outcome (the open succeeds, or fails for an unrelated reason such as a
+/// read-only file) is reported as "not actively being written".
+#[cfg(windows)]
+fn is_being_written(path: &str) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    match fs::OpenOptions::new()
+        .write(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+    {
+        Ok(_) => false,
+        Err(e) => e.raw_os_error() == Some(ERROR_SHARING_VIOLATION),
+    }
+}
+
+#[cfg(not(windows))]
+fn is_being_written(_path: &str) -> bool {
+    false
 }
 
 /// Report the size of a media file plus whether it is a live capture in progress.
@@ -61,7 +95,8 @@ fn stream_status(path: String) -> Result<StreamStatus, String> {
         .and_then(|m| m.elapsed().ok())
         .map(|age| age.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(u64::MAX);
-    Ok(StreamStatus { size, live, complete, mtime_age_ms })
+    let being_written = is_being_written(&path);
+    Ok(StreamStatus { size, live, complete, mtime_age_ms, being_written })
 }
 
 /// Read up to `max_len` bytes from `path` starting at `offset`, returned as a

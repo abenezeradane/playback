@@ -78,9 +78,15 @@ const stage = $<HTMLElement>("stage");
 const video = $<HTMLVideoElement>("video");
 const controls = $<HTMLDivElement>("controls");
 const centerToggle = $<HTMLDivElement>("center-toggle");
-// Shown over an empty player when a livestream is opened (livestream playback is
-// temporarily deprecated — we detect it but do not attempt to tail/play it).
-const liveNotice = $<HTMLDivElement>("live-notice");
+// Livestream · Unavailable screen (frame 04b). Livestream playback is temporarily
+// deprecated — a detected livestream opens this purpose-built screen (not an empty
+// player). We still DETECT it; we just don't tail/play it.
+const liveUnavailable = $<HTMLElement>("live-unavailable");
+const liveoffTitle = $<HTMLSpanElement>("liveoff-title");
+const liveoffMeta = $<HTMLSpanElement>("liveoff-meta");
+const liveoffBack = $<HTMLButtonElement>("liveoff-back");
+const liveoffOpen = $<HTMLButtonElement>("liveoff-open");
+const liveoffHome = $<HTMLButtonElement>("liveoff-home");
 
 const btnOpen = $<HTMLButtonElement>("btn-open");
 const btnOpenTop = $<HTMLButtonElement>("btn-open-top");
@@ -660,7 +666,7 @@ function goHome(): void {
   setLoop(false);
   setPanelOpen(false);
   setShortcutsOpen(false);
-  liveNotice.hidden = true;
+  liveUnavailable.hidden = true;
   video.removeAttribute("src");
   video.load();
   state = createInitialState();
@@ -700,6 +706,8 @@ interface StreamStatus {
   complete: boolean;
   /** Milliseconds since the file was last written (see lib.rs). */
   mtime_age_ms: number;
+  /** True while another process holds the file open for writing (see lib.rs). */
+  being_written: boolean;
 }
 
 // --- Up-front live detection (play-005 detect-before-play) -----------------
@@ -713,6 +721,14 @@ const LIVE_RECENT_MS = 15_000;
 // far more — so it stays comfortably below one tick of a slow writer.
 const LIVE_GROWTH_SAMPLE_MS = 400;
 const LIVE_GROWTH_THRESHOLD = 8 * 1024;
+// A real recorder (Streamlink/OBS) flushes whole HLS segments at once, so the
+// file grows in bursts with multi-second flat gaps in between. A single short
+// sample usually lands in one of those gaps and sees no growth, so the growth
+// probe samples repeatedly across this window (exiting early the moment growth
+// appears) rather than deciding off one sample. Only reached when the instant
+// writer-lock signal is unavailable (a non-Windows host, or a writer that allows
+// shared writes), so it rarely runs.
+const LIVE_GROWTH_WINDOW_MS = 6_000;
 
 /** Bytes pulled per Rust read_stream_chunk call (used by the cut-view waveform). */
 const READ_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -1476,7 +1492,7 @@ async function loadFromPath(path: string): Promise<void> {
     // temporarily deprecated, so a recording in progress opens an empty player
     // instead of being tailed.
     const detected = status ? await detectLive(path, status) : "normal";
-    if (detected === "live-marker" || detected === "live-grow") {
+    if (detected !== "normal") {
       openEmptyLivePlayer(path);
       return;
     }
@@ -1497,27 +1513,42 @@ async function loadFromPath(path: string): Promise<void> {
  * paint), so it routes to the empty player instead of trying to play.
  *
  *  - `live-marker` — a `<path>.live` marker says a writer is appending.
- *  - `live-grow`   — no marker, but the file is recently-written AND visibly grows
- *                    during a short sample.
+ *  - `live-lock`   — another process holds the file open for writing (a recorder
+ *                    such as Streamlink/OBS is still appending). Instant + reliable.
+ *  - `live-grow`   — no marker or lock signal, but the file is recently-written AND
+ *                    visibly grows while we watch it.
  *  - `normal`      — everything else: a finished or static file.
  *
- * The growth sample only runs for a recently-modified file, so ordinary opens of
- * a static file stay instant.
+ * The growth watch only runs for a recently-modified file with no lock signal, so
+ * ordinary opens of a static file stay instant.
  */
 async function detectLive(
   path: string,
   status: StreamStatus,
-): Promise<"live-marker" | "live-grow" | "normal"> {
+): Promise<"live-marker" | "live-lock" | "live-grow" | "normal"> {
   if (status.complete) return "normal";
   if (status.live) return "live-marker";
+  // Most reliable signal: a recorder still holds the file open for writing. This
+  // is instant and — unlike a size sample — is not defeated by the multi-second
+  // flat gaps between an HLS recorder's segment-write bursts.
+  if (status.being_written) return "live-lock";
   // Only spend time probing a file that was just written — a file last touched
   // long ago is static, so open it normally without any added latency.
   if (status.mtime_age_ms > LIVE_RECENT_MS) return "normal";
-  // Confirm the file is actually still being appended to (cheap double-stat).
-  await delay(LIVE_GROWTH_SAMPLE_MS);
-  const after = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
-  if (!after || after.complete) return "normal";
-  return after.size > status.size + LIVE_GROWTH_THRESHOLD ? "live-grow" : "normal";
+  // No lock signal but recently written: confirm the file is still being appended
+  // to. A real recorder grows in bursts with multi-second flat gaps, so sample
+  // repeatedly across a window and bail out the instant we see growth (or the
+  // file gets locked / grows), rather than judging off a single sample that
+  // usually lands in a gap.
+  const deadline = Date.now() + LIVE_GROWTH_WINDOW_MS;
+  do {
+    await delay(LIVE_GROWTH_SAMPLE_MS);
+    const after = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
+    if (!after || after.complete) return "normal";
+    if (after.being_written) return "live-lock";
+    if (after.size > status.size + LIVE_GROWTH_THRESHOLD) return "live-grow";
+  } while (Date.now() < deadline);
+  return "normal";
 }
 
 /** Promise-based delay used by the up-front live probe. */
@@ -1528,7 +1559,7 @@ function delay(ms: number): Promise<void> {
 /** Load a media file from an already-resolved URL (asset://). */
 function loadSrc(src: string, title: string, subtitle = ""): void {
   emptyError.hidden = true;
-  liveNotice.hidden = true;
+  liveUnavailable.hidden = true;
   video.src = src;
   titleLabel.textContent = title;
   subtitleLabel.textContent = subtitle;
@@ -1550,28 +1581,29 @@ function loadSrc(src: string, title: string, subtitle = ""): void {
 
 /**
  * Livestream playback is temporarily deprecated. A file detected as a livestream
- * (a `.live` marker or an actively-growing recording) still opens the player, but
- * we do NOT attempt to play it — the viewer is left on an empty player with a
- * short notice rather than a tailing MediaSource.
+ * (a `.live` marker or an actively-growing recording) opens the purpose-built
+ * "Livestream · Unavailable" screen (frame 04b) instead of being tailed — we play
+ * nothing and route the viewer to a recorded file or back to the library.
  */
 function openEmptyLivePlayer(path: string): void {
   const title = basename(path);
-  emptyError.hidden = true;
+  const folder = parentDir(path);
+  // This screen plays nothing — tear down any prior playback + player chrome.
+  video.pause();
   video.removeAttribute("src");
   video.load();
-  titleLabel.textContent = title;
-  subtitleLabel.textContent = "Live recording";
-  document.title = `${title} — Playback`;
-  app.dataset.state = "playing";
-  emptyState.hidden = true;
-  stage.hidden = false;
-  liveNotice.hidden = false;
-  state = createInitialState();
-  applyAudioToVideo();
+  setCutMode(false);
   resetShuttle();
-  setLoop(false);
-  showControls();
-  render();
+  setPanelOpen(false);
+  emptyError.hidden = true;
+  liveoffTitle.textContent = title;
+  liveoffMeta.textContent = folder ? `Livestream · ${folder}` : "Livestream";
+  document.title = `${title} — Playback`;
+  app.dataset.state = "live-unavailable";
+  emptyState.hidden = true;
+  stage.hidden = true;
+  liveUnavailable.hidden = false;
+  state = createInitialState();
 }
 
 /** Open the native file picker (Tauri) and load the chosen file. */
@@ -1634,6 +1666,12 @@ function wireControls(): void {
   btnRate.addEventListener("click", doCycleRate);
   btnFs.addEventListener("click", () => void doToggleFullscreen());
   btnBack.addEventListener("click", goHome);
+
+  // Livestream · Unavailable screen (frame 04b): both back affordances go home and
+  // the primary opens a recorded file (the shortcuts overlay is reached via ?).
+  liveoffBack.addEventListener("click", goHome);
+  liveoffHome.addEventListener("click", goHome);
+  liveoffOpen.addEventListener("click", () => void openFileDialog());
 
   // Keyboard shortcuts overlay (frame 05)
   btnKeys.addEventListener("click", toggleShortcuts);
