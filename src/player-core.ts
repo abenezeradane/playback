@@ -571,6 +571,43 @@ export function liveStallCeiling(w: LiveWindow, guard: number = LIVE_STALL_GUARD
   return Math.max(0, w.available - guard);
 }
 
+/**
+ * A live stream shows the viewer one of two states, never a continuously-counting
+ * lag number: `live` (following the edge) or `backtracked` (deliberately watching
+ * earlier than the edge). The state is driven by the viewer's *intent* — pressing
+ * L / catching up to the edge → live; tracking back → backtracked — NOT recomputed
+ * from the measured distance every frame, which is what made the old "LIVE −Ns"
+ * readout flicker as `available` advanced in discrete poll steps.
+ */
+export type LiveFollowState = "live" | "backtracked";
+
+/**
+ * Seconds past which a following playhead is considered to have genuinely fallen
+ * behind the live edge (a decode stall) rather than just lagging within ordinary
+ * poll jitter. Kept comfortably above one poll interval so a normal `available`
+ * bump never trips a re-sync — only a real stall does. See `shouldResyncToLive`.
+ */
+export const LIVE_RESYNC_BEHIND = 4;
+
+/**
+ * Whether a playhead that is *following* live should be re-synced forward to the
+ * edge. While following we jump to the edge once and then let playback free-run:
+ * at 1× it keeps pace with the edge (both advance in real time), so it stays
+ * ~`delay` behind the write head WITHOUT re-seeking every poll — re-seeking each
+ * poll is exactly what sawtoothed the picture in play-003. We only force a
+ * catch-up when the gap back to the edge exceeds `threshold` (a real stall), and
+ * the correction is always forward (toward live), never the backward yank that
+ * caused the jump-to-live stutter.
+ */
+export function shouldResyncToLive(
+  currentTime: number,
+  w: LiveWindow,
+  threshold: number = LIVE_RESYNC_BEHIND,
+): boolean {
+  if (!w.live) return false;
+  return liveEdge(w) - currentTime > threshold;
+}
+
 // ---------------------------------------------------------------------------
 // Frame-accurate timeline / cut view (play-004)
 //

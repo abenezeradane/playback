@@ -50,7 +50,7 @@ import {
   skipLive,
   isCaughtUp,
   canFastForwardLive,
-  behindLive,
+  shouldResyncToLive,
   liveProgressFraction,
   DEFAULT_FPS,
   snapFps,
@@ -195,6 +195,12 @@ let growthWatch: number | undefined;
 // When a live source has just been (auto-)opened, jump to the live edge as soon
 // as enough has buffered (so an upgraded recording starts at "now", not the past).
 let pendingGoLive = false;
+// A livestream is shown as one of two states, never a counting lag number:
+// `true` = following the live edge ("LIVE"); `false` = the viewer has tracked
+// back ("BACKTRACKED"). Intent-driven (set by L / track-back / catching up),
+// never recomputed per-frame from the measured distance — that flicker was the
+// "jitter" the two-state model removes.
+let liveFollowing = false;
 
 // --- URL / network streaming (play-006) ------------------------------------
 // The active MSE engine for a remote HLS/DASH URL (a direct progressive URL just
@@ -305,11 +311,14 @@ function render(): void {
   if (cutMode) renderCut();
 }
 
-/** Render the scrubber, time, and LIVE chrome for a still-growing stream. */
+/**
+ * Render the scrubber, time, and LIVE chrome for a still-growing stream. The
+ * stream is in exactly one of two states — `liveFollowing` (LIVE) or backtracked
+ * — so the readout never shows a per-frame counting lag (no "−Ns" jitter).
+ */
 function renderLive(w: LiveWindow): void {
   const edge = liveEdge(w);
-  const caught = isCaughtUp(state.currentTime, w);
-  const behind = Math.round(behindLive(state.currentTime, w));
+  const following = liveFollowing;
 
   // Scrubber maps the playhead onto the [0, available] DVR window; the buffered
   // bar fills the whole window and a tick marks the reachable live edge.
@@ -321,18 +330,18 @@ function renderLive(w: LiveWindow): void {
   liveEdgeTick.hidden = false;
   liveEdgeTick.style.left = `${edgeFrac * 100}%`;
 
-  // Time reads as "position / LIVE", with how far behind when not caught up.
-  timeLabel.innerHTML = caught
-    ? `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-sep">/</span><span class="t-live">LIVE</span>`
-    : `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-sep">/</span><span class="t-live">LIVE <em>−${behind}s</em></span>`;
+  // Time reads as "position / LIVE": LIVE lights red while following, dims when
+  // backtracked. No lag number — the state is binary, so nothing flickers.
+  timeLabel.innerHTML = `<span class="t-cur">${formatTime(state.currentTime)}</span><span class="t-sep">/</span><span class="t-live" data-live="${following}">LIVE</span>`;
 
-  // LIVE status badge (top overlay); pulses once caught up to the edge.
+  // Status badge (top overlay): "LIVE" (pulsing) when following, else "BACKTRACKED".
   liveBadge.hidden = false;
-  liveBadge.dataset.caught = String(caught);
+  liveBadge.dataset.caught = String(following);
+  liveBadge.textContent = following ? "LIVE" : "BACKTRACKED";
 
-  // "GO LIVE" action appears only while behind; fast-forward is gated at the edge.
-  btnGoLive.hidden = caught;
-  btnForward.disabled = caught;
+  // "GO LIVE" action + free fast-forward appear only while backtracked.
+  btnGoLive.hidden = following;
+  btnForward.disabled = following;
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +373,8 @@ function doSkip(forward: boolean): void {
       return;
     }
     const next = skipLive(state.currentTime, forward ? SKIP_SECONDS : -SKIP_SECONDS, w);
+    // Reaching the edge resumes LIVE; tracking back enters BACKTRACKED.
+    liveFollowing = isCaughtUp(next, w);
     state = { ...state, currentTime: next };
     video.currentTime = next;
     render();
@@ -381,6 +392,8 @@ function doSeekTo(seconds: number): void {
   const w = activeLiveWindow();
   if (w) {
     const next = clampToLiveWindow(seconds, w);
+    // Seeking to the edge counts as LIVE; anywhere behind it is BACKTRACKED.
+    liveFollowing = isCaughtUp(next, w);
     state = { ...state, currentTime: next };
     video.currentTime = next;
     render();
@@ -1352,6 +1365,7 @@ function stopLive(): void {
     live = null;
   }
   pendingGoLive = false;
+  liveFollowing = false;
   app.dataset.live = "false";
   btnForward.disabled = false;
   liveBadge.hidden = true;
@@ -1382,16 +1396,19 @@ function onLiveUpdate(): void {
     pendingGoLive = false;
     doJumpToLive();
   }
-  // Stall guard (play-005): only stop the playhead from running into
-  // not-yet-decoded media — i.e. clamp it against the buffered end (the stall
-  // ceiling), NOT against `liveEdge`. The `delay` is headroom playback is allowed
-  // to glide through; pinning to `liveEdge` every frame (the old behaviour) yanked
-  // the playhead back each tick (the edge only advances in discrete poll steps),
-  // which stuttered the picture and left the lag readout stuck behind. Tracking
-  // back and seeking are untouched.
   if (live && live.live && !video.paused) {
-    const ceiling = liveStallCeiling(live.window());
-    if (video.currentTime > ceiling) video.currentTime = ceiling;
+    const w = live.window();
+    // Upper safety (play-005): never run the playhead into not-yet-decoded media —
+    // clamp against the buffered end (the stall ceiling), NOT against `liveEdge`.
+    const ceiling = liveStallCeiling(w);
+    if (video.currentTime > ceiling) {
+      video.currentTime = ceiling;
+    } else if (liveFollowing && shouldResyncToLive(video.currentTime, w)) {
+      // Following the edge: free-run keeps pace with it, so we DON'T re-seek every
+      // poll (that sawtoothed the picture). Only when a real stall has dropped us
+      // well behind the edge do we catch up — always forward, never a backward yank.
+      video.currentTime = liveEdge(w);
+    }
   }
   syncFromVideo();
   render();
@@ -1451,12 +1468,16 @@ function doJumpToLive(): void {
   const w = activeLiveWindow();
   if (!w) return;
   syncFromVideo();
+  const wasFollowing = liveFollowing;
+  liveFollowing = true;
   const edge = liveEdge(w);
-  // The live edge sits a full `delay` inside the buffered range, so this is a seek
-  // *within* already-decoded media — it should not force a rebuffer. Skip it
-  // entirely when we're already essentially at the edge, so a redundant seek can't
-  // hitch the picture (play-005 smooth jump-to-live).
-  if (Math.abs(state.currentTime - edge) > LIVE_STALL_GUARD) {
+  // Jump to "the livestream minus the buffer" = the live edge (a full `delay`
+  // inside the buffered range, so it's a seek within decoded media, not a
+  // rebuffer). Seek ONLY when we were backtracked: pressing L while already LIVE
+  // must not move the playhead — that redundant seek (it overshot to the buffered
+  // end, then yanked back to the edge) was the jump-to-live jitter. Following then
+  // free-runs at the edge without per-poll re-seeks.
+  if (!wasFollowing || Math.abs(state.currentTime - edge) > LIVE_STALL_GUARD) {
     state = { ...state, currentTime: edge };
     video.currentTime = edge;
   }
@@ -2435,6 +2456,7 @@ function stopUrlPlayback(): void {
     dash = null;
   }
   urlLive = false;
+  liveFollowing = false;
   if (urlLiveTimer !== undefined) {
     window.clearInterval(urlLiveTimer);
     urlLiveTimer = undefined;
@@ -2444,10 +2466,13 @@ function stopUrlPlayback(): void {
 /** Flag (or clear) a live URL stream so the play-003 live chrome shows. */
 function setUrlLive(on: boolean): void {
   urlLive = on;
+  // A live URL opens positioned at the edge (the MSE library starts there), so it
+  // begins in the LIVE (following) state; tracking back flips it to BACKTRACKED.
+  if (on) liveFollowing = true;
   app.dataset.live = String(on);
   if (on && urlLiveTimer === undefined) {
     // The DVR window grows between timeupdates (and while paused), so refresh the
-    // edge tick + "−Ns behind" readout on a light interval.
+    // edge tick + LIVE/BACKTRACKED state on a light interval.
     urlLiveTimer = window.setInterval(() => {
       syncFromVideo();
       render();

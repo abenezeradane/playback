@@ -43,6 +43,7 @@ import {
   isCaughtUp,
   canFastForwardLive,
   behindLive,
+  shouldResyncToLive,
   liveProgressFraction,
   snapFps,
   timeToFrame,
@@ -68,6 +69,7 @@ import {
   SKIP_SECONDS,
   LIVE_DELAY_SECONDS,
   LIVE_STALL_GUARD,
+  LIVE_RESYNC_BEHIND,
   type PlayerState,
   type Shuttle,
 } from "./player-core";
@@ -559,6 +561,31 @@ describe("livestream — stall ceiling + honest lag (play-005)", () => {
     expect(behindLive(15, w)).toBe(10); // 10s behind the playable edge
     expect(isCaughtUp(15, w)).toBe(false);
     expect(behindLive(25, w)).toBe(0); // exactly at the edge → caught up
+  });
+});
+
+describe("livestream — two-state follow + jitter-free re-sync", () => {
+  it("a following playhead near the edge never re-syncs (no per-poll seek)", () => {
+    const w = createLiveWindow(30); // liveEdge 25
+    // Free-running keeps the playhead within ~a poll of the edge; tiny gaps (and
+    // even being slightly AHEAD of the edge through the safety buffer) must not
+    // trigger a seek — that re-seek-every-poll was the old sawtooth stutter.
+    expect(shouldResyncToLive(25, w)).toBe(false); // exactly at the edge
+    expect(shouldResyncToLive(27, w)).toBe(false); // ahead, inside the buffer
+    expect(shouldResyncToLive(23, w)).toBe(false); // 2s behind — still poll jitter
+  });
+
+  it("a genuine fall-behind (a stall) past the threshold does re-sync", () => {
+    const w = createLiveWindow(30); // liveEdge 25
+    // Only once the gap back to the edge clearly exceeds poll jitter do we catch up.
+    expect(shouldResyncToLive(25 - LIVE_RESYNC_BEHIND - 0.01, w)).toBe(true);
+    expect(shouldResyncToLive(10, w)).toBe(true); // 15s behind → a real stall
+    // The threshold sits comfortably above one poll's worth of advance.
+    expect(LIVE_RESYNC_BEHIND).toBeGreaterThan(2);
+  });
+
+  it("a finalized stream never re-syncs (it is just a file)", () => {
+    expect(shouldResyncToLive(0, createLiveWindow(30, false))).toBe(false);
   });
 });
 

@@ -1112,8 +1112,8 @@ body {
   color: var(--mute);
 }
 
-.timerow .t-live em {
-  font-style: normal;
+/* LIVE lights red while following the edge; dims when the viewer is backtracked. */
+.timerow .t-live[data-live="true"] {
   color: var(--live);
 }
 
@@ -1785,6 +1785,17 @@ body {
 
 .live-badge[data-caught="true"] {
   animation: live-pulse 2s ease-in-out infinite;
+}
+
+/* Backtracked: a ghosted badge so it reads as "off live" — the GO LIVE pill and
+   the L hotkey are the way back to the edge. */
+.live-badge[data-caught="false"] {
+  background: color-mix(in srgb, var(--live) 16%, transparent);
+  color: var(--live);
+}
+
+.live-badge[data-caught="false"]::before {
+  background: var(--live);
 }
 
 @keyframes live-pulse {
