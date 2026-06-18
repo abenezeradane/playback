@@ -809,3 +809,79 @@ export function stepFrame(index: number, delta: number, count: number): number {
   if (count <= 0) return 0;
   return (((index + delta) % count) + count) % count;
 }
+
+// ---------------------------------------------------------------------------
+// Filesystem allow-list (sec-002 — scope reads to the opened media directory)
+// ---------------------------------------------------------------------------
+//
+// The native shell (src-tauri/src/lib.rs) is the real security boundary: it
+// canonicalizes every caller-supplied path with std::fs::canonicalize (which
+// resolves symlinks AND `..` against the real filesystem) before checking it
+// against an allow-list of roots held in tauri::State, and tightens the asset
+// protocol scope to the opened file's directory. This is the pure, DOM/FS-free
+// mirror of that containment decision so it can be unit-tested headlessly.
+
+/**
+ * Lexically normalize an absolute path into a comparable shape:
+ *   - `\` and `/` are both treated as separators,
+ *   - `.` segments are dropped and `..` segments pop the previous one,
+ *   - a leading Windows drive letter is lower-cased (Windows paths are
+ *     case-insensitive on the drive, and canonicalize normalizes its case),
+ * Returns null for a non-string, empty, or non-absolute path (deny-by-default).
+ */
+function normalizeAbsPath(p: unknown): { drive: string; segs: string[] } | null {
+  if (typeof p !== "string") return null;
+  const trimmed = p.trim();
+  if (trimmed === "") return null;
+  let s = trimmed.replace(/\\/g, "/");
+  let drive = "";
+  const win = /^([A-Za-z]):\//.exec(s);
+  if (win) {
+    drive = win[1].toLowerCase();
+    s = s.slice(win[0].length - 1); // keep the leading "/"
+  } else if (!s.startsWith("/")) {
+    return null; // not absolute — never trusted
+  }
+  const segs: string[] = [];
+  for (const part of s.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      segs.pop(); // climb up; popping past the root just stays at the root
+      continue;
+    }
+    segs.push(part);
+  }
+  return { drive, segs };
+}
+
+/**
+ * Decide whether `candidate` resolves inside one of the allowed `roots` — the
+ * pure core of the sec-002 filesystem allow-list. Inputs are absolute paths;
+ * `..`/`.` segments are folded out lexically so a traversal that escapes a root
+ * is rejected, and a symlink-escape is rejected once its target (the resolved
+ * path the Rust canonicalize step produces) is passed in. The comparison is on
+ * whole path segments, so a sibling that merely shares a name prefix
+ * (".../videos-secret" vs an allowed ".../videos") is NOT treated as inside.
+ *
+ * Deny-by-default: an empty root list, or a non-absolute / empty candidate,
+ * returns false.
+ */
+export function isPathWithinRoots(roots: string[], candidate: string): boolean {
+  const cand = normalizeAbsPath(candidate);
+  if (!cand) return false;
+  for (const rootStr of roots) {
+    const root = normalizeAbsPath(rootStr);
+    if (!root) continue;
+    if (root.drive !== cand.drive) continue;
+    if (cand.segs.length < root.segs.length) continue;
+    let within = true;
+    for (let i = 0; i < root.segs.length; i++) {
+      if (root.segs[i] !== cand.segs[i]) {
+        within = false;
+        break;
+      }
+    }
+    if (within) return true;
+  }
+  return false;
+}

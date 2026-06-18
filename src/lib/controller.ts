@@ -618,6 +618,21 @@ async function tauriInvoke<T>(cmd: string, args: Record<string, unknown>): Promi
   return invoke<T>(cmd, args);
 }
 
+/**
+ * Authorize the directory of a file the user is opening (sec-002). The native
+ * shell scopes every WebView filesystem read to directories opened this way, so
+ * this must run before any stream_status / read_stream_chunk / convertFileSrc for
+ * the path. `loadFromPath` is the single funnel for every open (dialog, drop,
+ * launch arg, Recent), so authorizing here covers them all. Best-effort: when not
+ * running under Tauri the invoke just rejects and the (also absent) read commands
+ * never run.
+ */
+async function authorizeMediaDir(path: string): Promise<void> {
+  await tauriInvoke("allow_media_dir", { path }).catch(() => {
+    /* Not under Tauri, or authorization failed — reads will be rejected. */
+  });
+}
+
 /** Decode a base64 chunk (the `read_stream_chunk` transport) into bytes. */
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -1346,6 +1361,8 @@ function renderRecents(): void {
 async function loadFromPath(path: string): Promise<void> {
   currentPath = path;
   addRecent(path, basename(path));
+  // sec-002: authorize this file's directory before any native read of it.
+  await authorizeMediaDir(path);
   if (isImagePath(path)) {
     loadTimestampsFor(null);
     await openImage(path);

@@ -58,6 +58,7 @@ import {
   frameIndexAtTime,
   frameStartTime,
   stepFrame,
+  isPathWithinRoots,
   DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
   SHUTTLE_SPEEDS,
@@ -730,5 +731,73 @@ describe("animated-image frame timing (play-012)", () => {
     expect(stepFrame(0, 4, 3)).toBe(1); // multi-step wraps
     expect(stepFrame(5, 0, 1)).toBe(0); // single-frame (static) image stays at 0
     expect(stepFrame(0, 1, 0)).toBe(0); // no frames
+  });
+});
+
+describe("isPathWithinRoots (sec-002 filesystem allow-list)", () => {
+  const VID = ["C:/Users/me/Videos"];
+
+  it("allows a file directly inside an allowed root", () => {
+    expect(isPathWithinRoots(VID, "C:/Users/me/Videos/clip.mp4")).toBe(true);
+    // nested deeper is still inside
+    expect(isPathWithinRoots(VID, "C:/Users/me/Videos/sub/clip.mp4")).toBe(true);
+    // the root directory itself counts as within
+    expect(isPathWithinRoots(VID, "C:/Users/me/Videos")).toBe(true);
+  });
+
+  it("denies a path outside every allowed root", () => {
+    expect(isPathWithinRoots(VID, "C:/Windows/System32/config/SAM")).toBe(false);
+    expect(isPathWithinRoots(VID, "C:/Users/me/.ssh/id_rsa")).toBe(false);
+  });
+
+  it("denies a sibling that merely shares a name prefix (segment-boundary match)", () => {
+    // "Videos-secret" must NOT be considered inside "Videos"
+    expect(isPathWithinRoots(VID, "C:/Users/me/Videos-secret/x.mp4")).toBe(false);
+    expect(isPathWithinRoots(["C:/a/video"], "C:/a/videos/x")).toBe(false);
+  });
+
+  it("rejects a ../ traversal that escapes the root", () => {
+    expect(
+      isPathWithinRoots(VID, "C:/Users/me/Videos/../.ssh/id_rsa"),
+    ).toBe(false);
+    // traversal that climbs out then back in is fine (still lands inside)
+    expect(
+      isPathWithinRoots(VID, "C:/Users/me/Videos/sub/../clip.mp4"),
+    ).toBe(true);
+  });
+
+  it("rejects a symlink-escape (its resolved target is outside the root)", () => {
+    // The Rust canonicalize step resolves a symlink to its real target before
+    // the check; passing that resolved out-of-root path here is denied.
+    const roots = ["C:/Users/me/Videos"];
+    const resolvedSymlinkTarget = "C:/secrets/passwords.txt";
+    expect(isPathWithinRoots(roots, resolvedSymlinkTarget)).toBe(false);
+  });
+
+  it("matches across separator styles and drive-letter case", () => {
+    expect(isPathWithinRoots(["C:\\Users\\me\\Videos"], "C:/Users/me/Videos/clip.mp4")).toBe(true);
+    expect(isPathWithinRoots(["c:/Users/me/Videos"], "C:/Users/me/Videos/clip.mp4")).toBe(true);
+    // a different drive is never inside
+    expect(isPathWithinRoots(VID, "D:/Users/me/Videos/clip.mp4")).toBe(false);
+  });
+
+  it("supports POSIX-style absolute roots", () => {
+    expect(isPathWithinRoots(["/home/me/Videos"], "/home/me/Videos/clip.mp4")).toBe(true);
+    expect(isPathWithinRoots(["/home/me/Videos"], "/etc/passwd")).toBe(false);
+    expect(isPathWithinRoots(["/home/me/Videos"], "/home/me/Videos/../.ssh/key")).toBe(false);
+  });
+
+  it("denies by default: empty roots, or a non-absolute / empty candidate", () => {
+    expect(isPathWithinRoots([], "C:/Users/me/Videos/clip.mp4")).toBe(false);
+    expect(isPathWithinRoots(VID, "clip.mp4")).toBe(false); // relative
+    expect(isPathWithinRoots(VID, "")).toBe(false);
+    expect(isPathWithinRoots(VID, "   ")).toBe(false);
+  });
+
+  it("allows when any one of several roots contains the candidate", () => {
+    const roots = ["C:/Users/me/Videos", "D:/Footage", "/mnt/media"];
+    expect(isPathWithinRoots(roots, "D:/Footage/take1.mov")).toBe(true);
+    expect(isPathWithinRoots(roots, "/mnt/media/a.mp4")).toBe(true);
+    expect(isPathWithinRoots(roots, "E:/other/a.mp4")).toBe(false);
   });
 });
