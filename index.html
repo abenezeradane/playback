@@ -38,7 +38,7 @@
                   <svg class="ic" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M7 3v18" /><path d="M3 7.5h4" /><path d="M3 12h18" /><path d="M3 16.5h4" /><path d="M17 3v18" /><path d="M17 7.5h4" /><path d="M17 16.5h4" /></svg>
                 </span>
                 <span class="dropzone__title">Open a video to begin</span>
-                <span class="dropzone__sub">Drag and drop a file anywhere in the window, or browse your computer. MP4, WebM, MKV, MOV and more — no account, all local.</span>
+                <span class="dropzone__sub">Drag and drop a file anywhere in the window, or browse your computer. MP4, WebM, MKV, MOV, animated GIF and more — no account, all local.</span>
                 <div class="home-hero__cta">
                   <button id="btn-open" class="pill pill--primary" type="button">
                     <svg class="ic" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></svg>
@@ -47,7 +47,7 @@
                   <span class="home-hero__hint"><kbd class="kbd">O</kbd> to open</span>
                 </div>
 
-                <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span></span>
+                <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span><span>GIF</span></span>
               </div>
             </section>
 
@@ -333,6 +333,57 @@
         </section>
       </main>
 
+      <!-- ===================== IMAGE / GIF VIEWER (play-012) ===================== -->
+      <!-- Animated images (GIF / animated WebP / APNG) are not media files — the
+           <video> engine can't decode them — so they get a dedicated render path:
+           frame-decoded (WebCodecs ImageDecoder) onto #img-canvas with real
+           transport, falling back to a native <img> when a file can't be decoded.
+           A still image opens as one frozen frame with transport disabled. -->
+      <section id="image-view" class="imgview" data-mode="loading" hidden>
+        <!-- Top overlay: back + title — mirrors the normal player's #stage header. -->
+        <header class="overlay-top" data-tauri-drag-region>
+          <button id="img-back" class="glass-btn" type="button" title="Back to library">
+            <svg class="ic" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
+          </button>
+          <div class="overlay-top__title">
+            <div class="overlay-top__heading">
+              <span id="img-title" class="title-main"></span>
+            </div>
+            <span id="img-meta" class="title-sub"></span>
+          </div>
+        </header>
+
+        <div class="imgview__viewer">
+          <!-- Frame-decoded path (Tier 2): the canvas the ImageDecoder frames paint to. -->
+          <canvas id="img-canvas" class="imgview__canvas" aria-hidden="true" hidden></canvas>
+          <!-- Native fallback (Tier 1): the WebView animates + loops the GIF itself. -->
+          <img id="img-el" class="imgview__img" alt="" hidden />
+          <!-- Error / unsupported state. -->
+          <div id="img-error" class="imgview__error" role="alert" hidden>
+            <span class="imgview__error-icon" aria-hidden="true">
+              <svg class="ic" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="m3 16 5-5 4 4 3-3 6 6" /><circle cx="9" cy="9" r="1.6" /><path d="M3 3l18 18" /></svg>
+            </span>
+            <span class="imgview__error-text">This image could not be opened.</span>
+          </div>
+        </div>
+
+        <!-- Transport (shown only for an animated, frame-decoded image). -->
+        <div id="img-controls" class="imgview__controls">
+          <button id="img-step-back" class="iconbtn iconbtn--sm" type="button" title="Previous frame (,)">
+            <svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="11 19 2 12 11 5 11 19" /><rect x="13" y="5" width="2.4" height="14" rx="1" /></svg>
+          </button>
+          <button id="img-play" class="iconbtn iconbtn--primary" type="button" data-playing="true" title="Play / Pause (Space)">
+            <svg class="ic ic--fill ic-play" viewBox="0 0 24 24"><polygon points="7 4 20 12 7 20 7 4" /></svg>
+            <svg class="ic ic--fill ic-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+          </button>
+          <button id="img-step-fwd" class="iconbtn iconbtn--sm" type="button" title="Next frame (.)">
+            <svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="13 5 22 12 13 19 13 5" /><rect x="8.6" y="5" width="2.4" height="14" rx="1" /></svg>
+          </button>
+          <button id="img-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed (+ / -)">1&times;</button>
+          <span id="img-frameinfo" class="imgview__frameinfo" aria-live="polite"></span>
+        </div>
+      </section>
+
       <!-- ===================== LIVESTREAM · UNAVAILABLE (frame 04b) ===================== -->
       <!-- Livestream playback is temporarily deprecated. A file detected as a
            livestream opens this purpose-built screen (not an empty player). -->
@@ -414,6 +465,12 @@
                 <li><span>Toggle timeline view</span><span class="keys__caps"><kbd class="kbd">C</kbd></span></li>
                 <li><span>Shuttle reverse / stop / forward</span><span class="keys__caps"><kbd class="kbd">J</kbd><kbd class="kbd">K</kbd><kbd class="kbd">L</kbd></span></li>
                 <li><span>Jump to start / end</span><span class="keys__caps"><kbd class="kbd">Home</kbd><kbd class="kbd">End</kbd></span></li>
+              </ul>
+              <p class="shortcuts__group">ANIMATED IMAGE (GIF)</p>
+              <ul class="keys">
+                <li><span>Play / pause</span><span class="keys__caps"><kbd class="kbd">Space</kbd></span></li>
+                <li><span>Previous / next frame</span><span class="keys__caps"><kbd class="kbd">,</kbd><kbd class="kbd">.</kbd></span></li>
+                <li><span>Speed up / down</span><span class="keys__caps"><kbd class="kbd">+</kbd><kbd class="kbd">&minus;</kbd></span></li>
               </ul>
               <p class="shortcuts__group">GENERAL</p>
               <ul class="keys">

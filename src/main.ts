@@ -56,6 +56,12 @@ import {
   shuttleRate,
   abLoopActive,
   abLoopNext,
+  normalizeFrameDurations,
+  animationDuration,
+  loopedTime,
+  frameIndexAtTime,
+  frameStartTime,
+  stepFrame,
   type PlayerState,
   type Timestamp,
   type TimestampStore,
@@ -63,6 +69,40 @@ import {
 } from "./player-core";
 
 const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi"];
+// Animated / still image formats (play-012). The <video> engine can't decode
+// these, so they route to the dedicated image viewer (openImage). `png` covers
+// both APNG (which conventionally uses the .png extension) and a static PNG;
+// `webp` covers both animated and still WebP.
+const IMAGE_EXTENSIONS = ["gif", "webp", "apng", "png"];
+
+/** Lowercased file extension (without the dot), or "" if there is none. */
+function extensionOf(path: string): string {
+  const m = /\.([a-z0-9]+)$/i.exec(path);
+  return m ? m[1].toLowerCase() : "";
+}
+function isImagePath(path: string): boolean {
+  return IMAGE_EXTENSIONS.includes(extensionOf(path));
+}
+function isVideoPath(path: string): boolean {
+  return VIDEO_EXTENSIONS.includes(extensionOf(path));
+}
+function isMediaPath(path: string): boolean {
+  return isImagePath(path) || isVideoPath(path);
+}
+/** MIME type to hand the WebCodecs ImageDecoder, derived from the extension. */
+function imageMimeType(path: string): string {
+  switch (extensionOf(path)) {
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "apng":
+    case "png":
+      return "image/png";
+    default:
+      return "";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Element lookup
@@ -171,6 +211,20 @@ const cutVolume = $<HTMLInputElement>("cut-volume");
 /** Off-to-the-side <video> used to capture filmstrip frames on open (play-004). */
 const cutGen = $<HTMLVideoElement>("cut-gen");
 
+// Image / GIF viewer (play-012)
+const imageView = $<HTMLElement>("image-view");
+const imgBack = $<HTMLButtonElement>("img-back");
+const imgTitle = $<HTMLSpanElement>("img-title");
+const imgMeta = $<HTMLSpanElement>("img-meta");
+const imgCanvas = $<HTMLCanvasElement>("img-canvas");
+const imgEl = $<HTMLImageElement>("img-el");
+const imgError = $<HTMLDivElement>("img-error");
+const imgPlayBtn = $<HTMLButtonElement>("img-play");
+const imgStepBackBtn = $<HTMLButtonElement>("img-step-back");
+const imgStepFwdBtn = $<HTMLButtonElement>("img-step-fwd");
+const imgRateBtn = $<HTMLButtonElement>("img-rate");
+const imgFrameInfo = $<HTMLSpanElement>("img-frameinfo");
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -198,6 +252,30 @@ let shuttleLast = 0;
 let loopOn = false;
 let abA: number | null = null;
 let abB: number | null = null;
+
+// Image / GIF viewer (play-012) ----------------------------------------
+/** Don't frame-decode an image larger than this into memory; fall back to the
+ *  native <img> (which streams) instead. Typical GIFs/WebP are far smaller. */
+const IMAGE_MAX_BYTES = 256 * 1024 * 1024;
+/** A decoded animation frame: its bitmap and how long it is shown (seconds). */
+interface GifFrame {
+  bitmap: ImageBitmap;
+  duration: number;
+}
+let imgFrames: GifFrame[] = [];
+/** Per-frame durations (seconds), sanitized — the timing source of truth. */
+let imgDurations: number[] = [];
+/** Total run time of one animation pass (seconds). */
+let imgTotal = 0;
+/** Elapsed animation clock (seconds); folded back over imgTotal each loop. */
+let imgClock = 0;
+let imgPlaying = false;
+let imgRate = 1;
+let imgFrameIndex = 0;
+let imgRAF: number | undefined;
+let imgLast = 0;
+/** Bumped on every open / goHome so an in-flight async decode aborts cleanly. */
+let imgToken = 0;
 /** Cached audio peaks for the waveform (0..1), redrawn on enter/resize. */
 let waveformPeaks: number[] = [];
 /** Captured filmstrip thumbnails (160×90 offscreen canvases), composited on draw. */
@@ -683,6 +761,7 @@ function goHome(): void {
   setPanelOpen(false);
   setShortcutsOpen(false);
   liveUnavailable.hidden = true;
+  clearImageView();
   video.removeAttribute("src");
   video.load();
   state = createInitialState();
@@ -1672,8 +1751,16 @@ function renderRecents(): void {
 
 async function loadFromPath(path: string): Promise<void> {
   currentPath = path;
-  loadTimestampsFor(path); // seed this video's saved timestamps before it loads
   addRecent(path, basename(path));
+  // Animated / still images (play-012) can't be decoded by the <video> engine,
+  // and the cut view / livestream detection don't apply to them, so route them
+  // to the dedicated image viewer before any video/stream handling.
+  if (isImagePath(path)) {
+    loadTimestampsFor(null);
+    await openImage(path);
+    return;
+  }
+  loadTimestampsFor(path); // seed this video's saved timestamps before it loads
   try {
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
     // Decide live-vs-normal BEFORE the first frame paints. Livestream playback is
@@ -1748,6 +1835,7 @@ function delay(ms: number): Promise<void> {
 function loadSrc(src: string, title: string, subtitle = ""): void {
   emptyError.hidden = true;
   liveUnavailable.hidden = true;
+  clearImageView(); // leaving any image viewer for a real video
   video.src = src;
   titleLabel.textContent = title;
   subtitleLabel.textContent = subtitle;
@@ -1785,6 +1873,7 @@ function openEmptyLivePlayer(path: string): void {
   setCutMode(false);
   resetShuttle();
   setPanelOpen(false);
+  clearImageView();
   emptyError.hidden = true;
   liveoffTitle.textContent = title;
   liveoffMeta.textContent = folder ? `Livestream · ${folder}` : "Livestream";
@@ -1796,6 +1885,331 @@ function openEmptyLivePlayer(path: string): void {
   state = createInitialState();
 }
 
+// ---------------------------------------------------------------------------
+// Image / GIF viewer (play-012)
+//
+// GIF / animated-WebP / APNG are image formats the <video> engine can't decode,
+// so they get a dedicated render path. The preferred (Tier 2) path frame-decodes
+// the file with WebCodecs ImageDecoder and drives a <canvas> off a rAF clock —
+// giving real play/pause, a speed multiplier, and frame stepping (the per-frame
+// timing math is pure, in player-core). If a file can't be frame-decoded (no
+// ImageDecoder, an unsupported type, or a decode error) it falls back to a
+// native <img> that the WebView animates + loops itself (Tier 1, no transport).
+// A still (single-frame) image opens as one frozen frame with transport off.
+// ---------------------------------------------------------------------------
+
+/** True while the image viewer is the visible surface. */
+function imageViewActive(): boolean {
+  return !imageView.hidden;
+}
+
+/** Reset all animation state + release decoded bitmaps (does NOT hide the view). */
+function resetGifState(): void {
+  imgPlaying = false;
+  if (imgRAF !== undefined) {
+    cancelAnimationFrame(imgRAF);
+    imgRAF = undefined;
+  }
+  for (const f of imgFrames) f.bitmap.close();
+  imgFrames = [];
+  imgDurations = [];
+  imgTotal = 0;
+  imgClock = 0;
+  imgFrameIndex = 0;
+  imgRate = 1;
+}
+
+/** Tear down the image viewer entirely (abort any decode, release frames, hide). */
+function clearImageView(): void {
+  imgToken++; // abort any in-flight decode
+  resetGifState();
+  imgEl.removeAttribute("src");
+  imgEl.hidden = true;
+  imgCanvas.hidden = true;
+  imageView.hidden = true;
+}
+
+/** Open an animated / still image in the dedicated viewer (play-012). */
+async function openImage(path: string): Promise<void> {
+  const token = ++imgToken;
+  // Leaving any prior surface: stop the video + cut view, release old frames.
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  setCutMode(false);
+  clearCutDeck();
+  resetShuttle();
+  setPanelOpen(false);
+  setShortcutsOpen(false);
+  resetGifState();
+
+  const title = basename(path);
+  const folder = parentDir(path);
+  imgTitle.textContent = title;
+  imgMeta.textContent = folder || "Image";
+  document.title = `${title} — Playback`;
+
+  // Show the viewer, hide every other surface.
+  app.dataset.state = "image";
+  emptyState.hidden = true;
+  emptyError.hidden = true;
+  stage.hidden = true;
+  liveUnavailable.hidden = true;
+  imageView.hidden = false;
+  imageView.dataset.mode = "loading";
+  imgError.hidden = true;
+  imgCanvas.hidden = true;
+  imgEl.hidden = true;
+
+  let src: string;
+  try {
+    const { convertFileSrc } = await import("@tauri-apps/api/core");
+    src = convertFileSrc(path);
+  } catch {
+    if (token === imgToken) showImageError();
+    return;
+  }
+  if (token !== imgToken) return;
+
+  // Prefer the frame-decoded transport path; fall back to a native <img>.
+  const decoded = await tryDecodeAnimation(path, token);
+  if (token !== imgToken) return;
+  if (!decoded) showNativeImage(src, token);
+}
+
+/**
+ * Try to frame-decode the image with WebCodecs ImageDecoder. On success the
+ * frames are stored, the first is painted immediately, transport is enabled (a
+ * multi-frame animation autoplays) or disabled (a single frozen frame), and
+ * `true` is returned. Returns false — so the caller falls back to a native
+ * <img> — when ImageDecoder is unavailable, the type is unsupported, the file is
+ * too large / unreadable, decoding fails, or no frame could be decoded.
+ *
+ * The file bytes are read through the Rust `read_stream_chunk` command (same as
+ * the cut-view waveform), NOT fetched: the app's CSP (`default-src 'self'`) would
+ * block a fetch of the `asset:` URL.
+ */
+async function tryDecodeAnimation(path: string, token: number): Promise<boolean> {
+  if (typeof ImageDecoder === "undefined") return false;
+  const type = imageMimeType(path);
+  if (!type) return false;
+  try {
+    if (!(await ImageDecoder.isTypeSupported(type))) return false;
+    const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
+    if (!status || status.size <= 0 || status.size > IMAGE_MAX_BYTES) return false;
+    const data = await readWholeFile(path, status.size);
+    if (token !== imgToken) return false;
+    if (data.length === 0) return false;
+
+    const decoder = new ImageDecoder({ data, type });
+    await decoder.tracks.ready;
+    if (token !== imgToken) {
+      decoder.close();
+      return false;
+    }
+    const frameCount = Math.max(1, decoder.tracks.selectedTrack?.frameCount ?? 1);
+
+    const frames: GifFrame[] = [];
+    for (let i = 0; i < frameCount; i++) {
+      const result = await decoder.decode({ frameIndex: i }).catch(() => null);
+      if (!result) break; // truncated / partly-corrupt: keep whatever decoded
+      if (token !== imgToken) {
+        result.image.close();
+        for (const f of frames) f.bitmap.close();
+        decoder.close();
+        return false;
+      }
+      const frame = result.image;
+      const durationS = (frame.duration ?? 0) / 1_000_000; // micros -> seconds
+      const bitmap = await createImageBitmap(frame);
+      frame.close();
+      frames.push({ bitmap, duration: durationS });
+      // Paint the first frame straight away so the viewer isn't blank while a
+      // long animation finishes decoding.
+      if (i === 0) {
+        imgCanvas.hidden = false;
+        drawBitmap(bitmap);
+      }
+      if (token !== imgToken) {
+        for (const f of frames) f.bitmap.close();
+        decoder.close();
+        return false;
+      }
+    }
+    decoder.close();
+    if (frames.length === 0) return false;
+
+    imgFrames = frames;
+    imgDurations = normalizeFrameDurations(frames.map((f) => f.duration));
+    imgTotal = animationDuration(imgDurations);
+    imgClock = 0;
+    imgFrameIndex = 0;
+    imgRate = 1;
+    imgRateBtn.textContent = "1×";
+    imgCanvas.hidden = false;
+    imgEl.hidden = true;
+    imgError.hidden = true;
+    drawGifFrame(0);
+
+    if (frames.length > 1 && imgTotal > 0) {
+      imageView.dataset.mode = "animated";
+      startGif();
+    } else {
+      imageView.dataset.mode = "static"; // one frozen frame, no transport
+    }
+    updateGifInfo();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Native fallback: let the WebView animate + loop the image itself (no transport). */
+function showNativeImage(src: string, token: number): void {
+  imgCanvas.hidden = true;
+  imageView.dataset.mode = "native";
+  imgEl.onload = () => {
+    if (token !== imgToken) return;
+    // A corrupt image can fire `load` with zero dimensions instead of `error`.
+    if (imgEl.naturalWidth === 0) {
+      showImageError();
+      return;
+    }
+    imgEl.hidden = false;
+    imgError.hidden = true;
+  };
+  imgEl.onerror = () => {
+    if (token === imgToken) showImageError();
+  };
+  imgEl.hidden = false;
+  imgEl.src = src;
+}
+
+/** Clear, honest error state for a corrupt / unsupported image (no broken glyph). */
+function showImageError(): void {
+  imageView.dataset.mode = "error";
+  imgCanvas.hidden = true;
+  imgEl.hidden = true;
+  imgEl.removeAttribute("src");
+  imgError.hidden = false;
+}
+
+/** Paint a bitmap to the canvas, sizing the canvas to the frame's pixel size. */
+function drawBitmap(bitmap: ImageBitmap): void {
+  if (imgCanvas.width !== bitmap.width || imgCanvas.height !== bitmap.height) {
+    imgCanvas.width = bitmap.width;
+    imgCanvas.height = bitmap.height;
+  }
+  const ctx = imgCanvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, imgCanvas.width, imgCanvas.height);
+  ctx.drawImage(bitmap, 0, 0);
+}
+
+function drawGifFrame(idx: number): void {
+  const f = imgFrames[idx];
+  if (f) drawBitmap(f.bitmap);
+}
+
+function startGif(): void {
+  if (imgFrames.length <= 1 || imgTotal <= 0) return;
+  imgPlaying = true;
+  imgPlayBtn.dataset.playing = "true";
+  imgLast = performance.now();
+  if (imgRAF === undefined) imgRAF = requestAnimationFrame(gifTick);
+}
+
+function pauseGif(): void {
+  imgPlaying = false;
+  imgPlayBtn.dataset.playing = "false";
+  if (imgRAF !== undefined) {
+    cancelAnimationFrame(imgRAF);
+    imgRAF = undefined;
+  }
+}
+
+function toggleGifPlay(): void {
+  if (imgPlaying) pauseGif();
+  else startGif();
+}
+
+/** rAF clock: advance the animation by real elapsed time × the speed multiplier. */
+function gifTick(now: number): void {
+  imgRAF = undefined;
+  if (!imgPlaying) return;
+  const dt = ((now - imgLast) / 1000) * imgRate;
+  imgLast = now;
+  imgClock = loopedTime(imgClock + dt, imgTotal);
+  const idx = frameIndexAtTime(imgDurations, imgClock);
+  if (idx !== imgFrameIndex) {
+    imgFrameIndex = idx;
+    drawGifFrame(idx);
+    updateGifInfo();
+  }
+  imgRAF = requestAnimationFrame(gifTick);
+}
+
+/** Step one frame (pausing playback); wraps around the ends. */
+function stepGifFrame(delta: number): void {
+  if (imgFrames.length <= 1) return;
+  pauseGif();
+  imgFrameIndex = stepFrame(imgFrameIndex, delta, imgFrames.length);
+  imgClock = frameStartTime(imgDurations, imgFrameIndex);
+  drawGifFrame(imgFrameIndex);
+  updateGifInfo();
+}
+
+/** Cycle the playback rate (the rate button), mirroring the video rate control. */
+function cycleGifRate(): void {
+  imgRate = nextRate(imgRate);
+  imgRateBtn.textContent = `${imgRate}×`;
+}
+
+/** Step the playback rate up/down (the +/- hotkeys), clamped at the ends. */
+function stepGifRate(dir: number): void {
+  imgRate = stepRate(imgRate, dir);
+  imgRateBtn.textContent = `${imgRate}×`;
+}
+
+function updateGifInfo(): void {
+  imgFrameInfo.textContent =
+    imgFrames.length <= 1 ? "Still image" : `Frame ${imgFrameIndex + 1} / ${imgFrames.length}`;
+}
+
+/** Image-viewer transport hotkeys; returns true if the key was handled. */
+function handleImageKey(e: KeyboardEvent): boolean {
+  if (imgFrames.length <= 1) return false; // static / native: no transport
+  switch (e.key) {
+    case " ":
+    case "k":
+      e.preventDefault();
+      toggleGifPlay();
+      return true;
+    case ",":
+    case "<":
+      e.preventDefault();
+      stepGifFrame(-1);
+      return true;
+    case ".":
+    case ">":
+      e.preventDefault();
+      stepGifFrame(1);
+      return true;
+    case "+":
+    case "=":
+      e.preventDefault();
+      stepGifRate(1);
+      return true;
+    case "-":
+    case "_":
+      e.preventDefault();
+      stepGifRate(-1);
+      return true;
+    default:
+      return false;
+  }
+}
+
 /** Open the native file picker (Tauri) and load the chosen file. */
 async function openFileDialog(): Promise<void> {
   try {
@@ -1803,7 +2217,11 @@ async function openFileDialog(): Promise<void> {
     const selected = await open({
       multiple: false,
       directory: false,
-      filters: [{ name: "Video", extensions: VIDEO_EXTENSIONS }],
+      filters: [
+        { name: "Media", extensions: [...VIDEO_EXTENSIONS, ...IMAGE_EXTENSIONS] },
+        { name: "Video", extensions: VIDEO_EXTENSIONS },
+        { name: "Animated image", extensions: IMAGE_EXTENSIONS },
+      ],
     });
     if (typeof selected === "string") {
       await loadFromPath(selected);
@@ -1827,10 +2245,8 @@ async function registerDragAndDrop(): Promise<void> {
       } else if (payload.type === "drop") {
         app.dataset.dragover = "false";
         const paths = payload.paths ?? [];
-        const videoPath = paths.find((p) =>
-          VIDEO_EXTENSIONS.some((ext) => p.toLowerCase().endsWith(`.${ext}`)),
-        );
-        if (videoPath) void loadFromPath(videoPath);
+        const mediaPath = paths.find((p) => isMediaPath(p));
+        if (mediaPath) void loadFromPath(mediaPath);
       } else {
         app.dataset.dragover = "false";
       }
@@ -1856,6 +2272,13 @@ function wireControls(): void {
   btnRate.addEventListener("click", doCycleRate);
   btnFs.addEventListener("click", () => void doToggleFullscreen());
   btnBack.addEventListener("click", goHome);
+
+  // Image / GIF viewer (play-012)
+  imgBack.addEventListener("click", goHome);
+  imgPlayBtn.addEventListener("click", toggleGifPlay);
+  imgStepBackBtn.addEventListener("click", () => stepGifFrame(-1));
+  imgStepFwdBtn.addEventListener("click", () => stepGifFrame(1));
+  imgRateBtn.addEventListener("click", cycleGifRate);
 
   // Loop / repeat (play-011)
   btnLoop.addEventListener("click", toggleLoop);
@@ -2081,6 +2504,13 @@ function wireKeyboard(): void {
     // every shortcut (see isTextEntryTarget). The add-timestamp input owns its
     // own Enter/Escape locally, so we never reach the player shortcuts here.
     if (isFocusTextEntry(e.target as HTMLElement | null)) return;
+
+    // Animated-image viewer (play-012): when an image is open its transport
+    // hotkeys (play/pause, frame-step, speed) take precedence. Unhandled keys
+    // (o, ?, Esc) fall through to the shared handlers below.
+    if (imageViewActive() && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (handleImageKey(e)) return;
+    }
 
     // Timeline / cut view (play-004): J/K/L drive the shuttle transport,
     // overriding the normal-mode meaning of k (play/pause) only while the

@@ -723,3 +723,89 @@ export function isTextEntryTarget(target: FocusTarget | null | undefined): boole
   if (tag === "INPUT") return TEXT_INPUT_TYPES.has((target.type ?? "").toLowerCase());
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// Animated-image frame timing (play-012)
+//
+// GIF / animated-WebP / APNG are image formats: the HTML5 <video> engine cannot
+// decode them, so they are frame-decoded (WebCodecs ImageDecoder) and driven by
+// a canvas clock. An animation is modelled as an ordered list of per-frame
+// shown-durations (seconds). All the timing math — total run time, which frame
+// is visible at an elapsed clock time, folding the clock back over a loop, the
+// start time of a frame, and stepping frames — lives here so the runtime stays a
+// thin canvas driver and every decision is unit-testable without a DOM.
+// ---------------------------------------------------------------------------
+
+/** Fallback shown-duration (seconds) for a frame that reports a zero / invalid
+ *  delay — matches the long-standing browser default for 0-delay GIF frames. */
+export const DEFAULT_FRAME_DURATION = 0.1;
+
+/**
+ * Sanitize raw per-frame durations (seconds): a non-finite or non-positive delay
+ * becomes `fallback` (the classic 100ms GIF default), so a malformed file still
+ * animates at a sane rate instead of freezing on a zero-length frame or spinning
+ * the clock. Returns [] for an empty list.
+ */
+export function normalizeFrameDurations(
+  raw: number[],
+  fallback: number = DEFAULT_FRAME_DURATION,
+): number[] {
+  return raw.map((d) => (Number.isFinite(d) && d > 0 ? d : fallback));
+}
+
+/** Total time for one pass through the animation (sum of the frame durations). */
+export function animationDuration(durations: number[]): number {
+  let total = 0;
+  for (const d of durations) if (Number.isFinite(d) && d > 0) total += d;
+  return total;
+}
+
+/**
+ * Fold an ever-growing play clock back into a single animation pass [0, total).
+ * A GIF loops forever, so the canvas clock can grow unbounded and this wraps it.
+ * Returns 0 for a non-positive total or a non-positive time.
+ */
+export function loopedTime(time: number, total: number): number {
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  if (!Number.isFinite(time) || time <= 0) return 0;
+  return time % total;
+}
+
+/**
+ * Which frame index is visible at elapsed `time` within ONE pass — NOT looping,
+ * so compose with `loopedTime` first for a looping clock. Clamped: a time at or
+ * after the end shows the last frame, a time at or before 0 shows the first.
+ * Returns 0 for an empty animation.
+ */
+export function frameIndexAtTime(durations: number[], time: number): number {
+  if (durations.length === 0) return 0;
+  if (!Number.isFinite(time) || time <= 0) return 0;
+  let acc = 0;
+  for (let i = 0; i < durations.length; i++) {
+    acc += Math.max(0, durations[i] || 0);
+    if (time < acc) return i;
+  }
+  return durations.length - 1;
+}
+
+/** Start time (seconds, from the animation's beginning) of frame `index`,
+ *  clamped to the valid range. Returns 0 for an empty animation. */
+export function frameStartTime(durations: number[], index: number): number {
+  const n = durations.length;
+  if (n === 0) return 0;
+  const i = Math.max(0, Math.min(Math.trunc(index), n - 1));
+  let acc = 0;
+  for (let k = 0; k < i; k++) acc += Math.max(0, durations[k] || 0);
+  return acc;
+}
+
+/**
+ * Step a frame index by `delta`, wrapping around both ends — a looping animation
+ * has no hard first/last frame when stepping (stepping back from frame 0 lands on
+ * the last frame, and forward off the end returns to 0). Returns 0 for a
+ * non-positive frame count.
+ */
+export function stepFrame(index: number, delta: number, count: number): number {
+  if (count <= 0) return 0;
+  return (((index + delta) % count) + count) % count;
+}

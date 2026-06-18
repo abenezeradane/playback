@@ -1083,7 +1083,9 @@ body {
 }
 
 #btn-play[data-playing="true"] .ic-pause,
-#btn-play[data-playing="false"] .ic-play {
+#btn-play[data-playing="false"] .ic-play,
+#img-play[data-playing="true"] .ic-pause,
+#img-play[data-playing="false"] .ic-play {
   display: block;
 }
 
@@ -1777,6 +1779,124 @@ body {
   color: var(--ash);
   font-size: 13px;
   line-height: 1.4;
+}
+
+/* ===================================================================== */
+/* IMAGE / GIF VIEWER (play-012)                                         */
+/* ===================================================================== */
+/* A dedicated surface for animated images (GIF / animated WebP / APNG),
+   which the <video> engine can't decode. The header reuses the player's
+   floating .overlay-top; the viewer fills the screen and letterboxes the
+   frame; a minimal transport floats at the bottom (animated images only). */
+.imgview {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: var(--canvas);
+}
+
+.imgview__viewer {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 84px 48px 96px;
+  position: relative;
+}
+
+/* Both the decoded canvas and the native <img> fallback letterbox-contain
+   the frame within the viewer at any window size (the canvas carries the
+   frame's intrinsic size as its width/height attributes, so max-* keeps the
+   aspect ratio). A subtle checkerboard shows through transparent GIF/PNG. */
+.imgview__canvas,
+.imgview__img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--hairline);
+  background-color: #0c0d0f;
+  background-image:
+    linear-gradient(45deg, #15171a 25%, transparent 25%),
+    linear-gradient(-45deg, #15171a 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #15171a 75%),
+    linear-gradient(-45deg, transparent 75%, #15171a 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+
+.imgview__error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  color: var(--mute);
+  text-align: center;
+}
+
+.imgview__error-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-xl);
+  background: var(--surface-card);
+  border: 1px solid var(--hairline);
+}
+
+.imgview__error-icon .ic {
+  width: 30px;
+  height: 30px;
+}
+
+.imgview__error-text {
+  font-size: 15px;
+  color: var(--ink);
+}
+
+/* Floating transport — same vocabulary as the player control bar. */
+.imgview__controls {
+  position: absolute;
+  left: 50%;
+  bottom: 28px;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-full);
+  background: rgba(13, 13, 13, 0.72);
+  border: 1px solid var(--hairline-soft);
+  backdrop-filter: blur(18px);
+}
+
+.imgview__frameinfo {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  letter-spacing: 0.2px;
+  color: var(--mute);
+  min-width: 84px;
+  padding-right: 4px;
+}
+
+/* Transport visibility by mode: only an animated (frame-decoded) image gets the
+   play / frame-step / speed transport. A static frame or the native fallback
+   hides the whole bar (a still image / native GIF has nothing to drive). */
+.imgview[data-mode="static"] .imgview__controls,
+.imgview[data-mode="native"] .imgview__controls,
+.imgview[data-mode="loading"] .imgview__controls,
+.imgview[data-mode="error"] .imgview__controls {
+  display: none;
+}
+
+.imgview[data-mode="error"] .imgview__canvas,
+.imgview[data-mode="error"] .imgview__img {
+  display: none;
 }
 
 /* ===================================================================== */

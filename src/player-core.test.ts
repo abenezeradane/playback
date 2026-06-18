@@ -52,6 +52,13 @@ import {
   niceTickInterval,
   rulerTicks,
   isTextEntryTarget,
+  normalizeFrameDurations,
+  animationDuration,
+  loopedTime,
+  frameIndexAtTime,
+  frameStartTime,
+  stepFrame,
+  DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
   SHUTTLE_SPEEDS,
   PLAYBACK_RATES,
@@ -654,5 +661,74 @@ describe("isTextEntryTarget — keyboard-shortcut focus guard (bugfix)", () => {
     expect(isTextEntryTarget({ tagName: "input", type: "RANGE" })).toBe(false);
     expect(isTextEntryTarget(null)).toBe(false);
     expect(isTextEntryTarget(undefined)).toBe(false);
+  });
+});
+
+describe("animated-image frame timing (play-012)", () => {
+  // A 3-frame animation: 100ms, 200ms, 100ms -> 0.4s total.
+  const D = [0.1, 0.2, 0.1];
+
+  it("normalizeFrameDurations replaces zero / invalid delays with the 100ms default", () => {
+    expect(normalizeFrameDurations([0.1, 0.2, 0.1])).toEqual([0.1, 0.2, 0.1]);
+    expect(normalizeFrameDurations([0, -1, NaN, Infinity])).toEqual([
+      DEFAULT_FRAME_DURATION,
+      DEFAULT_FRAME_DURATION,
+      DEFAULT_FRAME_DURATION,
+      DEFAULT_FRAME_DURATION,
+    ]);
+    // a custom fallback is honoured; valid delays are kept untouched
+    expect(normalizeFrameDurations([0, 0.5], 0.04)).toEqual([0.04, 0.5]);
+    expect(normalizeFrameDurations([])).toEqual([]);
+  });
+
+  it("animationDuration sums the frame durations (ignoring junk)", () => {
+    expect(animationDuration(D)).toBeCloseTo(0.4, 9);
+    expect(animationDuration([])).toBe(0);
+    expect(animationDuration([0.1, NaN, 0.2, -3])).toBeCloseTo(0.3, 9);
+  });
+
+  it("loopedTime folds an unbounded clock back into [0, total)", () => {
+    expect(loopedTime(0, 0.4)).toBe(0);
+    expect(loopedTime(0.3, 0.4)).toBeCloseTo(0.3, 9);
+    expect(loopedTime(0.4, 0.4)).toBeCloseTo(0, 9); // exactly one pass wraps to 0
+    expect(loopedTime(0.5, 0.4)).toBeCloseTo(0.1, 9); // 1.25 passes
+    expect(loopedTime(2.05, 0.4)).toBeCloseTo(0.05, 9);
+    // guards
+    expect(loopedTime(5, 0)).toBe(0);
+    expect(loopedTime(-1, 0.4)).toBe(0);
+    expect(loopedTime(NaN, 0.4)).toBe(0);
+  });
+
+  it("frameIndexAtTime maps an elapsed time to a frame (clamped, no looping)", () => {
+    expect(frameIndexAtTime(D, 0)).toBe(0);
+    expect(frameIndexAtTime(D, 0.05)).toBe(0); // within frame 0 [0,0.1)
+    expect(frameIndexAtTime(D, 0.1)).toBe(1); // boundary -> next frame
+    expect(frameIndexAtTime(D, 0.25)).toBe(1); // within frame 1 [0.1,0.3)
+    expect(frameIndexAtTime(D, 0.35)).toBe(2); // within frame 2 [0.3,0.4)
+    expect(frameIndexAtTime(D, 0.4)).toBe(2); // at/after end clamps to last
+    expect(frameIndexAtTime(D, 99)).toBe(2);
+    expect(frameIndexAtTime([], 1)).toBe(0); // empty
+  });
+
+  it("frameStartTime returns the cumulative start of a frame, clamped", () => {
+    expect(frameStartTime(D, 0)).toBeCloseTo(0, 9);
+    expect(frameStartTime(D, 1)).toBeCloseTo(0.1, 9);
+    expect(frameStartTime(D, 2)).toBeCloseTo(0.3, 9);
+    expect(frameStartTime(D, 5)).toBeCloseTo(0.3, 9); // clamp to last
+    expect(frameStartTime(D, -2)).toBe(0); // clamp to first
+    expect(frameStartTime([], 0)).toBe(0);
+    // round-trips with frameIndexAtTime: the start of a frame lands on that frame
+    expect(frameIndexAtTime(D, frameStartTime(D, 1))).toBe(1);
+    expect(frameIndexAtTime(D, frameStartTime(D, 2))).toBe(2);
+  });
+
+  it("stepFrame wraps around both ends of a looping animation", () => {
+    expect(stepFrame(0, 1, 3)).toBe(1);
+    expect(stepFrame(2, 1, 3)).toBe(0); // forward off the end wraps to 0
+    expect(stepFrame(0, -1, 3)).toBe(2); // back off the start wraps to last
+    expect(stepFrame(1, -1, 3)).toBe(0);
+    expect(stepFrame(0, 4, 3)).toBe(1); // multi-step wraps
+    expect(stepFrame(5, 0, 1)).toBe(0); // single-frame (static) image stays at 0
+    expect(stepFrame(0, 1, 0)).toBe(0); // no frames
   });
 });
