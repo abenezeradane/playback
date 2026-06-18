@@ -1,10 +1,12 @@
 import { defineConfig } from "vite";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 
 // Tauri expects a fixed dev port and a relative base so the built assets
 // resolve correctly inside the webview.
 export default defineConfig({
   base: "./",
   clearScreen: false,
+  plugins: [svelte()],
   server: {
     port: 1420,
     strictPort: true,
