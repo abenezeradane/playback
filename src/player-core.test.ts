@@ -59,6 +59,8 @@ import {
   frameStartTime,
   stepFrame,
   isPathWithinRoots,
+  fileExtension,
+  isTransportStreamPath,
   DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
   SHUTTLE_SPEEDS,
@@ -799,5 +801,27 @@ describe("isPathWithinRoots (sec-002 filesystem allow-list)", () => {
     expect(isPathWithinRoots(roots, "D:/Footage/take1.mov")).toBe(true);
     expect(isPathWithinRoots(roots, "/mnt/media/a.mp4")).toBe(true);
     expect(isPathWithinRoots(roots, "E:/other/a.mp4")).toBe(false);
+  });
+});
+
+describe("transport-stream classification (play-016)", () => {
+  it("extracts the lowercased extension, or '' when none", () => {
+    expect(fileExtension("C:/clips/movie.TS")).toBe("ts");
+    expect(fileExtension("/media/a.b.c.mp4")).toBe("mp4");
+    expect(fileExtension("no-extension")).toBe("");
+    expect(fileExtension("trailing.dot.")).toBe("");
+  });
+
+  it("recognises MPEG-TS containers (case-insensitive) across separators", () => {
+    expect(isTransportStreamPath("C:/Footage/capture.ts")).toBe(true);
+    expect(isTransportStreamPath("C:\\Footage\\capture.TS")).toBe(true);
+    expect(isTransportStreamPath("/avchd/00001.m2ts")).toBe(true);
+    expect(isTransportStreamPath("/avchd/00001.MTS")).toBe(true);
+  });
+
+  it("does not flag containers the WebView plays natively", () => {
+    for (const p of ["a.mp4", "a.webm", "a.mkv", "a.mov", "a.gif", "a.png", "noext"]) {
+      expect(isTransportStreamPath(p)).toBe(false);
+    }
   });
 });

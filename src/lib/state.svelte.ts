@@ -44,6 +44,10 @@ export const ui = $state({
   cutMode: false,
   dragover: false,
   emptyError: "",
+  // Transient "converting…" overlay shown while the ffmpeg sidecar remuxes a
+  // transport stream (.ts/.m2ts/.mts) to a playable .mp4 on open (play-016).
+  prepping: false,
+  preppingLabel: "",
 
   // --- Standard player (play-001) ---
   isPlaying: false,

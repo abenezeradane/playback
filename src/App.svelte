@@ -29,6 +29,20 @@
   <ImageView />
   <LiveUnavailable />
   <ShortcutsOverlay />
+
+  {#if ui.prepping}
+    <!-- Transport-stream remux progress (play-016): a non-blocking overlay shown
+         while the ffmpeg sidecar converts a .ts/.m2ts/.mts to a playable .mp4. -->
+    <div class="prepping" role="status" aria-live="polite">
+      <div class="prepping__card">
+        <div class="prepping__spinner" aria-hidden="true"></div>
+        <div class="prepping__text">
+          <div class="prepping__title">Preparing video…</div>
+          <div class="prepping__sub">{ui.preppingLabel}</div>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <!-- Background filmstrip generator (play-004). A dedicated <video> scanned off to

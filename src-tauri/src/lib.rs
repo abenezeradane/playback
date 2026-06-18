@@ -10,7 +10,10 @@
 //!   * two thin commands (`stream_status` / `read_stream_chunk`) report a file's
 //!     size + live-capture markers (so the frontend can DETECT a livestream and
 //!     open an empty player — livestream playback itself is temporarily
-//!     deprecated) and read byte ranges (used by the cut-view waveform).
+//!     deprecated) and read byte ranges (used by the cut-view waveform),
+//!   * `remux_ts` converts an MPEG-TS file (.ts/.m2ts/.mts) into a playable temp
+//!     .mp4 via a bundled ffmpeg sidecar — Chromium's <video> decodes H.264/AAC but
+//!     cannot demux the TS container — and caches the result (play-016).
 //!
 //! Filesystem reads are scoped (sec-002): the WebView may only read inside
 //! directories it has opened a file from. `allow_media_dir` records each opened
@@ -24,7 +27,9 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::UNIX_EPOCH;
 use tauri::Manager;
+use tauri_plugin_shell::ShellExt;
 
 /// Holds a media path supplied on the command line, if any.
 struct LaunchPath(Option<String>);
@@ -145,13 +150,158 @@ fn allow_media_dir(
         .parent()
         .ok_or_else(|| "invalid path".to_string())?
         .to_path_buf();
-    if let Ok(mut roots) = allow.0.lock() {
-        roots.insert(dir);
-    }
-    if let Some(raw_parent) = Path::new(&path).parent() {
-        let _ = app.asset_protocol_scope().allow_directory(raw_parent, false);
-    }
+    let raw_parent = Path::new(&path).parent().map(Path::to_path_buf);
+    authorize_dir(&app, &allow, dir, raw_parent.as_deref());
     Ok(())
+}
+
+/// Add a directory to BOTH read gates: the canonical `dir` into the IPC allow-list
+/// (the read commands canonicalize before checking), and the asset-protocol scope
+/// keyed on `raw_dir` (the non-canonical path the WebView passes to `convertFileSrc`
+/// — on Windows the canonical form has a `\\?\` verbatim prefix that would not match
+/// the glob). Shared by `allow_media_dir` (opened media) and `remux_ts` (temp dir).
+fn authorize_dir(
+    app: &tauri::AppHandle,
+    allow: &AllowList,
+    canonical_dir: PathBuf,
+    raw_dir: Option<&Path>,
+) {
+    if let Ok(mut roots) = allow.0.lock() {
+        roots.insert(canonical_dir);
+    }
+    if let Some(raw) = raw_dir {
+        let _ = app.asset_protocol_scope().allow_directory(raw, false);
+    }
+}
+
+/// Deterministic temp output filename for a remuxed transport stream. Keyed on the
+/// source's canonical path + size + mtime, so re-opening the SAME unchanged file
+/// reuses the cached .mp4 (no second ffmpeg run), while editing/replacing the source
+/// (new size or mtime) yields a fresh name. Pure + unit-tested.
+fn remux_output_name(canonical_src: &Path, size: u64, mtime_secs: u64) -> String {
+    // FNV-1a over the identifying inputs — small, stable, dependency-free. Collisions
+    // are not a security concern here (the path is already scope-checked); this only
+    // needs to be stable for cache hits and distinct across different sources.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mix = |hash: &mut u64, bytes: &[u8]| {
+        for &b in bytes {
+            *hash ^= u64::from(b);
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    mix(&mut hash, canonical_src.to_string_lossy().as_bytes());
+    mix(&mut hash, &size.to_le_bytes());
+    mix(&mut hash, &mtime_secs.to_le_bytes());
+    format!("pb-ts-{hash:016x}.mp4")
+}
+
+/// ffmpeg arguments to remux a transport stream into a fragmentable, seekable MP4
+/// without re-encoding. `-c copy` keeps the H.264/AAC elementary streams as-is (fast,
+/// lossless); `-fflags +genpts` repairs the missing/irregular timestamps common in
+/// TS captures so the MP4 seeks cleanly; `+faststart` moves the moov atom to the
+/// front so the WebView's <video> starts immediately. Pure + unit-tested.
+fn ffmpeg_remux_args(src: &Path, out: &Path) -> Vec<String> {
+    vec![
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-fflags".into(),
+        "+genpts".into(),
+        "-i".into(),
+        src.to_string_lossy().into_owned(),
+        "-map".into(),
+        "0:v:0?".into(),
+        "-map".into(),
+        "0:a:0?".into(),
+        "-c".into(),
+        "copy".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+        out.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Best-effort prune of stale remuxed files (older than a day) from the TS cache dir,
+/// so the temp directory doesn't grow without bound across sessions.
+fn prune_ts_cache(dir: &Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("pb-ts-") && name.ends_with(".mp4")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|m| m.elapsed().map(|age| age > MAX_AGE).unwrap_or(false))
+            .unwrap_or(false);
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Remux a transport-stream file (.ts/.m2ts/.mts) into a playable temp .mp4 and
+/// return its path. Chromium's <video> can decode H.264/AAC but cannot demux the
+/// MPEG-2 TS container, so on open the frontend calls this for TS files and plays
+/// the returned .mp4 instead. The bundled ffmpeg sidecar stream-copies the streams
+/// into MP4 (no re-encode). The source must already be authorized (the frontend
+/// calls `allow_media_dir` first); the temp output's directory is authorized here so
+/// the WebView can play it back. Result is cached by source identity, so re-opening
+/// the same file is instant.
+#[tauri::command]
+async fn remux_ts(
+    app: tauri::AppHandle,
+    allow: tauri::State<'_, AllowList>,
+    path: String,
+) -> Result<String, String> {
+    // Scope-check the source against the same allow-list the read commands use.
+    let src = ensure_allowed(&allow, &path)?;
+    let meta = fs::metadata(&src).map_err(|_| "file not found".to_string())?;
+    let size = meta.len();
+    let mtime_secs = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let cache_dir = std::env::temp_dir().join("playback-ts");
+    fs::create_dir_all(&cache_dir).map_err(|_| "could not create temp directory".to_string())?;
+    prune_ts_cache(&cache_dir);
+
+    let out = cache_dir.join(remux_output_name(&src, size, mtime_secs));
+
+    // Authorize the temp directory for both read gates BEFORE returning, so the
+    // WebView can play the .mp4 and the cut-view waveform can read it. Keyed on the
+    // raw (non-verbatim) temp path so the asset-scope glob matches convertFileSrc.
+    let canonical_cache = fs::canonicalize(&cache_dir).unwrap_or_else(|_| cache_dir.clone());
+    authorize_dir(&app, &allow, canonical_cache, Some(cache_dir.as_path()));
+
+    // Cache hit: a non-empty remux already exists for this exact source.
+    if fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
+        return Ok(out.to_string_lossy().into_owned());
+    }
+
+    let args = ffmpeg_remux_args(&src, &out);
+    let sidecar = app
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+    let output = sidecar
+        .args(args)
+        .output()
+        .await
+        .map_err(|_| "remux failed to start".to_string())?;
+
+    if !output.status.success() || !fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
+        let _ = fs::remove_file(&out); // don't leave a 0-byte file to be cache-hit later
+        return Err("could not convert this file".to_string());
+    }
+    Ok(out.to_string_lossy().into_owned())
 }
 
 /// Report the size of a media file plus whether it is a live capture in progress.
@@ -207,11 +357,13 @@ pub fn run() {
         .manage(LaunchPath(launch))
         .manage(AllowList::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             launch_path,
             allow_media_dir,
             stream_status,
-            read_stream_chunk
+            read_stream_chunk,
+            remux_ts
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playback");
@@ -288,6 +440,39 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn remux_output_name_is_deterministic_and_source_specific() {
+        let a = Path::new("/media/clip.ts");
+        let b = Path::new("/media/other.ts");
+        // Same inputs -> same name (so re-opening the unchanged file is a cache hit).
+        assert_eq!(
+            remux_output_name(a, 1000, 42),
+            remux_output_name(a, 1000, 42)
+        );
+        // A different path, a different size, or a different mtime each change the name
+        // (so an edited/replaced source is re-remuxed rather than serving a stale .mp4).
+        assert_ne!(remux_output_name(a, 1000, 42), remux_output_name(b, 1000, 42));
+        assert_ne!(remux_output_name(a, 1000, 42), remux_output_name(a, 2000, 42));
+        assert_ne!(remux_output_name(a, 1000, 42), remux_output_name(a, 1000, 43));
+        // Shape: a stable prefix + .mp4 so prune_ts_cache can recognise its own files.
+        let name = remux_output_name(a, 1000, 42);
+        assert!(name.starts_with("pb-ts-"));
+        assert!(name.ends_with(".mp4"));
+    }
+
+    #[test]
+    fn ffmpeg_remux_args_stream_copy_into_faststart_mp4() {
+        let args = ffmpeg_remux_args(Path::new("/in.ts"), Path::new("/out.mp4"));
+        // Lossless stream copy (no re-encode), input/output positioned, faststart moov.
+        let joined = args.join(" ");
+        assert!(args.windows(2).any(|w| w == ["-c", "copy"]));
+        assert!(args.windows(2).any(|w| w == ["-i", "/in.ts"]));
+        assert!(args.windows(2).any(|w| w == ["-movflags", "+faststart"]));
+        assert_eq!(args.last().map(String::as_str), Some("/out.mp4"));
+        // No transcode flags slipped in (would make a large file slow to open).
+        assert!(!joined.contains("libx264"));
     }
 
     #[test]

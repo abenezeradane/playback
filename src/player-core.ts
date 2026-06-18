@@ -885,3 +885,30 @@ export function isPathWithinRoots(roots: string[], candidate: string): boolean {
   }
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// Transport-stream classification (play-016)
+// ---------------------------------------------------------------------------
+/**
+ * MPEG-2 Transport Stream container extensions. Chromium's <video> can decode the
+ * H.264/AAC elementary streams inside these but cannot demux the TS container, so
+ * the app remuxes them to a temporary .mp4 (via the ffmpeg sidecar) before playing.
+ * `.ts` is the plain transport stream; `.m2ts`/`.mts` are the AVCHD/Blu-ray variant.
+ */
+export const TRANSPORT_STREAM_EXTENSIONS = ["ts", "m2ts", "mts"] as const;
+
+/** Lowercased file extension (without the dot), or "" when there is none. */
+export function fileExtension(path: string): string {
+  const m = /\.([a-z0-9]+)$/i.exec(path);
+  return m ? m[1].toLowerCase() : "";
+}
+
+/**
+ * True when `path` is an MPEG-TS container that needs remuxing before it can play
+ * in the WebView. Pure string check on the extension.
+ */
+export function isTransportStreamPath(path: string): boolean {
+  return (TRANSPORT_STREAM_EXTENSIONS as readonly string[]).includes(
+    fileExtension(path),
+  );
+}

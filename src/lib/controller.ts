@@ -63,6 +63,7 @@ import {
   frameIndexAtTime,
   frameStartTime,
   stepFrame,
+  isTransportStreamPath,
   type PlayerState,
   type Timestamp,
   type TimestampStore,
@@ -72,7 +73,13 @@ import {
 // ---------------------------------------------------------------------------
 // File-type routing
 // ---------------------------------------------------------------------------
-const VIDEO_EXTENSIONS = ["mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi"];
+// Natively-decodable containers plus the MPEG-TS family (ts/m2ts/mts). The TS
+// containers are listed so the open dialog, drag-drop, and Recent treat them as
+// video; they can't play directly (the WebView can't demux TS) so loadFromPath
+// remuxes them to a temp .mp4 via the ffmpeg sidecar first (play-016).
+const VIDEO_EXTENSIONS = [
+  "mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi", "ts", "m2ts", "mts",
+];
 // Animated / still image formats (play-012). The <video> engine can't decode
 // these, so they route to the dedicated image viewer (openImage). `png` covers
 // both APNG (which conventionally uses the .png extension) and a static PNG;
@@ -678,10 +685,14 @@ export function toggleCutMode(): void {
 /** Path of the clip whose deck is being (or has been) built. */
 let cutDeckPath: string | null = null;
 
-/** Start generating the timeline-view deck media in the BACKGROUND on file open. */
-function prepareCutDeck(path: string): void {
+/**
+ * Start generating the timeline-view deck media in the BACKGROUND on file open.
+ * `path` is the decodable media source (for TS files this is the remuxed .mp4, not
+ * the original); `displayName` is what the deck app bar shows (the user's filename).
+ */
+function prepareCutDeck(path: string, displayName: string = basename(path)): void {
   cutDeckPath = path;
-  ui.cutTitle = basename(path);
+  ui.cutTitle = displayName;
   ui.cutMeta = "";
   resetFpsDetection();
   const ftoken = ++filmstripToken;
@@ -1376,12 +1387,44 @@ async function loadFromPath(path: string): Promise<void> {
       openEmptyLivePlayer(path);
       return;
     }
+    // MPEG-TS containers can't be demuxed by the WebView's <video>; remux to a
+    // temp .mp4 via the ffmpeg sidecar and play that instead (play-016). Every
+    // downstream consumer (the player src AND the cut deck) uses the .mp4.
+    let playPath = path;
+    if (isTransportStreamPath(path)) {
+      const remuxed = await remuxTransportStream(path);
+      if (remuxed === null) return; // error already surfaced
+      playPath = remuxed;
+    }
     const { convertFileSrc } = await import("@tauri-apps/api/core");
-    const src = convertFileSrc(path);
+    const src = convertFileSrc(playPath);
     loadSrc(src, basename(path), parentDir(path));
-    prepareCutDeck(path);
+    prepareCutDeck(playPath, basename(path));
   } catch (err) {
+    ui.prepping = false;
     showError(`Could not open the file: ${String(err)}`);
+  }
+}
+
+/**
+ * Remux a transport stream to a playable temp .mp4 via the native ffmpeg sidecar,
+ * showing a progress overlay. Returns the temp .mp4 path, or null on failure (in
+ * which case the error is already surfaced and the home screen is shown).
+ */
+async function remuxTransportStream(path: string): Promise<string | null> {
+  ui.preppingLabel = basename(path);
+  ui.prepping = true;
+  try {
+    const out = await tauriInvoke<string>("remux_ts", { path });
+    if (!out) throw new Error("empty output path");
+    return out;
+  } catch (err) {
+    ui.prepping = false;
+    ui.view = "empty";
+    showError(`Could not open this file: ${String(err)}`);
+    return null;
+  } finally {
+    ui.prepping = false;
   }
 }
 

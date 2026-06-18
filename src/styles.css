@@ -2537,3 +2537,54 @@ body {
     gap: 0;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Transport-stream remux progress overlay (play-016)
+   Shown while the ffmpeg sidecar converts a .ts/.m2ts/.mts to a temp .mp4.
+   --------------------------------------------------------------------------- */
+.prepping {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(7, 8, 10, 0.72);
+}
+.prepping__card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 22px;
+  background: var(--surface-card);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-xl);
+}
+.prepping__spinner {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: var(--radius-full);
+  border: 3px solid var(--hairline-strong);
+  border-top-color: var(--ink);
+  animation: prepping-spin 0.8s linear infinite;
+}
+@keyframes prepping-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.prepping__title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.prepping__sub {
+  margin-top: 2px;
+  font-size: 13px;
+  color: var(--mute);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

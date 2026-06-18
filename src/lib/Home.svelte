@@ -56,7 +56,7 @@
             <svg class="ic" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M7 3v18" /><path d="M3 7.5h4" /><path d="M3 12h18" /><path d="M3 16.5h4" /><path d="M17 3v18" /><path d="M17 7.5h4" /><path d="M17 16.5h4" /></svg>
           </span>
           <span class="dropzone__title">Open a video to begin</span>
-          <span class="dropzone__sub">Drag and drop a file anywhere in the window, or browse your computer. MP4, WebM, MKV, MOV, animated GIF and more — no account, all local.</span>
+          <span class="dropzone__sub">Drag and drop a file anywhere in the window, or browse your computer. MP4, WebM, MKV, MOV, MPEG-TS, animated GIF and more — no account, all local.</span>
           <div class="home-hero__cta">
             <button id="btn-open" class="pill pill--primary" type="button" onclick={() => void openFileDialog()}>
               <svg class="ic" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></svg>
@@ -65,7 +65,7 @@
             <span class="home-hero__hint"><kbd class="kbd">O</kbd> to open</span>
           </div>
 
-          <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span><span>GIF</span></span>
+          <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span><span>TS</span><span>GIF</span></span>
         </div>
       </section>
 
