@@ -144,6 +144,7 @@ const btnForward = $<HTMLButtonElement>("btn-forward");
 const btnMute = $<HTMLButtonElement>("btn-mute");
 const btnRate = $<HTMLButtonElement>("btn-rate");
 const btnFs = $<HTMLButtonElement>("btn-fs");
+const btnPip = $<HTMLButtonElement>("btn-pip");
 const btnKeys = $<HTMLButtonElement>("btn-keys");
 // Loop / repeat (play-011)
 const btnLoop = $<HTMLButtonElement>("btn-loop");
@@ -443,6 +444,41 @@ async function doToggleFullscreen(): Promise<void> {
   } catch {
     /* fullscreen may be unavailable; ignore */
   }
+}
+
+// ---------------------------------------------------------------------------
+// Picture-in-picture (play-015)
+//
+// Pop the playing <video> out into the OS's floating always-on-top window, the
+// same capability the WebView's right-click menu already exposes — surfaced here
+// as a dedicated control. The browser PiP API drives it; we just toggle and keep
+// the button's pressed state in sync via the enter/leave events.
+// ---------------------------------------------------------------------------
+
+/** True when this WebView can put the current <video> into picture-in-picture. */
+function pipSupported(): boolean {
+  return (
+    document.pictureInPictureEnabled === true &&
+    typeof video.requestPictureInPicture === "function" &&
+    !video.disablePictureInPicture
+  );
+}
+
+/** Toggle picture-in-picture for the main <video> (no-op when unsupported). */
+async function doTogglePip(): Promise<void> {
+  if (!pipSupported()) return;
+  try {
+    if (document.pictureInPictureElement === video) {
+      await document.exitPictureInPicture();
+    } else {
+      // PiP only works on an element that actually has a video to show.
+      if (stage.hidden || video.readyState === 0) return;
+      await video.requestPictureInPicture();
+    }
+  } catch {
+    /* user gesture missing / no video track / already transitioning — ignore */
+  }
+  showControls();
 }
 
 // ---------------------------------------------------------------------------
@@ -2273,6 +2309,20 @@ function wireControls(): void {
   btnFs.addEventListener("click", () => void doToggleFullscreen());
   btnBack.addEventListener("click", goHome);
 
+  // Picture-in-picture (play-015): hide the control entirely when the WebView
+  // can't do PiP; otherwise toggle on click and mirror the OS window's state.
+  if (pipSupported()) {
+    btnPip.addEventListener("click", () => void doTogglePip());
+    video.addEventListener("enterpictureinpicture", () =>
+      btnPip.setAttribute("aria-pressed", "true"),
+    );
+    video.addEventListener("leavepictureinpicture", () =>
+      btnPip.setAttribute("aria-pressed", "false"),
+    );
+  } else {
+    btnPip.hidden = true;
+  }
+
   // Image / GIF viewer (play-012)
   imgBack.addEventListener("click", goHome);
   imgPlayBtn.addEventListener("click", toggleGifPlay);
@@ -2582,6 +2632,11 @@ function wireKeyboard(): void {
         break;
       case "f":
         void doToggleFullscreen();
+        break;
+      case "p":
+      case "P":
+        // Picture-in-picture (play-015), player-only.
+        if (!stage.hidden) void doTogglePip();
         break;
       case "o":
         void openFileDialog();

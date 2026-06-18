@@ -198,6 +198,12 @@
               <button id="btn-keys" class="iconbtn iconbtn--sm" type="button" title="Keyboard shortcuts (?)">
                 <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
               </button>
+              <!-- Picture-in-picture (play-015): pop the video out into a floating
+                   always-on-top window. Hidden by main.ts when the WebView can't
+                   do PiP. -->
+              <button id="btn-pip" class="iconbtn iconbtn--sm" type="button" title="Picture-in-picture (P)" aria-pressed="false">
+                <svg class="ic" viewBox="0 0 24 24"><path d="M21 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4" /><rect width="10" height="7" x="12" y="13" rx="2" /></svg>
+              </button>
               <button id="btn-fs" class="iconbtn iconbtn--sm" type="button" title="Fullscreen (F)">
                 <svg class="ic" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></svg>
               </button>
@@ -451,6 +457,7 @@
                 <li><span>Loop / repeat</span><span class="keys__caps"><kbd class="kbd">R</kbd></span></li>
                 <li><span>Set A-B loop in / out</span><span class="keys__caps"><kbd class="kbd">I</kbd><kbd class="kbd">B</kbd></span></li>
                 <li><span>Fullscreen</span><span class="keys__caps"><kbd class="kbd">F</kbd></span></li>
+                <li><span>Picture-in-picture</span><span class="keys__caps"><kbd class="kbd">P</kbd></span></li>
                 <li><span>Open a file</span><span class="keys__caps"><kbd class="kbd">O</kbd></span></li>
               </ul>
             </div>
