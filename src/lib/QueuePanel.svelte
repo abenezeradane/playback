@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
-  import { setQueueOpen, setRepeatAll, openQueueItem } from "./controller";
+  import { setQueueOpen, setRepeatAll, setAutoplay, openQueueItem } from "./controller";
 </script>
 
 <!-- Folder queue / playlist panel (play-013). Right-side panel mirroring the
@@ -16,6 +16,24 @@
       </button>
     </div>
   </div>
+
+  <label class="ts-setting">
+    <input
+      id="autoplay-toggle"
+      class="ts-setting__input"
+      type="checkbox"
+      checked={ui.autoplay}
+      onchange={(e) => {
+        setAutoplay(e.currentTarget.checked);
+        e.currentTarget.blur();
+      }}
+    />
+    <span class="ts-setting__switch" aria-hidden="true"></span>
+    <span class="ts-setting__text">
+      Autoplay next
+      <span class="ts-setting__hint">{ui.autoplay ? "plays the next video automatically" : "asks before the next video"}</span>
+    </span>
+  </label>
 
   <label class="ts-setting">
     <input

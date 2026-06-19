@@ -121,6 +121,13 @@ export const ui = $state({
   // Label shown above the queue-panel list: "FOLDER QUEUE" for the play-013 auto
   // queue, or the playlist's name when a user-created playlist (play-014) is playing.
   queueLabel: "FOLDER QUEUE",
+  // Autoplay (play-018). When false (the default) the player ASKS before playing
+  // the next queue item — an end-of-video "Up Next" prompt (`nextPromptOpen`,
+  // naming `nextPromptName`). When true it auto-advances silently, as play-013
+  // always did. Persisted to localStorage `playback:autoplay`.
+  autoplay: false,
+  nextPromptOpen: false,
+  nextPromptName: "",
 
   // --- User-created playlists (play-014) ---
   // The saved playlist collection (home-screen "Playlists" section), mirrored from

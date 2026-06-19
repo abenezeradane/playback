@@ -1577,6 +1577,7 @@ function clearQueue(): void {
   ui.queueOpen = false;
   ui.queueLabel = "FOLDER QUEUE";
   playlistActive = false;
+  closeNextPrompt(); // no queue -> no pending "Up Next"
 }
 
 /** Load and play the queue item at `i` (no-op when out of range). The load is
@@ -1607,22 +1608,84 @@ export function openQueueItem(item: QueueItem): void {
 }
 
 /**
- * When the current item ends, advance to the next queue item (play-013). A
- * per-item loop must NOT auto-skip (play-011 interplay): a whole-clip native
- * `video.loop` already suppresses the `ended` event, and an active A-B region
- * loops within [A,B] and never reaches the end — but guard both explicitly so the
- * contract is clear. With "repeat all" on a single-item queue, replay in place
- * rather than reloading the file.
+ * When the current item ends, move on in the queue (play-013). A per-item loop
+ * must NOT auto-skip (play-011 interplay): a whole-clip native `video.loop`
+ * already suppresses the `ended` event, and an active A-B region loops within
+ * [A,B] and never reaches the end — but guard both explicitly so the contract is
+ * clear.
+ *
+ * Autoplay (play-018) decides HOW we move on. With autoplay ON we advance
+ * immediately (the original play-013 behavior). With autoplay OFF (the default)
+ * we instead raise an "Up Next" prompt and wait for the user to confirm — they
+ * have to ask for the next clip. Either path resolves to `advanceQueueTo`.
  */
 function maybeAdvanceQueue(): void {
   if (video.loop || abLoopActive(ui.abA, ui.abB)) return;
   const next = nextIndex(ui.queueIndex, ui.queue.length, ui.repeatAll);
   if (next < 0) return;
+  if (ui.autoplay) {
+    advanceQueueTo(next);
+  } else {
+    pendingNextIndex = next;
+    ui.nextPromptName = ui.queue[next]?.name ?? "";
+    ui.nextPromptOpen = true;
+  }
+}
+
+/** Play the resolved next queue index, or replay in place for a single-item
+ *  "repeat all" queue (`next === queueIndex`). Shared by autoplay advance and the
+ *  "Up Next" prompt's confirm. */
+function advanceQueueTo(next: number): void {
   if (next === ui.queueIndex) {
     doSeekTo(0);
     void video.play().catch(() => {});
   } else {
     playQueueIndex(next);
+  }
+}
+
+// The queue index the "Up Next" prompt would play if confirmed (-1 = no prompt).
+let pendingNextIndex = -1;
+
+/** Confirm the end-of-video "Up Next" prompt: play the queued next item. */
+export function confirmNextPrompt(): void {
+  const next = pendingNextIndex;
+  closeNextPrompt();
+  if (next >= 0) advanceQueueTo(next);
+}
+
+/** Dismiss the "Up Next" prompt without advancing (stay on the finished clip). */
+export function closeNextPrompt(): void {
+  ui.nextPromptOpen = false;
+  ui.nextPromptName = "";
+  pendingNextIndex = -1;
+}
+
+// Persisted setting: autoplay the next queue item (vs. the default end-of-video prompt).
+const AUTOPLAY_KEY = "playback:autoplay";
+
+/** Set autoplay and persist it. Turning it ON while the "Up Next" prompt is
+ *  showing resolves that prompt immediately (the user just asked for auto). */
+export function setAutoplay(on: boolean): void {
+  ui.autoplay = on;
+  try {
+    localStorage.setItem(AUTOPLAY_KEY, on ? "1" : "0");
+  } catch {
+    /* storage unavailable (e.g. private mode) — setting just won't persist */
+  }
+  if (on && ui.nextPromptOpen) confirmNextPrompt();
+}
+
+export function toggleAutoplay(): void {
+  setAutoplay(!ui.autoplay);
+}
+
+/** Restore the saved autoplay setting on startup. */
+function loadAutoplay(): void {
+  try {
+    ui.autoplay = localStorage.getItem(AUTOPLAY_KEY) === "1";
+  } catch {
+    /* ignore — default (prompt) stands */
   }
 }
 
@@ -1867,6 +1930,7 @@ function renderRecents(): void {
 
 async function loadFromPath(path: string, fromQueue = false): Promise<void> {
   currentPath = path;
+  closeNextPrompt(); // any pending "Up Next" prompt is moot once a new clip loads
   // A fresh user-initiated open (dialog / drop / Recent / launch arg) leaves any
   // active playlist; a load that steps the current queue (Next/Prev, click-to-jump,
   // playPlaylist) passes fromQueue=true to preserve it.
@@ -2512,6 +2576,15 @@ function wireKeyboard(): void {
       }
     }
 
+    // The end-of-video "Up Next" prompt (play-018): Enter confirms (play the next
+    // item), Esc dismisses (handled in the cascade below). Confirm is intercepted
+    // here so Enter never falls through to the transport keys.
+    if (ui.nextPromptOpen && e.key === "Enter") {
+      e.preventDefault();
+      confirmNextPrompt();
+      return;
+    }
+
     switch (e.key) {
       case " ":
       case "k":
@@ -2629,13 +2702,15 @@ function wireKeyboard(): void {
           ui.settingsOpen ||
           ui.queueOpen ||
           ui.playlistEditorOpen ||
-          ui.moreOpen;
+          ui.moreOpen ||
+          ui.nextPromptOpen;
         setShortcutsOpen(false);
         setSettingsOpen(false);
         setPanelOpen(false);
         setQueueOpen(false);
         setMoreOpen(false);
         closePlaylistEditor();
+        closeNextPrompt();
         if (!hadOverlay) void setFullscreen(false);
         break;
       }
@@ -2738,6 +2813,7 @@ export function init(): void {
   wireResize();
   loadPinChapter();
   loadLoopPref();
+  loadAutoplay();
   void loadHwaccel();
   void registerDragAndDrop();
   void loadLaunchFile();

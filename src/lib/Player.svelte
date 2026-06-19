@@ -2,6 +2,7 @@
   import { ui, els } from "./state.svelte";
   import ChaptersPanel from "./ChaptersPanel.svelte";
   import QueuePanel from "./QueuePanel.svelte";
+  import NextPrompt from "./NextPrompt.svelte";
   import CutView from "./CutView.svelte";
   import {
     goHome,
@@ -269,6 +270,8 @@
   <ChaptersPanel />
 
   <QueuePanel />
+
+  <NextPrompt />
 
   <CutView />
 </main>
