@@ -934,3 +934,92 @@ export function isTransportStreamPath(path: string): boolean {
     fileExtension(path),
   );
 }
+
+// ---------------------------------------------------------------------------
+// Folder queue / playlist (play-013)
+//
+// When a video is opened the app treats the other videos in the same folder as a
+// queue and auto-advances through them. The native shell enumerates the folder
+// (list_folder_videos); everything that DECIDES an order or an index lives here so
+// it is pure and unit-testable: the natural sort that orders the queue, finding
+// the current item, and the next/previous index math (clamp at the ends, or wrap
+// when "repeat all" is on). play-014 (user-created playlists) reuses this same
+// index math, so it is the shared queue engine.
+// ---------------------------------------------------------------------------
+
+/**
+ * Compare two strings with numeric-aware "natural" ordering, so e.g.
+ * `clip2.mp4` sorts before `clip10.mp4` (a plain lexical sort puts "10" before
+ * "2" because it compares "1" < "2"). Runs of digits are compared by numeric
+ * value; other characters are compared case-insensitively. A case-insensitive tie
+ * falls back to a case-sensitive comparison so the order is total and stable
+ * (deterministic regardless of the input order). Pure.
+ */
+export function compareNatural(a: string, b: string): number {
+  const ai = a.toLowerCase();
+  const bi = b.toLowerCase();
+  let i = 0;
+  let j = 0;
+  while (i < ai.length && j < bi.length) {
+    const ca = ai[i];
+    const cb = bi[j];
+    const da = ca >= "0" && ca <= "9";
+    const db = cb >= "0" && cb <= "9";
+    if (da && db) {
+      // Compare two digit runs by numeric value, ignoring leading zeros.
+      let si = i;
+      let sj = j;
+      while (si < ai.length && ai[si] >= "0" && ai[si] <= "9") si++;
+      while (sj < bi.length && bi[sj] >= "0" && bi[sj] <= "9") sj++;
+      let na = ai.slice(i, si).replace(/^0+(?=\d)/, "");
+      let nb = bi.slice(j, sj).replace(/^0+(?=\d)/, "");
+      if (na.length !== nb.length) return na.length - nb.length;
+      if (na !== nb) return na < nb ? -1 : 1;
+      i = si;
+      j = sj;
+    } else {
+      if (ca !== cb) return ca < cb ? -1 : 1;
+      i++;
+      j++;
+    }
+  }
+  if (i < ai.length) return 1;
+  if (j < bi.length) return -1;
+  // Case-insensitively equal — break the tie with the raw strings so the sort is
+  // total (e.g. "A.mp4" vs "a.mp4" always order the same way).
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+/** Sort file paths into natural order (a fresh array; the input is not mutated). */
+export function sortPathsNatural(paths: string[]): string[] {
+  return [...paths].sort(compareNatural);
+}
+
+/** Index of `path` in `queue` (exact match), or -1 when it is not present. */
+export function currentIndexOf(queue: string[], path: string): number {
+  return queue.indexOf(path);
+}
+
+/**
+ * Index of the next item to play after `current`, or -1 when there is none. Past
+ * the last item the queue wraps to the first when `repeatAll` is on, otherwise it
+ * returns -1 (stop / no-op). A `current` of -1 (nothing selected) advances to the
+ * first item. Returns -1 for an empty queue. Pure.
+ */
+export function nextIndex(current: number, length: number, repeatAll: boolean): number {
+  if (length <= 0) return -1;
+  if (current + 1 < length) return current + 1;
+  return repeatAll ? 0 : -1;
+}
+
+/**
+ * Index of the previous item before `current`, or -1 when there is none. Before
+ * the first item the queue wraps to the last when `repeatAll` is on, otherwise it
+ * returns -1 (no-op). Returns -1 for an empty queue. Pure.
+ */
+export function prevIndex(current: number, length: number, repeatAll: boolean): number {
+  if (length <= 0) return -1;
+  if (current - 1 >= 0) return current - 1;
+  return repeatAll ? length - 1 : -1;
+}

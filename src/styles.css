@@ -1729,6 +1729,51 @@ body {
 }
 
 /* ===================================================================== */
+/* FOLDER QUEUE / PLAYLIST PANEL (play-013)                              */
+/* ===================================================================== */
+/* Reuses the .ts-panel shell + .ts-list rows; only the per-row index chip
+   and the filename treatment are queue-specific. */
+.q-list__jump {
+  padding: 9px 10px;
+}
+
+.q-list__index {
+  flex: 0 0 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ash);
+}
+
+.q-list__index .ic {
+  width: 12px;
+  height: 12px;
+}
+
+.q-list__item[data-active="true"] .q-list__index {
+  color: var(--ink);
+}
+
+.q-list__name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--body);
+  font-size: 13px;
+  letter-spacing: 0.1px;
+}
+
+.q-list__item[data-active="true"] .q-list__name {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* ===================================================================== */
 /* LIVESTREAM · UNAVAILABLE (frame 04b — playback temporarily deprecated) */
 /* ===================================================================== */
 /* A purpose-built screen shown when a detected livestream is opened (live

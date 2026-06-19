@@ -1,6 +1,7 @@
 <script lang="ts">
   import { ui, els } from "./state.svelte";
   import ChaptersPanel from "./ChaptersPanel.svelte";
+  import QueuePanel from "./QueuePanel.svelte";
   import CutView from "./CutView.svelte";
   import {
     goHome,
@@ -24,6 +25,9 @@
     toggleAbB,
     toggleCutMode,
     togglePanel,
+    toggleQueue,
+    doPrevItem,
+    doNextItem,
     toggleShortcuts,
     doTogglePip,
     doToggleFullscreen,
@@ -161,6 +165,10 @@
       </div>
 
       <div class="controls__center">
+        <!-- Previous video in the folder queue (play-013); shown only for a real queue. -->
+        <button id="btn-prev-item" class="iconbtn iconbtn--sm" type="button" title="Previous video ([)" hidden={ui.queue.length <= 1} onclick={doPrevItem}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="m11 17-5-5 5-5" /><path d="m18 17-5-5 5-5" /></svg>
+        </button>
         <button id="btn-rewind" class="iconbtn" type="button" title="Back 10s (←)" onclick={() => doSkip(false)}>
           <svg class="ic" viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20" /><line x1="5" x2="5" y1="19" y2="5" /></svg>
         </button>
@@ -170,6 +178,10 @@
         </button>
         <button id="btn-forward" class="iconbtn" type="button" title="Forward 10s (→)" onclick={() => doSkip(true)}>
           <svg class="ic" viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4" /><line x1="19" x2="19" y1="5" y2="19" /></svg>
+        </button>
+        <!-- Next video in the folder queue (play-013); shown only for a real queue. -->
+        <button id="btn-next-item" class="iconbtn iconbtn--sm" type="button" title="Next video (])" hidden={ui.queue.length <= 1} onclick={doNextItem}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="m6 17 5-5-5-5" /><path d="m13 17 5-5-5-5" /></svg>
         </button>
       </div>
 
@@ -187,6 +199,10 @@
         <button id="btn-timestamps" class="iconbtn iconbtn--sm" type="button" title="Chapters (T)" aria-pressed={ui.panelOpen} onclick={togglePanel}>
           <svg class="ic" viewBox="0 0 24 24"><path d="M12 12H3" /><path d="M16 6H3" /><path d="M12 18H3" /><path d="m16 12 5 3-5 3z" /></svg>
         </button>
+        <!-- Folder queue / playlist (play-013); shown only when the folder has >1 video. -->
+        <button id="btn-queue" class="iconbtn iconbtn--sm" type="button" title="Queue (Q)" aria-pressed={ui.queueOpen} hidden={ui.queue.length <= 1} onclick={toggleQueue}>
+          <svg class="ic" viewBox="0 0 24 24"><line x1="10" x2="21" y1="6" y2="6" /><line x1="10" x2="21" y1="12" y2="12" /><line x1="10" x2="21" y1="18" y2="18" /><path d="M4 6h1v4" /><path d="M4 10h2" /><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1" /></svg>
+        </button>
         <button id="btn-keys" class="iconbtn iconbtn--sm" type="button" title="Keyboard shortcuts (?)" onclick={toggleShortcuts}>
           <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
         </button>
@@ -202,6 +218,8 @@
   </div>
 
   <ChaptersPanel />
+
+  <QueuePanel />
 
   <CutView />
 </main>

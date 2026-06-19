@@ -11,7 +11,7 @@
  * GIF timing) stay delegated to the pure, unit-tested functions in player-core.
  */
 import { tick } from "svelte";
-import { ui, els, type RecentFile } from "./state.svelte";
+import { ui, els, type RecentFile, type QueueItem } from "./state.svelte";
 import {
   createInitialState,
   clamp,
@@ -66,6 +66,10 @@ import {
   frameStartTime,
   stepFrame,
   isTransportStreamPath,
+  sortPathsNatural,
+  currentIndexOf,
+  nextIndex,
+  prevIndex,
   type PlayerState,
   type Timestamp,
   type TimestampStore,
@@ -670,6 +674,7 @@ function doNextTimestamp(): void {
 export function setPanelOpen(open: boolean): void {
   ui.panelOpen = open;
   if (open) {
+    ui.queueOpen = false; // the two right-side panels share a slot
     showControls();
   } else {
     closeAddInput();
@@ -692,6 +697,7 @@ export function goHome(): void {
   setPanelOpen(false);
   setShortcutsOpen(false);
   clearImageView();
+  clearQueue();
   video.removeAttribute("src");
   video.load();
   state = createInitialState();
@@ -773,6 +779,7 @@ export function setCutMode(on: boolean): void {
   ui.cutMode = on;
   if (on) {
     setPanelOpen(false);
+    setQueueOpen(false);
     setShortcutsOpen(false);
     // The deck media is generated in the background on file open; entering the
     // view just draws whatever is ready so far. Canvases only size once visible,
@@ -1404,6 +1411,123 @@ function cutSeekFromPointer(e: PointerEvent): void {
 }
 
 // ---------------------------------------------------------------------------
+// Folder queue / playlist (play-013)
+//
+// On opening a video the app treats the other videos in the same folder as a
+// queue: the native shell enumerates the siblings (list_folder_videos, scoped to
+// the opened directory), the frontend sorts them with the pure natural sort, and
+// auto-advances through them as each item ends. The queue is DERIVED FRESH from
+// the folder on every open (no persistence — that's play-014's job), so navigating
+// or the folder changing is always reflected. The index math (next/prev, clamp vs.
+// wrap) lives in player-core; this layer is the thin driver. play-014 reuses it.
+// ---------------------------------------------------------------------------
+
+/** Map the opened path onto its position in the (sorted) queue. Exact match first;
+ *  falls back to a case-insensitive basename match (siblings are unique per folder)
+ *  so a separator/case difference between the opened path and the enumerated paths
+ *  still resolves. Returns 0 when nothing matches (the opened file should always be
+ *  present, but never leave a non-empty queue with no current item). */
+function resolveQueueIndex(sorted: string[], openedPath: string): number {
+  const exact = currentIndexOf(sorted, openedPath);
+  if (exact >= 0) return exact;
+  const target = basename(openedPath).toLowerCase();
+  const byName = sorted.findIndex((p) => basename(p).toLowerCase() === target);
+  return byName >= 0 ? byName : 0;
+}
+
+/**
+ * Build the folder queue for a freshly opened video. Best-effort: if the native
+ * enumeration is unavailable (not under Tauri) or empty, fall back to a one-item
+ * queue holding just the opened file, so Next/Prev degrade gracefully to today's
+ * single-file behavior. Guarded by `currentPath` so a slow enumeration that
+ * resolves after a newer open is discarded.
+ */
+async function buildFolderQueue(openedPath: string): Promise<void> {
+  let paths = await tauriInvoke<string[]>("list_folder_videos", { path: openedPath }).catch(
+    () => null,
+  );
+  if (currentPath !== openedPath) return; // a newer open superseded this one
+  if (!paths || paths.length === 0) paths = [openedPath];
+  const sorted = sortPathsNatural(paths);
+  ui.queue = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
+  ui.queueIndex = resolveQueueIndex(sorted, openedPath);
+}
+
+/** Drop the queue (returning home, or opening an image / livestream). */
+function clearQueue(): void {
+  ui.queue = [];
+  ui.queueIndex = -1;
+  ui.queueOpen = false;
+}
+
+/** Load and play the queue item at `i` (no-op when out of range). */
+function playQueueIndex(i: number): void {
+  const item = ui.queue[i];
+  if (!item) return;
+  ui.queueIndex = i; // optimistic highlight; buildFolderQueue reconciles on load
+  void loadFromPath(item.path);
+}
+
+/** Next / Previous controls (buttons + the ] / [ hotkeys): step the queue. */
+export function doNextItem(): void {
+  const i = nextIndex(ui.queueIndex, ui.queue.length, ui.repeatAll);
+  if (i >= 0) playQueueIndex(i);
+}
+
+export function doPrevItem(): void {
+  const i = prevIndex(ui.queueIndex, ui.queue.length, ui.repeatAll);
+  if (i >= 0) playQueueIndex(i);
+}
+
+/** Click a row in the queue panel: load and play that item. */
+export function openQueueItem(item: QueueItem): void {
+  const i = ui.queue.indexOf(item);
+  if (i >= 0) playQueueIndex(i);
+}
+
+/**
+ * When the current item ends, advance to the next queue item (play-013). A
+ * per-item loop must NOT auto-skip (play-011 interplay): a whole-clip native
+ * `video.loop` already suppresses the `ended` event, and an active A-B region
+ * loops within [A,B] and never reaches the end — but guard both explicitly so the
+ * contract is clear. With "repeat all" on a single-item queue, replay in place
+ * rather than reloading the file.
+ */
+function maybeAdvanceQueue(): void {
+  if (video.loop || abLoopActive(ui.abA, ui.abB)) return;
+  const next = nextIndex(ui.queueIndex, ui.queue.length, ui.repeatAll);
+  if (next < 0) return;
+  if (next === ui.queueIndex) {
+    doSeekTo(0);
+    void video.play().catch(() => {});
+  } else {
+    playQueueIndex(next);
+  }
+}
+
+/** Queue-level "repeat all": wrap last->first on auto-advance / Next / Previous. */
+export function setRepeatAll(on: boolean): void {
+  ui.repeatAll = on;
+}
+
+export function toggleRepeatAll(): void {
+  setRepeatAll(!ui.repeatAll);
+}
+
+/** Open / close the queue panel (mutually exclusive with the Chapters panel). */
+export function setQueueOpen(open: boolean): void {
+  ui.queueOpen = open;
+  if (open) {
+    ui.panelOpen = false; // the two right-side panels share a slot
+    showControls();
+  }
+}
+
+export function toggleQueue(): void {
+  setQueueOpen(!ui.queueOpen);
+}
+
+// ---------------------------------------------------------------------------
 // Loading a file
 // ---------------------------------------------------------------------------
 function basename(path: string): string {
@@ -1486,6 +1610,7 @@ async function loadFromPath(path: string): Promise<void> {
   // sec-002: authorize this file's directory before any native read of it.
   await authorizeMediaDir(path);
   if (isImagePath(path)) {
+    clearQueue(); // images aren't part of the auto-advancing video queue
     loadTimestampsFor(null);
     await openImage(path);
     return;
@@ -1495,6 +1620,7 @@ async function loadFromPath(path: string): Promise<void> {
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
     const detected = status ? await detectLive(path, status) : "normal";
     if (detected !== "normal") {
+      clearQueue();
       openEmptyLivePlayer(path);
       return;
     }
@@ -1511,6 +1637,9 @@ async function loadFromPath(path: string): Promise<void> {
     const src = convertFileSrc(playPath);
     loadSrc(src, basename(path), parentDir(path));
     prepareCutDeck(playPath, basename(path));
+    // Treat the folder's other videos as an auto-advancing queue (play-013). Built
+    // from the ORIGINAL path (not the remuxed temp .mp4) so siblings resolve.
+    void buildFolderQueue(path);
   } catch (err) {
     ui.prepping = false;
     showError(`Could not open the file: ${String(err)}`);
@@ -1991,6 +2120,7 @@ export function onVolumeChange(): void {
 export function onEnded(): void {
   syncFromVideo();
   render();
+  maybeAdvanceQueue();
   showControls();
 }
 
@@ -2174,6 +2304,25 @@ function wireKeyboard(): void {
           togglePanel();
         }
         break;
+      case "]":
+        if (playerVisible()) {
+          e.preventDefault();
+          doNextItem();
+        }
+        break;
+      case "[":
+        if (playerVisible()) {
+          e.preventDefault();
+          doPrevItem();
+        }
+        break;
+      case "q":
+      case "Q":
+        if (playerVisible()) {
+          e.preventDefault();
+          toggleQueue();
+        }
+        break;
       case "c":
       case "C":
         if (playerVisible()) {
@@ -2186,10 +2335,12 @@ function wireKeyboard(): void {
         toggleShortcuts();
         break;
       case "Escape": {
-        const hadOverlay = ui.shortcutsOpen || ui.panelOpen || ui.settingsOpen;
+        const hadOverlay =
+          ui.shortcutsOpen || ui.panelOpen || ui.settingsOpen || ui.queueOpen;
         setShortcutsOpen(false);
         setSettingsOpen(false);
         setPanelOpen(false);
+        setQueueOpen(false);
         if (!hadOverlay) void setFullscreen(false);
         break;
       }

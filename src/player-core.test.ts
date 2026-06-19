@@ -62,6 +62,11 @@ import {
   isPathWithinRoots,
   fileExtension,
   isTransportStreamPath,
+  compareNatural,
+  sortPathsNatural,
+  currentIndexOf,
+  nextIndex,
+  prevIndex,
   DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
   SHUTTLE_SPEEDS,
@@ -871,5 +876,98 @@ describe("transport-stream classification (play-016)", () => {
     for (const p of ["a.mp4", "a.webm", "a.mkv", "a.mov", "a.gif", "a.png", "noext"]) {
       expect(isTransportStreamPath(p)).toBe(false);
     }
+  });
+});
+
+describe("folder queue / playlist (play-013)", () => {
+  describe("compareNatural + sortPathsNatural", () => {
+    it("orders embedded numbers by value, not lexically", () => {
+      // A plain string sort would put clip10 before clip2 ("1" < "2").
+      const sorted = sortPathsNatural(["clip10.mp4", "clip2.mp4", "clip1.mp4"]);
+      expect(sorted).toEqual(["clip1.mp4", "clip2.mp4", "clip10.mp4"]);
+    });
+    it("handles zero-padded and multi-digit runs by value", () => {
+      const sorted = sortPathsNatural(["ep-100.mkv", "ep-9.mkv", "ep-010.mkv"]);
+      // By numeric value 9 < 10 (the leading zero is ignored) < 100.
+      expect(sorted).toEqual(["ep-9.mkv", "ep-010.mkv", "ep-100.mkv"]);
+    });
+    it("breaks an equal-value tie deterministically (raw string order)", () => {
+      // "9" and "09" are equal by value, so the raw strings settle the order
+      // ('0' < '9'); the comparison is consistent so the sort never thrashes.
+      expect(compareNatural("ep-09.mkv", "ep-9.mkv")).toBeLessThan(0);
+      expect(compareNatural("ep-9.mkv", "ep-09.mkv")).toBeGreaterThan(0);
+    });
+    it("is case-insensitive for letters but total/stable on ties", () => {
+      // 'B' sorts after 'a' despite the case difference (case-folded comparison).
+      expect(compareNatural("Bravo", "alpha")).toBeGreaterThan(0);
+      expect(compareNatural("alpha", "Bravo")).toBeLessThan(0);
+      // Case-insensitively equal -> a non-zero, antisymmetric raw tie-break.
+      expect(compareNatural("alpha", "ALPHA")).not.toBe(0);
+      expect(Math.sign(compareNatural("alpha", "ALPHA"))).toBe(
+        -Math.sign(compareNatural("ALPHA", "alpha")),
+      );
+      expect(compareNatural("same", "same")).toBe(0);
+    });
+    it("sorts full sibling paths by their (shared-prefix) tail", () => {
+      const sorted = sortPathsNatural([
+        "C:/V/part 3.mp4",
+        "C:/V/part 1.mp4",
+        "C:/V/part 20.mp4",
+      ]);
+      expect(sorted).toEqual([
+        "C:/V/part 1.mp4",
+        "C:/V/part 3.mp4",
+        "C:/V/part 20.mp4",
+      ]);
+    });
+    it("does not mutate the input array", () => {
+      const input = ["b.mp4", "a.mp4"];
+      const out = sortPathsNatural(input);
+      expect(input).toEqual(["b.mp4", "a.mp4"]);
+      expect(out).toEqual(["a.mp4", "b.mp4"]);
+    });
+  });
+
+  describe("currentIndexOf", () => {
+    it("finds an exact path, or -1 when absent", () => {
+      const q = ["/v/a.mp4", "/v/b.mp4", "/v/c.mp4"];
+      expect(currentIndexOf(q, "/v/b.mp4")).toBe(1);
+      expect(currentIndexOf(q, "/v/missing.mp4")).toBe(-1);
+      expect(currentIndexOf([], "/v/a.mp4")).toBe(-1);
+    });
+  });
+
+  describe("nextIndex / prevIndex (clamp vs. wrap for repeat-all)", () => {
+    it("steps forward and stops at the last item when not repeating", () => {
+      expect(nextIndex(0, 3, false)).toBe(1);
+      expect(nextIndex(1, 3, false)).toBe(2);
+      expect(nextIndex(2, 3, false)).toBe(-1); // at the end -> stop
+    });
+    it("wraps from the last item to the first when repeat-all is on", () => {
+      expect(nextIndex(2, 3, true)).toBe(0);
+      expect(nextIndex(0, 3, true)).toBe(1);
+    });
+    it("steps backward and stops at the first item when not repeating", () => {
+      expect(prevIndex(2, 3, false)).toBe(1);
+      expect(prevIndex(1, 3, false)).toBe(0);
+      expect(prevIndex(0, 3, false)).toBe(-1); // at the start -> no-op
+    });
+    it("wraps from the first item to the last when repeat-all is on", () => {
+      expect(prevIndex(0, 3, true)).toBe(2);
+      expect(prevIndex(1, 3, true)).toBe(0);
+    });
+    it("advances a fresh (current = -1) selection to the first item", () => {
+      expect(nextIndex(-1, 3, false)).toBe(0);
+    });
+    it("returns -1 for an empty queue regardless of repeat-all", () => {
+      expect(nextIndex(0, 0, false)).toBe(-1);
+      expect(nextIndex(0, 0, true)).toBe(-1);
+      expect(prevIndex(0, 0, true)).toBe(-1);
+    });
+    it("single-item queue: repeat-all loops the one item, else stops", () => {
+      expect(nextIndex(0, 1, false)).toBe(-1);
+      expect(nextIndex(0, 1, true)).toBe(0); // wrap onto itself = replay the queue
+      expect(prevIndex(0, 1, true)).toBe(0);
+    });
   });
 });

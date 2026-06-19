@@ -496,6 +496,75 @@ fn read_stream_chunk(
     Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
 }
 
+/// Video container extensions the folder queue enumerates (play-013). Mirrors the
+/// frontend's `VIDEO_EXTENSIONS` — the natively-decodable containers plus the
+/// MPEG-TS family (.ts/.m2ts/.mts), which the frontend remuxes to .mp4 on open
+/// (play-016). Image formats are intentionally excluded: auto-advance keys off the
+/// <video> "ended" event, which a still/animated image never fires, so images are
+/// not part of the auto-advancing video queue.
+const QUEUE_VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi", "ts", "m2ts", "mts",
+];
+
+/// True when `path`'s extension is one the folder queue treats as a video
+/// (case-insensitive). A file with no extension is not a video.
+fn has_queue_video_ext(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| QUEUE_VIDEO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// List the sibling video files in the directory of an opened video so the frontend
+/// can build a folder "queue" that auto-advances (play-013). The opened file must
+/// already be authorized — the frontend calls `allow_media_dir` before this — so we
+/// scope-check it through the SAME `ensure_allowed` gate the read commands use and
+/// then enumerate only its parent directory. That directory is exactly the one
+/// sec-002 already trusts for this file, so the queue introduces no new filesystem
+/// reach: it cannot list any folder the user has not opened a file from.
+///
+/// Returns absolute sibling paths built from the RAW (non-verbatim) parent the
+/// WebView passed, so each path round-trips through `convertFileSrc` and the
+/// asset-protocol scope grant (which is keyed on that raw dir) — not the canonical
+/// `\\?\`-prefixed form. Ordering is left to the frontend's unit-tested natural
+/// sort. Non-video files and subdirectories are skipped.
+#[tauri::command]
+fn list_folder_videos(
+    allow: tauri::State<'_, AllowList>,
+    path: String,
+) -> Result<Vec<String>, String> {
+    list_folder_videos_impl(&allow, &path)
+}
+
+/// Core of `list_folder_videos`, taking `&AllowList` directly so it is unit-testable
+/// without a `tauri::State`. The command is a thin wrapper over this.
+fn list_folder_videos_impl(allow: &AllowList, path: &str) -> Result<Vec<String>, String> {
+    // Scope-check the opened file (canonicalizing resolves `..`/symlinks) and use the
+    // canonical directory to actually read — so we enumerate the real trusted folder.
+    let canonical = ensure_allowed(allow, path)?;
+    let canonical_dir = canonical
+        .parent()
+        .ok_or_else(|| "invalid path".to_string())?;
+    // Build returned paths from the raw parent (matches convertFileSrc / asset scope).
+    let raw_dir = Path::new(path).parent();
+    let entries = fs::read_dir(canonical_dir)
+        .map_err(|e| ipc_error("list_folder_videos: read_dir", e, "could not list folder"))?;
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if !entry_path.is_file() || !has_queue_video_ext(&entry_path) {
+            continue;
+        }
+        let name = entry.file_name();
+        let full = match raw_dir {
+            Some(dir) => dir.join(&name),
+            None => entry_path,
+        };
+        out.push(full.to_string_lossy().into_owned());
+    }
+    Ok(out)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // First non-flag argument is treated as a file to open.
@@ -517,6 +586,7 @@ pub fn run() {
             stream_status,
             read_stream_chunk,
             remux_ts,
+            list_folder_videos,
             get_hwaccel,
             set_hwaccel
         ])
@@ -724,6 +794,70 @@ mod tests {
         fs::write(&path, "off\n").unwrap();
         assert!(!read_hwaccel_pref());
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn has_queue_video_ext_matches_video_containers_only() {
+        // Video containers (case-insensitive), including the MPEG-TS family.
+        for p in ["a.mp4", "B.MKV", "c.webm", "d.mov", "e.avi", "f.ts", "g.m2ts", "h.MTS"] {
+            assert!(has_queue_video_ext(Path::new(p)), "{p} should be a video");
+        }
+        // Images, other files, and extensionless names are NOT part of the video queue.
+        for p in ["a.gif", "b.png", "c.webp", "d.txt", "e.srt", "noext", "f."] {
+            assert!(!has_queue_video_ext(Path::new(p)), "{p} should not be a video");
+        }
+    }
+
+    #[test]
+    fn list_folder_videos_returns_only_authorized_sibling_videos() {
+        let base = temp_root("queue");
+        let media = base.join("media");
+        fs::create_dir_all(&media).unwrap();
+        // A mix of videos, an image, a subtitle, and a subdirectory in the folder.
+        for name in ["clip2.mp4", "clip10.mp4", "clip1.mkv", "poster.png", "notes.txt"] {
+            fs::write(media.join(name), b"x").unwrap();
+        }
+        fs::create_dir_all(media.join("subdir")).unwrap();
+
+        // Authorize the media dir (as allow_media_dir would on open).
+        let allow = AllowList::default();
+        allow
+            .0
+            .lock()
+            .unwrap()
+            .insert(fs::canonicalize(&media).unwrap());
+
+        let opened = media.join("clip1.mkv");
+        let mut got = list_folder_videos_impl(&allow, opened.to_str().unwrap()).unwrap();
+        got.sort(); // read_dir order is platform-defined; sort for a stable assertion
+
+        // Only the three video siblings come back — the image, the .txt, and the
+        // subdirectory are excluded. Paths are rooted at the (raw) opened parent.
+        let names: Vec<String> = got
+            .iter()
+            .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["clip1.mkv", "clip10.mp4", "clip2.mp4"]);
+        // Every returned path is a child of the directory the user opened from.
+        assert!(got.iter().all(|p| Path::new(p).parent() == Some(media.as_path())));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_folder_videos_denies_an_unauthorized_folder() {
+        let base = temp_root("queue-deny");
+        let media = base.join("media");
+        fs::create_dir_all(&media).unwrap();
+        let clip = media.join("clip.mp4");
+        fs::write(&clip, b"x").unwrap();
+        // Nothing authorized -> deny-by-default, same gate as the read commands.
+        let allow = AllowList::default();
+        assert_eq!(
+            list_folder_videos_impl(&allow, clip.to_str().unwrap()),
+            Err("path not allowed".to_string())
+        );
         let _ = fs::remove_dir_all(&base);
     }
 

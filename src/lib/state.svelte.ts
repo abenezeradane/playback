@@ -35,6 +35,12 @@ export interface RulerTick {
   label: string;
 }
 
+/** One entry in the folder queue (play-013): a sibling video and its display name. */
+export interface QueueItem {
+  path: string;
+  name: string;
+}
+
 /** The active surface — mirrors the former `#app[data-state]` switch. */
 export type View = "empty" | "playing" | "image" | "live-unavailable";
 
@@ -93,6 +99,16 @@ export const ui = $state({
   abA: null as number | null,
   abB: null as number | null,
   abMarkers: [] as AbMarker[],
+
+  // --- Folder queue / playlist (play-013) ---
+  // The sibling videos of the opened file, in natural sort order; derived fresh
+  // from the folder on every open (no persistence). `queueIndex` is the currently
+  // playing item (-1 when there is no queue). `repeatAll` wraps last->first on
+  // auto-advance / Next / Previous. `queueOpen` toggles the queue panel.
+  queue: [] as QueueItem[],
+  queueIndex: -1,
+  repeatAll: false,
+  queueOpen: false,
 
   // --- Cut / timeline view (play-004) ---
   cutTitle: "",

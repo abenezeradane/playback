@@ -45,6 +45,11 @@
           <li><span>Previous / next chapter</span><span class="keys__caps"><kbd class="kbd">A</kbd><kbd class="kbd">D</kbd></span></li>
           <li><span>Toggle chapters panel</span><span class="keys__caps"><kbd class="kbd">T</kbd></span></li>
         </ul>
+        <p class="shortcuts__group">FOLDER QUEUE</p>
+        <ul class="keys">
+          <li><span>Previous / next video</span><span class="keys__caps"><kbd class="kbd">[</kbd><kbd class="kbd">]</kbd></span></li>
+          <li><span>Toggle queue panel</span><span class="keys__caps"><kbd class="kbd">Q</kbd></span></li>
+        </ul>
         <p class="shortcuts__group">TIMELINE (CUT VIEW)</p>
         <ul class="keys">
           <li><span>Toggle timeline view</span><span class="keys__caps"><kbd class="kbd">C</kbd></span></li>
