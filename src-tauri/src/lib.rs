@@ -324,10 +324,27 @@ fn stream_status(allow: tauri::State<'_, AllowList>, path: String) -> Result<Str
     Ok(StreamStatus { size, live, complete, mtime_age_ms, being_written })
 }
 
+/// Hard ceiling on how many bytes a single `read_stream_chunk` call will read —
+/// and therefore allocate — regardless of the caller-supplied `max_len` (sec-003 /
+/// F-3). The only first-party caller (`readWholeFile` in the frontend) requests at
+/// most `READ_CHUNK_BYTES` (4 MiB) per call and advances by the *returned* length,
+/// so this 8 MiB ceiling leaves it headroom and never clamps a legitimate read; it
+/// exists purely so a hostile/buggy caller can't force a multi-GB native
+/// allocation (plus ~1.33x for the base64 response) with one oversized `max_len`.
+const MAX_CHUNK: u64 = 8 * 1024 * 1024;
+
+/// Number of bytes `read_stream_chunk` will read for one request: the smaller of
+/// what remains after `offset`, the caller's `max_len`, and the `MAX_CHUNK`
+/// allocation ceiling. Pure (no I/O) so the clamp is unit-testable on its own.
+fn clamp_read_len(remaining: u64, max_len: u64) -> usize {
+    remaining.min(max_len).min(MAX_CHUNK) as usize
+}
+
 /// Read up to `max_len` bytes from `path` starting at `offset`, returned as a
 /// base64 string. (A raw `Vec<u8>` response arrives on WebView2 as a slow JSON
 /// number[]; base64 is far more compact and parses as a plain string.) Reads
-/// only the bytes that exist right now; returns "" when `offset` is at/past EOF.
+/// only the bytes that exist right now, never more than `MAX_CHUNK` per call;
+/// returns "" when `offset` is at/past EOF.
 #[tauri::command]
 fn read_stream_chunk(
     allow: tauri::State<'_, AllowList>,
@@ -341,7 +358,7 @@ fn read_stream_chunk(
     if offset >= size {
         return Ok(String::new());
     }
-    let read_len = (size - offset).min(max_len) as usize;
+    let read_len = clamp_read_len(size - offset, max_len);
     file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; read_len];
     file.read_exact(&mut buf).map_err(|e| e.to_string())?;
@@ -487,5 +504,27 @@ mod tests {
             Err("path not allowed".to_string())
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn clamp_read_len_caps_allocation_at_max_chunk() {
+        // The chunk is min(remaining, max_len, MAX_CHUNK).
+        // A hostile/oversized max_len against a huge file is capped at MAX_CHUNK,
+        // not the whole file (the F-3 self-inflicted-allocation fix).
+        let huge_file = 8 * 1024 * 1024 * 1024; // 8 GiB remaining
+        assert_eq!(clamp_read_len(huge_file, u64::MAX), MAX_CHUNK as usize);
+        assert_eq!(clamp_read_len(huge_file, huge_file), MAX_CHUNK as usize);
+
+        // The first-party caller (max_len <= READ_CHUNK_BYTES = 4 MiB) is below the
+        // ceiling, so its returned length is unchanged: min(remaining, max_len).
+        let four_mib = 4 * 1024 * 1024;
+        assert_eq!(clamp_read_len(huge_file, four_mib), four_mib as usize);
+        // ...and a short tail still returns only the bytes that remain.
+        assert_eq!(clamp_read_len(1000, four_mib), 1000);
+
+        // max_len is honoured when it is the smallest of the three.
+        assert_eq!(clamp_read_len(MAX_CHUNK, 100), 100);
+        // Exactly at the ceiling stays at the ceiling (no off-by-one).
+        assert_eq!(clamp_read_len(MAX_CHUNK, MAX_CHUNK), MAX_CHUNK as usize);
     }
 }
