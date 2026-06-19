@@ -71,6 +71,8 @@ export const ui = $state({
   // --- Timestamps / chapters (play-002 / 007 / 008) ---
   timestamps: [] as Timestamp[],
   activeTsIndex: -1,
+  // Index of the row being inline-edited (play-017), or -1 when none is.
+  editingTsIndex: -1,
   nowChapter: null as { time: string; label: string } | null,
   pinChapter: false,
   panelOpen: false,
@@ -127,4 +129,6 @@ export const els: {
   imgCanvas?: HTMLCanvasElement;
   imgEl?: HTMLImageElement;
   tsAddInput?: HTMLInputElement;
+  /** The inline timestamp-edit field — mounts only while a row is being edited (play-017). */
+  tsEditInput?: HTMLInputElement;
 } = {};

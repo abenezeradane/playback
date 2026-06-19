@@ -10,6 +10,9 @@
     clearAllTimestamps,
     jumpToTimestamp,
     removeTimestamp,
+    startEditTimestamp,
+    commitEditTimestamp,
+    onEditKeydown,
   } from "./controller";
   import { formatTime } from "../player-core";
 </script>
@@ -70,14 +73,37 @@
   </div>
   <ul id="timestamps-list" class="ts-list" aria-label="Timestamps">
     {#each ui.timestamps as ts, i (ts.time + " " + ts.title)}
-      <li class="ts-list__item" data-active={i === ui.activeTsIndex ? "true" : undefined}>
-        <button type="button" class="ts-list__jump" onclick={() => jumpToTimestamp(ts)}>
-          <span class="ts-list__time">{formatTime(ts.time)}</span>
-          <span class="ts-list__title">{ts.title}</span>
-        </button>
-        <button type="button" class="ts-list__remove" title="Remove timestamp" aria-label="Remove {ts.title}" onclick={(e) => { e.stopPropagation(); removeTimestamp(i); }}>
-          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
-        </button>
+      {@const editing = i === ui.editingTsIndex}
+      {@const tc = formatTime(ts.time)}
+      <li
+        class="ts-list__item"
+        data-active={i === ui.activeTsIndex ? "true" : undefined}
+        data-editing={editing ? "true" : undefined}
+      >
+        {#if editing}
+          <input
+            class="ts-list__edit"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            aria-label="Edit timestamp {ts.title}"
+            value={ts.title && ts.title !== tc ? `${tc} ${ts.title}` : tc}
+            bind:this={els.tsEditInput}
+            onkeydown={(e) => onEditKeydown(e, i)}
+            onblur={() => commitEditTimestamp(i)}
+          />
+        {:else}
+          <button type="button" class="ts-list__jump" onclick={() => jumpToTimestamp(ts)}>
+            <span class="ts-list__time">{tc}</span>
+            <span class="ts-list__title">{ts.title}</span>
+          </button>
+          <button type="button" class="ts-list__edit-btn" title="Edit timestamp" aria-label="Edit {ts.title}" onclick={(e) => { e.stopPropagation(); void startEditTimestamp(i); }}>
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+          </button>
+          <button type="button" class="ts-list__remove" title="Remove timestamp" aria-label="Remove {ts.title}" onclick={(e) => { e.stopPropagation(); removeTimestamp(i); }}>
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+          </button>
+        {/if}
       </li>
     {/each}
   </ul>

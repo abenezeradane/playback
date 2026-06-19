@@ -26,6 +26,7 @@ import {
   parseTimestamps,
   mergeTimestamps,
   clearTimestamps,
+  editTimestamp,
   markerFraction,
   previousTimestamp,
   nextTimestamp,
@@ -68,6 +69,7 @@ import {
   SKIP_SECONDS,
   type PlayerState,
   type Shuttle,
+  type Timestamp,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -337,6 +339,52 @@ describe("timestamps — parsing", () => {
     expect(clearTimestamps()).toEqual([]);
     // Independent fresh array each call — never an aliased shared reference.
     expect(clearTimestamps()).not.toBe(clearTimestamps());
+  });
+});
+
+describe("timestamps — edit in place (play-017)", () => {
+  const sample = (): Timestamp[] => [
+    { time: 5, title: "First" },
+    { time: 20, title: "Second" },
+    { time: 40, title: "Third" },
+  ];
+  it("edits the title while keeping the same time and position", () => {
+    expect(editTimestamp(sample(), 1, { time: 20, title: "Renamed" })).toEqual([
+      { time: 5, title: "First" },
+      { time: 20, title: "Renamed" },
+      { time: 40, title: "Third" },
+    ]);
+  });
+  it("edits the time and re-sorts the collection", () => {
+    expect(editTimestamp(sample(), 0, { time: 30, title: "First" })).toEqual([
+      { time: 20, title: "Second" },
+      { time: 30, title: "First" },
+      { time: 40, title: "Third" },
+    ]);
+  });
+  it("on a collision with another entry's time, the explicit edit wins (other dropped)", () => {
+    expect(editTimestamp(sample(), 0, { time: 20, title: "Now here" })).toEqual([
+      { time: 20, title: "Now here" },
+      { time: 40, title: "Third" },
+    ]);
+  });
+  it("editing an entry to its own time keeps it (does not drop itself)", () => {
+    expect(editTimestamp(sample(), 2, { time: 40, title: "Third (edited)" })).toEqual([
+      { time: 5, title: "First" },
+      { time: 20, title: "Second" },
+      { time: 40, title: "Third (edited)" },
+    ]);
+  });
+  it("returns the input unchanged for an out-of-range index", () => {
+    const input = sample();
+    expect(editTimestamp(input, 5, { time: 1, title: "x" })).toBe(input);
+    expect(editTimestamp(input, -1, { time: 1, title: "x" })).toBe(input);
+  });
+  it("does not mutate the input array", () => {
+    const input = sample();
+    const snapshot = JSON.parse(JSON.stringify(input));
+    editTimestamp(input, 0, { time: 99, title: "Moved" });
+    expect(input).toEqual(snapshot);
   });
 });
 

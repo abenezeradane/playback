@@ -1646,6 +1646,52 @@ body {
   color: var(--accent-red);
 }
 
+/* Edit-in-place affordances (play-017): a per-row pencil + the inline field. */
+.ts-list__edit-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  background: transparent;
+  color: var(--ash);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  transition: opacity 100ms ease, color 100ms ease;
+}
+
+.ts-list__edit-btn .ic {
+  width: 13px;
+  height: 13px;
+}
+
+.ts-list__item:hover .ts-list__edit-btn,
+.ts-list__item[data-active="true"] .ts-list__edit-btn {
+  opacity: 1;
+}
+
+.ts-list__edit-btn:hover {
+  color: var(--ink);
+}
+
+.ts-list__edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 3px;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline-strong);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  outline: none;
+}
+
 .ts-list__time {
   flex: 0 0 44px;
   font-variant-numeric: tabular-nums;

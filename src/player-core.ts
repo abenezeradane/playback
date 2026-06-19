@@ -298,6 +298,28 @@ export function clearTimestamps(): Timestamp[] {
   return [];
 }
 
+/**
+ * Replace the timestamp at `index` with `edited` (play-017) — the in-place
+ * counterpart to delete-then-re-add. The edit can change the time and/or the
+ * title; the collection is re-sorted so marker order and prev/next navigation
+ * stay well-defined. If the new time lands on a DIFFERENT existing entry's time
+ * the explicit edit wins (that other entry is dropped), keeping the "one marker
+ * per time" invariant. Out-of-range indices return the input unchanged. Pure:
+ * the input array is never mutated; a fresh sorted array is returned.
+ */
+export function editTimestamp(
+  stamps: Timestamp[],
+  index: number,
+  edited: Timestamp,
+): Timestamp[] {
+  if (index < 0 || index >= stamps.length) return stamps;
+  const others = stamps.filter((_, i) => i !== index);
+  const merged = [...others.filter((s) => s.time !== edited.time), edited].sort(
+    (a, b) => a.time - b.time,
+  );
+  return dedupeByTime(merged);
+}
+
 /** Marker position as a 0..1 fraction of duration, for placing it on the bar. */
 export function markerFraction(time: number, duration: number): number {
   if (duration <= 0) return 0;

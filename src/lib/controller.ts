@@ -31,8 +31,10 @@ import {
   toggleMute,
   effectiveVolume,
   parseTimestamps,
+  parseTimestampLine,
   mergeTimestamps,
   clearTimestamps,
+  editTimestamp,
   markerFraction,
   previousTimestamp,
   nextTimestamp,
@@ -415,6 +417,7 @@ export function addTimestampsFromText(text: string): number {
 
 /** Remove the timestamp at `index`. */
 export function removeTimestamp(index: number): void {
+  ui.editingTsIndex = -1;
   ui.timestamps = ui.timestamps.filter((_, i) => i !== index);
   renderTimestamps();
   persistTimestamps();
@@ -422,10 +425,59 @@ export function removeTimestamp(index: number): void {
 
 /** Remove every timestamp at once (play-008). */
 export function clearAllTimestamps(): void {
+  ui.editingTsIndex = -1;
   if (ui.timestamps.length === 0) return;
   ui.timestamps = clearTimestamps();
   renderTimestamps();
   persistTimestamps();
+}
+
+// --- Inline edit (play-017): change a timestamp's time/title in place ---
+
+/** Begin inline-editing the row at `index` — reveals a pre-filled, focused field. */
+export async function startEditTimestamp(index: number): Promise<void> {
+  closeAddInput(); // never keep the add field and an edit field open at once
+  ui.editingTsIndex = index;
+  await tick(); // the field must be mounted (un-hidden) before it can take focus
+  const input = els.tsEditInput;
+  if (input) {
+    input.focus();
+    input.select();
+  }
+}
+
+/**
+ * Commit the inline edit at `index` from the field's text. Same `HH:MM:SS Title`
+ * grammar as the add input; an unparseable value is discarded (the row reverts).
+ * Idempotent: a no-op once this row is no longer the one being edited, so an
+ * Enter/Escape that already closed the field makes the follow-up blur inert.
+ */
+export function commitEditTimestamp(index: number): void {
+  if (ui.editingTsIndex !== index) return;
+  const parsed = parseTimestampLine(els.tsEditInput?.value ?? "");
+  ui.editingTsIndex = -1;
+  if (parsed) {
+    ui.timestamps = editTimestamp(ui.timestamps, index, parsed);
+    renderTimestamps();
+    persistTimestamps();
+  }
+}
+
+/** Abandon the inline edit, leaving the timestamp unchanged. */
+export function cancelEditTimestamp(): void {
+  ui.editingTsIndex = -1;
+}
+
+/** Keydown on the inline edit field: Enter commits, Escape cancels (panel stays open). */
+export function onEditKeydown(e: KeyboardEvent, index: number): void {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    commitEditTimestamp(index);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation(); // don't let Esc also close the Chapters panel
+    cancelEditTimestamp();
+  }
 }
 
 // --- Per-video persistence (play-007) ---
@@ -448,6 +500,7 @@ function loadTimestampsFor(source: string | null): void {
   const key = source ? timestampKey(source) : null;
   if (key === currentTimestampKey) return;
   currentTimestampKey = key;
+  ui.editingTsIndex = -1; // a stale row index must not carry across videos
   ui.timestamps = key ? readStoredTimestamps(loadTimestampStore(), key) : [];
   renderTimestamps();
 }
@@ -563,6 +616,7 @@ export function setPanelOpen(open: boolean): void {
     showControls();
   } else {
     closeAddInput();
+    ui.editingTsIndex = -1; // discard any in-progress inline edit
   }
 }
 
