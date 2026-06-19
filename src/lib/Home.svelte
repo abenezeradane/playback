@@ -84,7 +84,7 @@
         <div id="recent-cards" class="recent__cards" hidden={ui.recents.length === 0}>
           {#each ui.recents as r (r.path)}
             <button type="button" class="recent-card" title={r.path} onclick={() => openRecent(r)}>
-              <span class="recent-card__thumb" style="background: {thumbGradient(r.name)}">
+              <span class="recent-card__thumb" style:background={thumbGradient(r.name)}>
                 <span class="recent-card__play">
                   <svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="8 5 19 12 8 19 8 5" /></svg>
                 </span>

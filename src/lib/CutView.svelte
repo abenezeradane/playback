@@ -66,16 +66,16 @@
     >
       <div id="cut-ruler" class="cut__ruler" aria-hidden="true">
         {#each ui.rulerTicks as t}
-          <div class="cut__tick {t.major ? 'cut__tick--major' : 'cut__tick--minor'}" style="left: {t.left}%"></div>
+          <div class="cut__tick {t.major ? 'cut__tick--major' : 'cut__tick--minor'}" style:left="{t.left}%"></div>
           {#if t.major}
-            <span class="cut__tick-label" style="left: {t.left}%">{t.label}</span>
+            <span class="cut__tick-label" style:left="{t.left}%">{t.label}</span>
           {/if}
         {/each}
       </div>
       <canvas id="cut-filmstrip" class="cut__filmstrip" aria-hidden="true" bind:this={els.cutFilmstrip}></canvas>
       <canvas id="cut-waveform" class="cut__waveform" aria-hidden="true" bind:this={els.cutWaveform}></canvas>
-      <div id="cut-future" class="cut__future" aria-hidden="true" style="left: {ui.playheadPct}%"></div>
-      <div id="cut-playhead" class="cut__playhead" aria-hidden="true" style="left: {ui.playheadPct}%"><span class="cut__playhead-cap"></span></div>
+      <div id="cut-future" class="cut__future" aria-hidden="true" style:left="{ui.playheadPct}%"></div>
+      <div id="cut-playhead" class="cut__playhead" aria-hidden="true" style:left="{ui.playheadPct}%"><span class="cut__playhead-cap"></span></div>
     </div>
 
     <!-- Transport -->

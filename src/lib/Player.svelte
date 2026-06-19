@@ -107,16 +107,16 @@
     <!-- Scrubber -->
     <div class="scrubber">
       <div class="scrubber__track" aria-hidden="true">
-        <div id="buffered" class="scrubber__buffered" style="width: {ui.bufferedPct}%"></div>
-        <div id="progress" class="scrubber__progress" style="width: {ui.progressPct}%"></div>
+        <div id="buffered" class="scrubber__buffered" style:width="{ui.bufferedPct}%"></div>
+        <div id="progress" class="scrubber__progress" style:width="{ui.progressPct}%"></div>
       </div>
       <!-- A-B section-loop region + flags (play-011), drawn beneath the chapter ticks. -->
       <div id="ab-markers" class="scrubber__ab" aria-hidden="true">
         {#each ui.abMarkers as m}
           {#if m.kind === "region"}
-            <div class="ab-region" style="left: {m.left}%; width: {m.width}%"></div>
+            <div class="ab-region" style:left="{m.left}%" style:width="{m.width}%"></div>
           {:else}
-            <div class="ab-flag" data-label={m.label} style="left: {m.left}%"></div>
+            <div class="ab-flag" data-label={m.label} style:left="{m.left}%"></div>
           {/if}
         {/each}
       </div>
@@ -126,7 +126,7 @@
           <button
             type="button"
             class="marker"
-            style="left: {markerFraction(ts.time, ui.duration) * 100}%"
+            style:left="{markerFraction(ts.time, ui.duration) * 100}%"
             title="{formatTime(ts.time)} — {ts.title}"
             data-active={i === ui.activeTsIndex ? "true" : undefined}
             onclick={(e) => { e.stopPropagation(); jumpToTimestamp(ts); }}
