@@ -1,13 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the main Playback window.",
+  "description": "Capabilities for the main Playback window. Least-privilege: only the permissions the app actually uses. The devtools inspector is still available in dev/debug builds via the WebView's native shortcut (Ctrl+Shift+I / right-click Inspect), so the JS-callable internal-toggle-devtools permission is intentionally NOT granted — it shipped in release builds and only widened the local surface (sec-004 / sec-001 F-4).",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
     "core:window:allow-set-fullscreen",
-    "core:webview:allow-internal-toggle-devtools",
     "dialog:default",
     "dialog:allow-open"
   ]
