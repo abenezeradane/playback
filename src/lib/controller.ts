@@ -2696,22 +2696,30 @@ function wireKeyboard(): void {
         toggleShortcuts();
         break;
       case "Escape": {
-        const hadOverlay =
+        // Esc dismisses the TOPMOST layer only. A side panel / overlay COVERS the
+        // "Up Next" prompt, so an Esc that closes the panel must only reveal the
+        // prompt — NOT dismiss it. Layering (top → bottom): panels/overlays →
+        // the prompt → fullscreen. (The panel set here mirrors NextPrompt's
+        // `covered` check.)
+        const hadPanel =
           ui.shortcutsOpen ||
           ui.panelOpen ||
           ui.settingsOpen ||
           ui.queueOpen ||
           ui.playlistEditorOpen ||
-          ui.moreOpen ||
-          ui.nextPromptOpen;
-        setShortcutsOpen(false);
-        setSettingsOpen(false);
-        setPanelOpen(false);
-        setQueueOpen(false);
-        setMoreOpen(false);
-        closePlaylistEditor();
-        closeNextPrompt();
-        if (!hadOverlay) void setFullscreen(false);
+          ui.moreOpen;
+        if (hadPanel) {
+          setShortcutsOpen(false);
+          setSettingsOpen(false);
+          setPanelOpen(false);
+          setQueueOpen(false);
+          setMoreOpen(false);
+          closePlaylistEditor();
+        } else if (ui.nextPromptOpen) {
+          closeNextPrompt();
+        } else {
+          void setFullscreen(false);
+        }
         break;
       }
       default:
