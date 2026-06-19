@@ -1146,7 +1146,13 @@ body {
   color: var(--mute);
 }
 
-/* Controls row: left (transport handled below) · center · right */
+/* Controls row: left (transport handled below) · center · right.
+   A 1fr·auto·1fr grid keeps the transport centered. The side groups carry
+   `flex-wrap` and their children never shrink (see the rule below), so if a side
+   group is ever wider than its track it WRAPS within the track instead of
+   overflowing into the centered transport — a hard guarantee that the buttons
+   can never overlap, at any width (ui-005). The overflow menu keeps that wrap
+   from triggering at sane sizes. */
 .controls__row {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
@@ -1156,8 +1162,10 @@ body {
 
 .controls__left {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+  row-gap: 8px;
   justify-self: start;
   min-width: 0;
 }
@@ -1170,11 +1178,47 @@ body {
 }
 
 .controls__right {
+  position: relative; /* anchor for the .controls__more popover */
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
+  row-gap: 8px;
   justify-self: end;
   min-width: 0;
+}
+
+/* Control-bar items keep their size — they never squish into one another. With
+   the wrapping side groups above, this makes overlap structurally impossible. */
+.controls__left > *,
+.controls__center > *,
+.controls__right > *,
+.controls__more > * {
+  flex: 0 0 auto;
+}
+
+/* ---- Overflow "⋯ More" menu (ui-005) ----
+   On a wide bar the wrapper is `display: contents`, so the secondary buttons
+   flow inline in the right group exactly as before and the ⋯ toggle is hidden.
+   When the bar is narrow the responsive block (bottom of this file) turns the
+   wrapper into an anchored popover and reveals the toggle. */
+.controls__more {
+  display: contents;
+}
+
+.controls__more-toggle {
+  display: none;
+}
+
+/* Popover-only chrome: the row labels and the speed gauge icon are hidden while
+   the controls flow inline on the bar (so the speed pill still reads just "1×"). */
+.iconbtn__more-label {
+  display: none;
+}
+
+#btn-rate .ic--more-only {
+  display: none;
 }
 
 /* Icon buttons (frame 02 Icon Button: 40×40, radius-md, transparent, white). */
@@ -2983,6 +3027,113 @@ button.shortcuts__backdrop {
 /* ===================================================================== */
 /* Responsive                                                            */
 /* ===================================================================== */
+
+/* Below this width the full control bar no longer fits on one row, so the
+   secondary tools (A-B loop, loop, timeline, PiP, shortcuts) relocate from the
+   right group into the ⋯ popover (ui-005). The transport, volume/time, speed,
+   chapters, queue and fullscreen stay on the bar — the controls reached most
+   often while watching. Every collapsed action is still one click away in the
+   menu (and still has its hotkey). */
+@media (max-width: 1024px) {
+  .controls__more-toggle {
+    display: inline-flex;
+  }
+
+  .controls__more {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 12px);
+    z-index: 6;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    min-width: 232px;
+    padding: 8px;
+    border-radius: var(--radius-lg);
+    background: rgba(13, 13, 13, 0.96);
+    border: 1px solid var(--hairline-soft);
+    backdrop-filter: blur(26px);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  }
+
+  /* Closed: out of flow entirely. Open: a column popover. */
+  .controls__more:not([data-open="true"]) {
+    display: none;
+  }
+  .controls__more[data-open="true"] {
+    display: flex;
+  }
+
+  /* Popover rows: full-width, left-aligned glyph + label. */
+  .controls__more .iconbtn,
+  .controls__more .pill {
+    width: 100%;
+    height: 40px;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 0 12px;
+    border-radius: var(--radius-md);
+    color: var(--on-dark);
+  }
+  .controls__more .iconbtn:hover,
+  .controls__more .pill:hover {
+    background: var(--hairline-soft);
+  }
+  /* The speed pill becomes a normal row: gauge + label + the current value. */
+  .controls__more .pill {
+    background: transparent;
+    border: 0;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .controls__more #btn-rate .ic--more-only {
+    display: block;
+  }
+  .controls__more #btn-rate .rate-val {
+    margin-left: auto;
+    color: var(--mute);
+    font-variant-numeric: tabular-nums;
+  }
+  .controls__more .loopbtn__glyph {
+    width: 20px;
+    text-align: center;
+    flex: 0 0 auto;
+  }
+  .controls__more .iconbtn__more-label {
+    display: inline;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: normal;
+    white-space: nowrap;
+  }
+}
+
+/* Below ~720px the volume slider is dropped (mute + the ↑/↓ keys remain) and the
+   gaps/secondary buttons tighten, so the bar stays on one row down to the 640px
+   minimum window width even with a folder queue present (prev/next/queue) — the
+   wrap safety net never has to trigger in normal use (ui-005). */
+@media (max-width: 720px) {
+  .volume__range {
+    display: none;
+  }
+  .controls__row {
+    gap: 8px;
+  }
+  .controls__left {
+    gap: 6px;
+  }
+  .controls__center {
+    gap: 4px;
+  }
+  .controls__right {
+    gap: 6px;
+  }
+  .iconbtn--sm {
+    width: 32px;
+    height: 32px;
+  }
+}
+
 @media (max-width: 820px) {
   .title-main {
     font-size: 14px;
@@ -3015,9 +3166,6 @@ button.shortcuts__backdrop {
   }
   .controls__center {
     gap: 4px;
-  }
-  .volume__range {
-    width: 56px;
   }
   .title-sub {
     display: none;

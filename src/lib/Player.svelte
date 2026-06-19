@@ -29,6 +29,7 @@
     doPrevItem,
     doNextItem,
     toggleShortcuts,
+    toggleMore,
     doTogglePip,
     doToggleFullscreen,
     previewSeek,
@@ -186,29 +187,58 @@
       </div>
 
       <div class="controls__right">
-        <button id="btn-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed" onclick={doCycleRate}>{ui.rate}&times;</button>
-        <!-- Loop / repeat (play-011): whole-clip loop toggle + A-B in-/out-point buttons. -->
-        <button id="btn-loop-a" class="iconbtn iconbtn--sm loopbtn loopbtn--ab" type="button" title="Set / clear A-B loop in point (I)" aria-pressed={ui.abA !== null} onclick={toggleAbA}>A</button>
-        <button id="btn-loop-b" class="iconbtn iconbtn--sm loopbtn loopbtn--ab" type="button" title="Set / clear A-B loop out point (B)" aria-pressed={ui.abB !== null} onclick={toggleAbB}>B</button>
-        <button id="btn-loop" class="iconbtn iconbtn--sm" type="button" title="Loop (R)" aria-pressed={ui.loopOn} onclick={toggleLoop}>
-          <svg class="ic" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" /><path d="m7 22-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" /></svg>
+        <!-- Overflow "More" toggle (ui-005): shown only when the bar is too narrow
+             to fit every control. Opens the .controls__more popover below. -->
+        <button
+          id="btn-more"
+          class="iconbtn iconbtn--sm controls__more-toggle"
+          type="button"
+          title="More controls"
+          aria-haspopup="menu"
+          aria-expanded={ui.moreOpen}
+          aria-pressed={ui.moreOpen}
+          onclick={toggleMore}
+        >
+          <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="12" cy="19" r="1.6" /></svg>
         </button>
-        <button id="btn-cut" class="iconbtn iconbtn--sm" type="button" title="Timeline view (C)" aria-pressed={ui.cutMode} onclick={toggleCutMode}>
-          <svg class="ic" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M7 3v18" /><path d="M3 7.5h4" /><path d="M3 12h18" /><path d="M3 16.5h4" /><path d="M17 3v18" /><path d="M17 7.5h4" /><path d="M17 16.5h4" /></svg>
-        </button>
+
+        <!-- Secondary tools. On a wide bar these flow inline (display:contents);
+             when space runs short they relocate into the ⋯ popover (ui-005) so
+             they can never overlap the centered transport. -->
+        <div id="controls-more" class="controls__more" data-open={ui.moreOpen} role="menu" aria-label="More controls">
+          <button id="btn-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed" onclick={doCycleRate}>
+            <svg class="ic ic--more-only" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 14 4-4" /><path d="M3.34 19a10 10 0 1 1 17.32 0" /></svg>
+            <span class="iconbtn__more-label">Playback speed</span>
+            <span class="rate-val">{ui.rate}&times;</span>
+          </button>
+          <!-- Loop / repeat (play-011): whole-clip loop toggle + A-B in-/out-point buttons. -->
+          <button id="btn-loop-a" class="iconbtn iconbtn--sm loopbtn loopbtn--ab" type="button" title="Set / clear A-B loop in point (I)" aria-pressed={ui.abA !== null} onclick={toggleAbA}><span class="loopbtn__glyph">A</span><span class="iconbtn__more-label">A-B loop · set in (I)</span></button>
+          <button id="btn-loop-b" class="iconbtn iconbtn--sm loopbtn loopbtn--ab" type="button" title="Set / clear A-B loop out point (B)" aria-pressed={ui.abB !== null} onclick={toggleAbB}><span class="loopbtn__glyph">B</span><span class="iconbtn__more-label">A-B loop · set out (B)</span></button>
+          <button id="btn-loop" class="iconbtn iconbtn--sm" type="button" title="Loop (R)" aria-pressed={ui.loopOn} onclick={toggleLoop}>
+            <svg class="ic" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" /><path d="m7 22-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" /></svg>
+            <span class="iconbtn__more-label">Loop (R)</span>
+          </button>
+          <button id="btn-cut" class="iconbtn iconbtn--sm" type="button" title="Timeline view (C)" aria-pressed={ui.cutMode} onclick={toggleCutMode}>
+            <svg class="ic" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M7 3v18" /><path d="M3 7.5h4" /><path d="M3 12h18" /><path d="M3 16.5h4" /><path d="M17 3v18" /><path d="M17 7.5h4" /><path d="M17 16.5h4" /></svg>
+            <span class="iconbtn__more-label">Timeline view (C)</span>
+          </button>
+          <!-- Picture-in-picture (play-015). Hidden when the WebView can't do PiP. -->
+          <button id="btn-pip" class="iconbtn iconbtn--sm" type="button" title="Picture-in-picture (P)" aria-pressed={ui.pipActive} hidden={!ui.pipSupported} onclick={() => void doTogglePip()}>
+            <svg class="ic" viewBox="0 0 24 24"><path d="M21 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4" /><rect width="10" height="7" x="12" y="13" rx="2" /></svg>
+            <span class="iconbtn__more-label">Picture-in-picture (P)</span>
+          </button>
+          <button id="btn-keys" class="iconbtn iconbtn--sm" type="button" title="Keyboard shortcuts (?)" onclick={toggleShortcuts}>
+            <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
+            <span class="iconbtn__more-label">Keyboard shortcuts (?)</span>
+          </button>
+        </div>
+
         <button id="btn-timestamps" class="iconbtn iconbtn--sm" type="button" title="Chapters (T)" aria-pressed={ui.panelOpen} onclick={togglePanel}>
           <svg class="ic" viewBox="0 0 24 24"><path d="M12 12H3" /><path d="M16 6H3" /><path d="M12 18H3" /><path d="m16 12 5 3-5 3z" /></svg>
         </button>
         <!-- Folder queue / playlist (play-013); shown only when the folder has >1 video. -->
         <button id="btn-queue" class="iconbtn iconbtn--sm" type="button" title="Queue (Q)" aria-pressed={ui.queueOpen} hidden={ui.queue.length <= 1} onclick={toggleQueue}>
           <svg class="ic" viewBox="0 0 24 24"><line x1="10" x2="21" y1="6" y2="6" /><line x1="10" x2="21" y1="12" y2="12" /><line x1="10" x2="21" y1="18" y2="18" /><path d="M4 6h1v4" /><path d="M4 10h2" /><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1" /></svg>
-        </button>
-        <button id="btn-keys" class="iconbtn iconbtn--sm" type="button" title="Keyboard shortcuts (?)" onclick={toggleShortcuts}>
-          <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
-        </button>
-        <!-- Picture-in-picture (play-015). Hidden when the WebView can't do PiP. -->
-        <button id="btn-pip" class="iconbtn iconbtn--sm" type="button" title="Picture-in-picture (P)" aria-pressed={ui.pipActive} hidden={!ui.pipSupported} onclick={() => void doTogglePip()}>
-          <svg class="ic" viewBox="0 0 24 24"><path d="M21 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4" /><rect width="10" height="7" x="12" y="13" rx="2" /></svg>
         </button>
         <button id="btn-fs" class="iconbtn iconbtn--sm" type="button" title="Fullscreen (F)" onclick={() => void doToggleFullscreen()}>
           <svg class="ic" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></svg>

@@ -386,6 +386,9 @@ let flashTimer: number | undefined;
 /** Single source of truth for chrome visibility. */
 function setChromeVisible(visible: boolean): void {
   ui.chromeVisible = visible;
+  // The overflow menu lives inside the control bar, so it must not linger open
+  // (and invisibly capturing clicks) once the chrome auto-hides (ui-005).
+  if (!visible) ui.moreOpen = false;
 }
 
 export function showControls(): void {
@@ -708,6 +711,7 @@ export function goHome(): void {
   applyLoopState();
   setPanelOpen(false);
   setShortcutsOpen(false);
+  setMoreOpen(false);
   clearImageView();
   clearQueue();
   video.removeAttribute("src");
@@ -728,6 +732,16 @@ export function setShortcutsOpen(open: boolean): void {
 
 export function toggleShortcuts(): void {
   setShortcutsOpen(!ui.shortcutsOpen);
+}
+
+// --- Control-bar overflow "⋯ More" menu (ui-005) ---
+export function setMoreOpen(open: boolean): void {
+  ui.moreOpen = open;
+  if (open) showControls();
+}
+
+export function toggleMore(): void {
+  setMoreOpen(!ui.moreOpen);
 }
 
 // ---------------------------------------------------------------------------
@@ -793,6 +807,7 @@ export function setCutMode(on: boolean): void {
     setPanelOpen(false);
     setQueueOpen(false);
     setShortcutsOpen(false);
+    setMoreOpen(false);
     // The deck media is generated in the background on file open; entering the
     // view just draws whatever is ready so far. Canvases only size once visible,
     // so (re)draw after the DOM reflects cut mode.
@@ -2356,6 +2371,21 @@ function wireFocusReturn(): void {
   });
 }
 
+/**
+ * Dismiss the control-bar overflow menu (ui-005) on any click outside it. The
+ * toggle's own onclick handles open/close, so a click on it is ignored here;
+ * clicking a menu item runs that item's action and then bubbles here to close
+ * the menu, and a click anywhere else closes it too.
+ */
+function wireMoreMenu(): void {
+  document.addEventListener("click", (e) => {
+    if (!ui.moreOpen) return;
+    const t = e.target as HTMLElement | null;
+    if (t && t.closest("#btn-more")) return; // the toggle manages its own state
+    setMoreOpen(false);
+  });
+}
+
 /** Suppress the WebView's native right-click context menu. Text fields keep theirs. */
 function disableContextMenu(): void {
   window.addEventListener("contextmenu", (e) => {
@@ -2507,11 +2537,13 @@ function wireKeyboard(): void {
           ui.panelOpen ||
           ui.settingsOpen ||
           ui.queueOpen ||
-          ui.playlistEditorOpen;
+          ui.playlistEditorOpen ||
+          ui.moreOpen;
         setShortcutsOpen(false);
         setSettingsOpen(false);
         setPanelOpen(false);
         setQueueOpen(false);
+        setMoreOpen(false);
         closePlaylistEditor();
         if (!hadOverlay) void setFullscreen(false);
         break;
@@ -2609,6 +2641,7 @@ export function init(): void {
 
   wireKeyboard();
   wireFocusReturn();
+  wireMoreMenu();
   disableContextMenu();
   wireResize();
   loadPinChapter();

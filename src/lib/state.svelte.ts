@@ -84,6 +84,10 @@ export const ui = $state({
   panelOpen: false,
   addInputOpen: false,
   shortcutsOpen: false,
+  // Overflow "⋯ More" menu in the control bar (ui-005). When the bar is too
+  // narrow to fit every control, the secondary buttons relocate into this popover
+  // instead of overlapping the centered transport. Open state is mouse-driven.
+  moreOpen: false,
 
   // --- Settings (play-010) ---
   settingsOpen: false,
