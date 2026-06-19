@@ -88,6 +88,11 @@ export const ui = $state({
   // narrow to fit every control, the secondary buttons relocate into this popover
   // instead of overlapping the centered transport. Open state is mouse-driven.
   moreOpen: false,
+  // Whether the control bar is currently overflowing and so collapses its
+  // secondary tools into the ⋯ menu. Set by a measurement pass (controller.ts)
+  // so the ⋯ shows ONLY when the buttons would otherwise not fit — never when
+  // there is room to display them all inline.
+  controlsOverflow: false,
 
   // --- Settings (play-010) ---
   settingsOpen: false,

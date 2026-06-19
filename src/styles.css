@@ -3028,84 +3028,93 @@ button.shortcuts__backdrop {
 /* Responsive                                                            */
 /* ===================================================================== */
 
-/* Below this width the full control bar no longer fits on one row, so the
-   secondary tools (A-B loop, loop, timeline, PiP, shortcuts) relocate from the
-   right group into the ⋯ popover (ui-005). The transport, volume/time, speed,
-   chapters, queue and fullscreen stay on the bar — the controls reached most
-   often while watching. Every collapsed action is still one click away in the
-   menu (and still has its hotkey). */
-@media (max-width: 1024px) {
-  .controls__more-toggle {
-    display: inline-flex;
-  }
+/* When the bar can't fit every control on one row, the secondary tools (speed,
+   A-B loop, loop, timeline, PiP, shortcuts) relocate from the right group into
+   the ⋯ popover (ui-005). The transport, mute/time, chapters, queue and
+   fullscreen stay on the bar — the controls reached most often while watching.
+   Every collapsed action is still one click away in the menu (and still has its
+   hotkey). `data-overflow` is set by JS (controller.ts measureControlsOverflow):
+   the ⋯ is shown ONLY when the buttons would otherwise overflow, so a roomy bar
+   keeps everything inline regardless of the exact window width. */
+.controls[data-overflow="true"] .controls__more-toggle {
+  display: inline-flex;
+}
 
-  .controls__more {
-    position: absolute;
-    right: 0;
-    bottom: calc(100% + 12px);
-    z-index: 6;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 2px;
-    min-width: 232px;
-    padding: 8px;
-    border-radius: var(--radius-lg);
-    background: rgba(13, 13, 13, 0.96);
-    border: 1px solid var(--hairline-soft);
-    backdrop-filter: blur(26px);
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
-  }
+.controls[data-overflow="true"] .controls__more {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 12px);
+  z-index: 6;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 232px;
+  padding: 8px;
+  border-radius: var(--radius-lg);
+  background: rgba(13, 13, 13, 0.96);
+  border: 1px solid var(--hairline-soft);
+  backdrop-filter: blur(26px);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
 
-  /* Closed: out of flow entirely. Open: a column popover. */
-  .controls__more:not([data-open="true"]) {
-    display: none;
-  }
-  .controls__more[data-open="true"] {
-    display: flex;
-  }
+/* Closed: out of flow entirely. Open: a column popover. */
+.controls[data-overflow="true"] .controls__more:not([data-open="true"]) {
+  display: none;
+}
+.controls[data-overflow="true"] .controls__more[data-open="true"] {
+  display: flex;
+}
 
-  /* Popover rows: full-width, left-aligned glyph + label. */
-  .controls__more .iconbtn,
-  .controls__more .pill {
-    width: 100%;
-    height: 40px;
-    justify-content: flex-start;
-    gap: 12px;
-    padding: 0 12px;
-    border-radius: var(--radius-md);
-    color: var(--on-dark);
-  }
-  .controls__more .iconbtn:hover,
-  .controls__more .pill:hover {
-    background: var(--hairline-soft);
-  }
-  /* The speed pill becomes a normal row: gauge + label + the current value. */
-  .controls__more .pill {
-    background: transparent;
-    border: 0;
-    font-size: 13px;
-    font-weight: 500;
-  }
-  .controls__more #btn-rate .ic--more-only {
-    display: block;
-  }
-  .controls__more #btn-rate .rate-val {
-    margin-left: auto;
-    color: var(--mute);
-    font-variant-numeric: tabular-nums;
-  }
-  .controls__more .loopbtn__glyph {
-    width: 20px;
-    text-align: center;
-    flex: 0 0 auto;
-  }
-  .controls__more .iconbtn__more-label {
-    display: inline;
-    font-size: 13px;
-    font-weight: 500;
-    letter-spacing: normal;
-    white-space: nowrap;
-  }
+/* Popover rows: full-width, left-aligned glyph + label. */
+.controls[data-overflow="true"] .controls__more .iconbtn,
+.controls[data-overflow="true"] .controls__more .pill {
+  width: 100%;
+  height: 40px;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 0 12px;
+  border-radius: var(--radius-md);
+  color: var(--on-dark);
+}
+.controls[data-overflow="true"] .controls__more .iconbtn:hover,
+.controls[data-overflow="true"] .controls__more .pill:hover {
+  background: var(--hairline-soft);
+}
+/* The speed pill becomes a normal row: gauge + label + the current value. */
+.controls[data-overflow="true"] .controls__more .pill {
+  background: transparent;
+  border: 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+.controls[data-overflow="true"] .controls__more #btn-rate .ic--more-only {
+  display: block;
+}
+.controls[data-overflow="true"] .controls__more #btn-rate .rate-val {
+  margin-left: auto;
+  color: var(--mute);
+  font-variant-numeric: tabular-nums;
+}
+.controls[data-overflow="true"] .controls__more .loopbtn__glyph {
+  width: 20px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+.controls[data-overflow="true"] .controls__more .iconbtn__more-label {
+  display: inline;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: normal;
+  white-space: nowrap;
+}
+
+/* Measuring pass (controller.ts): the bar is forced fully-expanded and no-wrap so
+   each group lays out on a single row and its offsetWidth is its true content
+   width; the controller sums them against the row width to decide whether to
+   collapse. Applied synchronously and removed before paint — never visible. */
+.controls.measuring .controls__left,
+.controls.measuring .controls__right {
+  flex-wrap: nowrap;
 }
 
 /* Below ~720px the volume slider is dropped (mute + the ↑/↓ keys remain) and the

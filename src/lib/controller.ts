@@ -744,6 +744,71 @@ export function toggleMore(): void {
   setMoreOpen(!ui.moreOpen);
 }
 
+// Adaptive overflow: show the ⋯ toggle ONLY when the controls would not all fit.
+// We measure in the fully-expanded, no-wrap layout and compare each side group's
+// content width to its grid track; if either would spill into the centered
+// transport we collapse the secondary tools into the popover. The measure runs
+// synchronously inside one rAF (with a temporary attribute + class) so it never
+// paints an intermediate state — no flicker.
+let measureScheduled = false;
+let measuring = false;
+
+export function requestControlsMeasure(): void {
+  if (measureScheduled) return;
+  measureScheduled = true;
+  // A microtask (not requestAnimationFrame): rAF is throttled/paused while the
+  // window is occluded or not foreground, which would leave the ⋯ stale; a
+  // microtask always runs, and layout is already current after a resize/render.
+  queueMicrotask(() => {
+    measureScheduled = false;
+    measureControlsOverflow();
+  });
+}
+
+function measureControlsOverflow(): void {
+  if (measuring) return;
+  // Only meaningful while the control bar is actually laid out.
+  if (ui.view !== "playing" || ui.cutMode) return;
+  const controls = document.getElementById("controls");
+  if (!controls || controls.getClientRects().length === 0) return;
+  const left = controls.querySelector<HTMLElement>(".controls__left");
+  const right = controls.querySelector<HTMLElement>(".controls__right");
+  if (!left || !right) return;
+
+  const row = controls.querySelector<HTMLElement>(".controls__row");
+  const center = controls.querySelector<HTMLElement>(".controls__center");
+  if (!row || !center) return;
+
+  measuring = true;
+  const prev = controls.getAttribute("data-overflow");
+  controls.setAttribute("data-overflow", "false"); // force every control inline
+  controls.classList.add("measuring"); // force nowrap so each group is one row
+  // With the groups laid out on a single row (and shrink-to-fit via justify-self)
+  // each offsetWidth is its true content width. If the three groups + the two
+  // column gaps need more than the row can give, a side group would overflow into
+  // the centered transport — so collapse the secondary tools into the ⋯ menu.
+  // (scrollWidth is unreliable here: a flex container does not count children
+  // that overflow under overflow:visible.)
+  const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
+  const needed = left.offsetWidth + center.offsetWidth + right.offsetWidth + 2 * gap;
+  const overflow = needed - row.clientWidth > 1;
+  controls.classList.remove("measuring");
+  if (prev !== null) controls.setAttribute("data-overflow", prev);
+  measuring = false;
+
+  ui.controlsOverflow = overflow;
+  if (!overflow) ui.moreOpen = false; // no menu when nothing is collapsed
+}
+
+function wireControlsOverflow(): void {
+  const controls = document.getElementById("controls");
+  if (controls && "ResizeObserver" in window) {
+    new ResizeObserver(() => requestControlsMeasure()).observe(controls);
+  }
+  window.addEventListener("resize", () => requestControlsMeasure());
+  requestControlsMeasure();
+}
+
 // ---------------------------------------------------------------------------
 // Livestream detection (play-003 / play-005)
 // ---------------------------------------------------------------------------
@@ -2642,6 +2707,7 @@ export function init(): void {
   wireKeyboard();
   wireFocusReturn();
   wireMoreMenu();
+  wireControlsOverflow();
   disableContextMenu();
   wireResize();
   loadPinChapter();

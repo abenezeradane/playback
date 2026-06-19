@@ -30,6 +30,7 @@
     doNextItem,
     toggleShortcuts,
     toggleMore,
+    requestControlsMeasure,
     doTogglePip,
     doToggleFullscreen,
     previewSeek,
@@ -37,6 +38,19 @@
     jumpToTimestamp,
   } from "./controller";
   import { markerFraction, formatTime } from "../player-core";
+
+  // Re-check whether the control bar fits whenever the present button set (queue
+  // prev/next/queue, PiP) or the speed-pill text changes, or when entering the
+  // player. Width changes are handled by a ResizeObserver in the controller. The
+  // ⋯ menu then shows only when the buttons would actually overflow (ui-005).
+  $effect(() => {
+    void ui.view;
+    void ui.cutMode;
+    void ui.queue.length;
+    void ui.pipSupported;
+    void ui.rate;
+    requestControlsMeasure();
+  });
 </script>
 
 <!-- ===================== PLAYER STAGE (frames 02 / 03 / 04) ===================== -->
@@ -108,7 +122,7 @@
   </div>
 
   <!-- Bottom control bar -->
-  <div id="controls" class="controls" data-visible={ui.chromeVisible}>
+  <div id="controls" class="controls" data-visible={ui.chromeVisible} data-overflow={ui.controlsOverflow}>
     <!-- Scrubber -->
     <div class="scrubber">
       <div class="scrubber__track" aria-hidden="true">
