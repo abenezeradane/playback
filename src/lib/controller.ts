@@ -189,6 +189,11 @@ let filmFrames: (HTMLCanvasElement | null)[] = [];
 let filmstripToken = 0;
 let waveformToken = 0;
 let cutScrubbing = false;
+// Deferred cut-deck build (perf-003): the deck media (filmstrip scan + waveform)
+// is only built when the user actually enters the cut view, not eagerly on open.
+let cutDeckPath: string | null = null;
+let cutDeckBuilt = false;
+let cutDeckBuildTimer: number | undefined;
 
 /** Pull the canonical values from the media element into our state object. */
 function syncFromVideo(): void {
@@ -880,9 +885,11 @@ export function setCutMode(on: boolean): void {
     setQueueOpen(false);
     setShortcutsOpen(false);
     setMoreOpen(false);
-    // The deck media is generated in the background on file open; entering the
-    // view just draws whatever is ready so far. Canvases only size once visible,
-    // so (re)draw after the DOM reflects cut mode.
+    // Build the deck media the FIRST time the user actually enters the cut view
+    // (perf-003): opens that never reach it pay nothing. Guarded so toggling the
+    // view on/off never re-scans. Then draw whatever is ready so far — canvases
+    // only size once visible, so (re)draw after the DOM reflects cut mode.
+    buildCutDeck();
     void tick().then(() => {
       drawFilmstrip();
       drawWaveform();
@@ -900,23 +907,51 @@ export function toggleCutMode(): void {
 }
 
 /**
- * Start generating the timeline-view deck media in the BACKGROUND on file open.
+ * Register the timeline-view deck source on file open — but DON'T build it yet
+ * (perf-003). Building the deck means a 12-step serial seek-and-capture scan on a
+ * hidden generator <video> (the filmstrip) plus a native ffmpeg pass (the
+ * waveform) — eager, per-open work that most opens never need, because most opens
+ * never enter the cut view. So both builds are deferred to the first
+ * `setCutMode(true)` for this clip (see `buildCutDeck`). If the user is ALREADY in
+ * the cut view (e.g. auto-advance / Next while reviewing), build right away so the
+ * deck repopulates for the new clip.
+ *
  * `path` is the decodable media source (for TS files this is the remuxed .mp4, not
  * the original); `displayName` is what the deck app bar shows (the user's filename).
  */
 function prepareCutDeck(path: string, displayName: string = basename(path)): void {
+  window.clearTimeout(cutDeckBuildTimer);
+  cutDeckPath = path;
+  cutDeckBuilt = false;
   ui.cutTitle = displayName;
   ui.cutMeta = "";
   resetFpsDetection();
-  const ftoken = ++filmstripToken;
-  const wtoken = ++waveformToken;
+  // Invalidate any in-flight build from a previous clip and reset the deck media.
+  filmstripToken++;
+  waveformToken++;
   filmFrames = new Array(FILMSTRIP_CELLS).fill(null);
   waveformPeaks = [];
   if (ui.cutMode) {
     drawFilmstrip();
     drawWaveform();
+    buildCutDeck();
   }
-  window.setTimeout(() => {
+}
+
+/**
+ * Kick off the deferred deck build (perf-003): the background filmstrip scan + the
+ * native waveform. Guarded by `cutDeckBuilt` so it runs at most once per clip —
+ * toggling the cut view on/off for the same clip never re-scans. No-op until a clip
+ * has been registered via `prepareCutDeck`.
+ */
+function buildCutDeck(): void {
+  if (cutDeckBuilt || cutDeckPath === null) return;
+  cutDeckBuilt = true;
+  const path = cutDeckPath;
+  const ftoken = ++filmstripToken;
+  const wtoken = ++waveformToken;
+  window.clearTimeout(cutDeckBuildTimer);
+  cutDeckBuildTimer = window.setTimeout(() => {
     if (ftoken !== filmstripToken) return;
     void captureFilmstripFromGenerator(path, ftoken);
     void buildWaveform(path, wtoken);
@@ -950,6 +985,9 @@ async function buildWaveform(path: string, token: number): Promise<void> {
 
 /** Clear the deck when returning home / before a new clip. */
 function clearCutDeck(): void {
+  window.clearTimeout(cutDeckBuildTimer);
+  cutDeckPath = null;
+  cutDeckBuilt = false;
   filmstripToken++;
   waveformToken++;
   waveformPeaks = [];
@@ -1126,6 +1164,14 @@ function captureFilmstripFromGenerator(path: string, token: number): Promise<voi
         window.setTimeout(grab, 80);
         return;
       }
+      // Grab as soon as the seeked frame is PRESENTED and its mediaTime matches the
+      // target; if the first presented frame is still the stale pre-seek one, fall
+      // back to an 80 ms settle (the proven play-004 path). Relaxing this settle was
+      // evaluated for perf-003 and rejected: on a PAUSED generator the seeked frame
+      // typically fires rVFC only once, so waiting for a further matching present
+      // stalls to the 2.5 s per-seek safety and leaves the strip half-built — the
+      // existing match fast-path already grabs immediately, so there is no latency to
+      // cut on the common path. Tolerance unchanged ⇒ no duplicate/stale captures.
       rvfc.call(gen, (_now, meta) => {
         if (stale()) return finish();
         if (Math.abs(meta.mediaTime - want) <= tol) grab();
