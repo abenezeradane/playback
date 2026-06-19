@@ -496,6 +496,141 @@ fn read_stream_chunk(
     Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
 }
 
+// ---------------------------------------------------------------------------
+// Cut-view audio waveform (perf-002)
+//
+// The play-004 timeline deck draws a ~240-bar audio waveform. The original
+// implementation read the WHOLE audio-bearing file (capped at 48 MiB) across the
+// IPC bridge as base64 4 MiB chunks, then ran WebAudio `decodeAudioData` over the
+// entire clip in the WebView — an O(file size) CPU + memory spike (~200-400+ MiB
+// transient for a 48 MiB clip) paid on EVERY open, even when the cut view is never
+// shown (perf-001 ranked this the #1 bottleneck). `compute_waveform_peaks` moves
+// that work natively: the bundled ffmpeg sidecar decodes the audio to coarse mono
+// PCM and Rust downsamples it to ONLY the requested ~240 peaks, so the IPC transfer
+// is O(bars) instead of O(file size) and the WebView never holds decoded audio.
+// ---------------------------------------------------------------------------
+
+/// Mono sample rate ffmpeg resamples the audio to before the peak downsample. The
+/// waveform is a coarse ~240-bar loudness envelope, so a low rate keeps the decoded
+/// PCM small (a few MiB for a typical clip, tens of MiB even for a multi-hour movie)
+/// while still leaving each bar hundreds of samples to take a max over. The heavy
+/// decode happens in the ffmpeg subprocess (off the UI thread); only the final
+/// `bars` floats cross the bridge.
+const WAVE_PCM_RATE: u32 = 2000;
+
+/// Clamp the WebView-requested bar count to a positive, sanely-small range (mirrors
+/// `clamp_read_len`'s defensive intent — a hostile/buggy caller can't request a huge
+/// allocation). The real caller always asks for `WAVEFORM_BARS` (240). Pure.
+fn clamp_bars(bars: u32) -> usize {
+    bars.clamp(1, 4096) as usize
+}
+
+/// ffmpeg arguments to decode a file's first audio stream to mono f32 little-endian
+/// raw PCM at `rate` Hz on stdout. `-map 0:a:0?` makes the audio stream optional, so
+/// a video with no audio simply produces no output (the caller then falls back to a
+/// synthesized waveform) instead of being an error condition we must special-case.
+/// Pure + unit-tested.
+fn ffmpeg_waveform_args(src: &Path, rate: u32) -> Vec<String> {
+    vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-i".into(),
+        src.to_string_lossy().into_owned(),
+        "-map".into(),
+        "0:a:0?".into(),
+        "-ac".into(),
+        "1".into(),
+        "-ar".into(),
+        rate.to_string(),
+        "-f".into(),
+        "f32le".into(),
+        "-".into(),
+    ]
+}
+
+/// Reinterpret little-endian f32 PCM bytes as samples (a trailing partial frame, if
+/// any, is ignored). Pure.
+fn pcm_f32le_to_samples(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Peak-amplitude downsample of mono PCM `samples` into `bars` values normalized to
+/// [0, 1] — the max absolute amplitude per evenly-sized bucket, divided by the global
+/// max (floored at 1e-4 so a near-silent track doesn't divide by ~0). This mirrors
+/// the frontend's former `downsamplePeaks` exactly, but runs natively so the WebView
+/// never holds the decoded audio. Pure + unit-tested.
+fn downsample_pcm_peaks(samples: &[f32], bars: usize) -> Vec<f32> {
+    if bars == 0 || samples.is_empty() {
+        return Vec::new();
+    }
+    let per = (samples.len() / bars).max(1);
+    let mut peaks = Vec::with_capacity(bars);
+    let mut max = 1e-4_f32;
+    for i in 0..bars {
+        let start = i * per;
+        let mut peak = 0.0_f32;
+        if start < samples.len() {
+            let end = (start + per).min(samples.len());
+            for &s in &samples[start..end] {
+                let a = s.abs();
+                if a > peak {
+                    peak = a;
+                }
+            }
+        }
+        peaks.push(peak);
+        if peak > max {
+            max = peak;
+        }
+    }
+    peaks.iter().map(|p| p / max).collect()
+}
+
+/// Compute the cut-view audio waveform peaks natively (perf-002). Decodes the file's
+/// audio to coarse mono PCM via the bundled ffmpeg sidecar and returns ONLY `bars`
+/// (~240) normalized peak values — turning the old O(file size) base64 read + WebAudio
+/// decode into an O(bars) transfer with no decoded audio held in the WebView. Returns
+/// an error when the file is unauthorized, has no audio stream, or can't be decoded;
+/// the frontend then falls back to its synthesized placeholder waveform. The source
+/// must already be authorized (the frontend calls `allow_media_dir` on open, the same
+/// gate `read_stream_chunk` uses).
+#[tauri::command]
+async fn compute_waveform_peaks(
+    app: tauri::AppHandle,
+    allow: tauri::State<'_, AllowList>,
+    path: String,
+    bars: u32,
+) -> Result<Vec<f32>, String> {
+    let src = ensure_allowed(&allow, &path)?;
+    let bars = clamp_bars(bars);
+
+    let args = ffmpeg_waveform_args(&src, WAVE_PCM_RATE);
+    let sidecar = app
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+    let output = sidecar
+        .args(args)
+        .output()
+        .await
+        .map_err(|_| "waveform decode failed to start".to_string())?;
+
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err("no decodable audio".to_string());
+    }
+
+    let samples = pcm_f32le_to_samples(&output.stdout);
+    let peaks = downsample_pcm_peaks(&samples, bars);
+    if peaks.is_empty() {
+        return Err("no audio samples".to_string());
+    }
+    Ok(peaks)
+}
+
 /// Video container extensions the folder queue enumerates (play-013). Mirrors the
 /// frontend's `VIDEO_EXTENSIONS` — the natively-decodable containers plus the
 /// MPEG-TS family (.ts/.m2ts/.mts), which the frontend remuxes to .mp4 on open
@@ -585,6 +720,7 @@ pub fn run() {
             allow_media_dir,
             stream_status,
             read_stream_chunk,
+            compute_waveform_peaks,
             remux_ts,
             list_folder_videos,
             get_hwaccel,
@@ -698,6 +834,72 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("/out.mp4"));
         // No transcode flags slipped in (would make a large file slow to open).
         assert!(!joined.contains("libx264"));
+    }
+
+    #[test]
+    fn ffmpeg_waveform_args_decode_first_audio_to_mono_f32le_pcm_on_stdout() {
+        let args = ffmpeg_waveform_args(Path::new("/in.mp4"), 2000);
+        // Input positioned; only the (optional) first audio stream is mapped.
+        assert!(args.windows(2).any(|w| w == ["-i", "/in.mp4"]));
+        assert!(args.windows(2).any(|w| w == ["-map", "0:a:0?"]));
+        // Coarse mono PCM at the requested rate, raw f32le, written to stdout ("-").
+        assert!(args.windows(2).any(|w| w == ["-ac", "1"]));
+        assert!(args.windows(2).any(|w| w == ["-ar", "2000"]));
+        assert!(args.windows(2).any(|w| w == ["-f", "f32le"]));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+        // No re-encode of the video / no transcode codec slipped in.
+        assert!(!args.join(" ").contains("libx264"));
+    }
+
+    #[test]
+    fn clamp_bars_keeps_request_positive_and_bounded() {
+        assert_eq!(clamp_bars(240), 240); // the real caller's request passes through
+        assert_eq!(clamp_bars(0), 1); // never zero (would yield no bars)
+        assert_eq!(clamp_bars(1_000_000), 4096); // a hostile huge request is capped
+    }
+
+    #[test]
+    fn pcm_f32le_to_samples_parses_le_floats_and_drops_partial_frame() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        bytes.extend_from_slice(&(-0.5f32).to_le_bytes());
+        bytes.push(0x00); // a trailing partial frame is ignored
+        let samples = pcm_f32le_to_samples(&bytes);
+        assert_eq!(samples, vec![1.0, -0.5]);
+    }
+
+    #[test]
+    fn downsample_pcm_peaks_takes_normalized_per_bucket_max_abs() {
+        // 4 samples into 2 bars => 2 per bucket; peak is max |sample| per bucket,
+        // normalized by the global max (0.8). Negative amplitudes count by abs.
+        let peaks = downsample_pcm_peaks(&[0.1, 0.4, -0.8, 0.2], 2);
+        assert_eq!(peaks.len(), 2);
+        assert!((peaks[0] - 0.5).abs() < 1e-6); // 0.4 / 0.8
+        assert!((peaks[1] - 1.0).abs() < 1e-6); // 0.8 / 0.8
+    }
+
+    #[test]
+    fn downsample_pcm_peaks_edges_empty_and_more_bars_than_samples() {
+        // No samples or zero bars => empty (the frontend then synthesizes a waveform).
+        assert!(downsample_pcm_peaks(&[], 240).is_empty());
+        assert!(downsample_pcm_peaks(&[0.5, 0.5], 0).is_empty());
+        // More bars than samples: per=1, the extra bars beyond the data are 0, and the
+        // result always has exactly `bars` entries (so the canvas draws every bar).
+        let peaks = downsample_pcm_peaks(&[1.0, 0.5], 4);
+        assert_eq!(peaks.len(), 4);
+        assert!((peaks[0] - 1.0).abs() < 1e-6);
+        assert!((peaks[1] - 0.5).abs() < 1e-6);
+        assert_eq!(peaks[2], 0.0);
+        assert_eq!(peaks[3], 0.0);
+    }
+
+    #[test]
+    fn downsample_pcm_peaks_silent_track_stays_zero_not_nan() {
+        // An all-zero (silent) track must not divide by ~0 — the 1e-4 floor keeps the
+        // peaks at 0 (the frontend treats an all-zero result as "synthesize instead").
+        let peaks = downsample_pcm_peaks(&[0.0; 16], 4);
+        assert_eq!(peaks, vec![0.0, 0.0, 0.0, 0.0]);
+        assert!(peaks.iter().all(|p| p.is_finite()));
     }
 
     #[test]

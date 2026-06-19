@@ -832,7 +832,8 @@ const LIVE_GROWTH_SAMPLE_MS = 400;
 const LIVE_GROWTH_THRESHOLD = 8 * 1024;
 const LIVE_GROWTH_WINDOW_MS = 6_000;
 
-/** Bytes pulled per Rust read_stream_chunk call (used by the cut-view waveform). */
+/** Bytes pulled per Rust read_stream_chunk call (used by the image-viewer animated
+ * decode via readWholeFile; the cut-view waveform now reads peaks natively — perf-002). */
 const READ_CHUNK_BYTES = 4 * 1024 * 1024;
 
 async function tauriInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
@@ -868,7 +869,6 @@ function b64ToBytes(b64: string): Uint8Array {
 // ---------------------------------------------------------------------------
 const FILMSTRIP_CELLS = 12;
 const WAVEFORM_BARS = 240;
-const WAVEFORM_MAX_BYTES = 48 * 1024 * 1024;
 const CUT_DECK_BUILD_DELAY_MS = 350;
 
 /** Enter/leave the timeline view. No-op to enter when no video is loaded. */
@@ -899,16 +899,12 @@ export function toggleCutMode(): void {
   setCutMode(!ui.cutMode);
 }
 
-/** Path of the clip whose deck is being (or has been) built. */
-let cutDeckPath: string | null = null;
-
 /**
  * Start generating the timeline-view deck media in the BACKGROUND on file open.
  * `path` is the decodable media source (for TS files this is the remuxed .mp4, not
  * the original); `displayName` is what the deck app bar shows (the user's filename).
  */
 function prepareCutDeck(path: string, displayName: string = basename(path)): void {
-  cutDeckPath = path;
   ui.cutTitle = displayName;
   ui.cutMeta = "";
   resetFpsDetection();
@@ -927,22 +923,28 @@ function prepareCutDeck(path: string, displayName: string = basename(path)): voi
   }, CUT_DECK_BUILD_DELAY_MS);
 }
 
-/** Decode the clip's audio into waveform peaks in the background. */
+/**
+ * Build the clip's waveform peaks in the background (perf-002).
+ *
+ * The heavy work — decoding the whole audio track — now happens NATIVELY in the
+ * ffmpeg sidecar (`compute_waveform_peaks`), which returns ONLY the WAVEFORM_BARS
+ * downsampled peaks. So the WebView no longer reads the whole file over
+ * `read_stream_chunk`, base64-decodes it, copies it twice, or runs `decodeAudioData`
+ * over the entire clip — opening a file no longer costs O(file size) CPU + memory.
+ * The 48 MiB size cap is gone too: a large clip that used to fall back to the
+ * synthesized waveform now shows a real one. If the native call fails (no audio,
+ * undecodable, or not under Tauri) we keep the synthesized placeholder.
+ */
 async function buildWaveform(path: string, token: number): Promise<void> {
-  try {
-    const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
-    const size = status ? status.size : 0;
-    if (size > 0 && size <= WAVEFORM_MAX_BYTES) {
-      const bytes = await readWholeFile(path, size);
-      if (token !== waveformToken) return;
-      await decodeWaveform(bytes, token);
-      return;
-    }
-  } catch {
-    /* fall through to the synthesized waveform */
-  }
+  const peaks = await tauriInvoke<number[]>("compute_waveform_peaks", {
+    path,
+    bars: WAVEFORM_BARS,
+  }).catch(() => null);
   if (token !== waveformToken) return;
-  waveformPeaks = synthPeaks(path, WAVEFORM_BARS);
+  waveformPeaks =
+    peaks && peaks.length > 0 && peaks.some((p) => p > 0)
+      ? peaks
+      : synthPeaks(path, WAVEFORM_BARS);
   drawWaveform();
 }
 
@@ -952,7 +954,6 @@ function clearCutDeck(): void {
   waveformToken++;
   waveformPeaks = [];
   filmFrames = [];
-  cutDeckPath = null;
   cutGen.pause();
   cutGen.removeAttribute("src");
   cutGen.load();
@@ -1191,27 +1192,6 @@ async function readWholeFile(path: string, size: number): Promise<Uint8Array> {
   return out;
 }
 
-/** Peak-amplitude downsample of an AudioBuffer into `bars` normalized values. */
-function downsamplePeaks(buf: AudioBuffer, bars: number): number[] {
-  const ch = buf.getChannelData(0);
-  const n = ch.length;
-  const per = Math.max(1, Math.floor(n / bars));
-  const peaks: number[] = [];
-  let max = 1e-4;
-  for (let i = 0; i < bars; i++) {
-    const start = i * per;
-    const end = Math.min(n, start + per);
-    let peak = 0;
-    for (let j = start; j < end; j++) {
-      const a = Math.abs(ch[j]);
-      if (a > peak) peak = a;
-    }
-    peaks.push(peak);
-    if (peak > max) max = peak;
-  }
-  return peaks.map((p) => p / max);
-}
-
 /** Deterministic fallback waveform (from the path) when audio can't be decoded. */
 function synthPeaks(seed: string, bars: number): number[] {
   let h = 2166136261;
@@ -1225,29 +1205,6 @@ function synthPeaks(seed: string, bars: number): number[] {
     peaks.push(Math.min(1, (0.3 + r * 0.7) * env));
   }
   return peaks;
-}
-
-/** Decode the real audio track from already-read bytes into waveform peaks. */
-async function decodeWaveform(bytes: Uint8Array, token: number): Promise<void> {
-  let peaks: number[] | null = null;
-  try {
-    const Ctx =
-      window.AudioContext ??
-      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    const audioCtx = new Ctx();
-    try {
-      const decoded = await audioCtx.decodeAudioData(bytes.buffer.slice(0) as ArrayBuffer);
-      if (token === waveformToken) peaks = downsamplePeaks(decoded, WAVEFORM_BARS);
-    } finally {
-      void audioCtx.close();
-    }
-  } catch {
-    peaks = null;
-  }
-  if (token !== waveformToken) return;
-  if (!peaks || peaks.every((p) => p === 0)) peaks = synthPeaks(cutDeckPath ?? "", WAVEFORM_BARS);
-  waveformPeaks = peaks;
-  drawWaveform();
 }
 
 /** Paint the cached waveform peaks onto the (display-sized) canvas. */
