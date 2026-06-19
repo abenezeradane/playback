@@ -39,16 +39,18 @@
   } from "./controller";
   import { markerFraction, formatTime } from "../player-core";
 
-  // Re-check whether the control bar fits whenever the present button set (queue
-  // prev/next/queue, PiP) or the speed-pill text changes, or when entering the
-  // player. Width changes are handled by a ResizeObserver in the controller. The
-  // ⋯ menu then shows only when the buttons would actually overflow (ui-005).
+  // Re-check whether the control bars fit whenever the present button set (queue
+  // prev/next/queue, PiP), the speed-pill text, the cut-view fps label, or the
+  // active view/mode changes. Width changes are handled by a ResizeObserver in the
+  // controller. The ⋯ menu then shows only when controls would actually overflow —
+  // on both the standard player bar and the timeline-view transport (ui-005).
   $effect(() => {
     void ui.view;
     void ui.cutMode;
     void ui.queue.length;
     void ui.pipSupported;
     void ui.rate;
+    void ui.fpsLabel;
     requestControlsMeasure();
   });
 </script>

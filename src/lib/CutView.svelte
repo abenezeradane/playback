@@ -14,6 +14,7 @@
     doCycleRate,
     doToggleMute,
     doSetVolume,
+    toggleMore,
     cutPointerDown,
     cutPointerMove,
     cutPointerUp,
@@ -25,6 +26,8 @@
      #video sits in the central viewer (positioned via CSS in cut mode); this
      adds the app bar and the bottom Timeline Deck + transport. -->
 <section id="cut" class="cut" data-loop={ui.loopOn} data-shuttle="stopped" hidden={!ui.cutMode}>
+  <!-- (transport collapse level is set imperatively on .cut__transport by the
+       controller's measurement — see measureControlsOverflow, ui-005) -->
   <!-- App bar -->
   <header class="cut__appbar" data-tauri-drag-region>
     <button id="cut-back" class="glass-btn" type="button" title="Back to library" onclick={goHome}>
@@ -78,8 +81,9 @@
       <div id="cut-playhead" class="cut__playhead" aria-hidden="true" style:left="{ui.playheadPct}%"><span class="cut__playhead-cap"></span></div>
     </div>
 
-    <!-- Transport -->
-    <div class="cut__transport">
+    <!-- Transport. A non-wrapping flex row; data-collapse (0/1/2) is set by the
+         controller's measurement so it never wraps/overflows (ui-005). -->
+    <div class="cut__transport" data-collapse="0">
       <div class="cut__tc">
         <span id="cut-tc-cur" class="cut__tc-cur">{ui.smpteCur}</span>
         <span class="cut__tc-sep">/</span>
@@ -109,14 +113,40 @@
 
       <div class="cut__options">
         <span class="cut__shuttle-hint" aria-hidden="true">SHUTTLE <kbd class="kbd">J</kbd><kbd class="kbd">K</kbd><kbd class="kbd">L</kbd></span>
-        <button id="cut-loop" class="cut__opt" type="button" aria-pressed={ui.loopOn} title="Loop playback" onclick={toggleLoop}>
-          <svg class="ic" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" /><path d="m7 22-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" /></svg>
+
+        <!-- Overflow "More" toggle: shown only when the transport must collapse. -->
+        <button
+          id="cut-more"
+          class="cut__opt cut__more-toggle"
+          type="button"
+          title="More controls"
+          aria-haspopup="menu"
+          aria-expanded={ui.moreOpen}
+          aria-pressed={ui.moreOpen}
+          onclick={toggleMore}
+        >
+          <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="12" cy="19" r="1.6" /></svg>
         </button>
-        <button id="cut-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed" onclick={doCycleRate}>{ui.rate}&times;</button>
-        <button id="cut-mute" class="cut__opt" type="button" data-muted={ui.muted0} title="Mute (M)" onclick={doToggleMute}>
-          <svg class="ic ic-vol" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></svg>
-          <svg class="ic ic-muted" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="22" x2="16" y1="9" y2="15" /><line x1="16" x2="22" y1="9" y2="15" /></svg>
-        </button>
+
+        <!-- Secondary options. Inline on a wide bar (display:contents); they
+             relocate into this ⋯ popover when the transport is too narrow. -->
+        <div class="cut__more" data-open={ui.moreOpen} role="menu" aria-label="More controls">
+          <button id="cut-loop" class="cut__opt" type="button" aria-pressed={ui.loopOn} title="Loop playback" onclick={toggleLoop}>
+            <svg class="ic" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14" /><path d="m7 22-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" /></svg>
+            <span class="cut__more-label">Loop (R)</span>
+          </button>
+          <button id="cut-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed" onclick={doCycleRate}>
+            <svg class="ic ic--more-only" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 14 4-4" /><path d="M3.34 19a10 10 0 1 1 17.32 0" /></svg>
+            <span class="cut__more-label">Playback speed</span>
+            <span class="rate-val">{ui.rate}&times;</span>
+          </button>
+          <button id="cut-mute" class="cut__opt" type="button" data-muted={ui.muted0} title="Mute (M)" onclick={doToggleMute}>
+            <svg class="ic ic-vol" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></svg>
+            <svg class="ic ic-muted" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="22" x2="16" y1="9" y2="15" /><line x1="16" x2="22" y1="9" y2="15" /></svg>
+            <span class="cut__more-label">Mute (M)</span>
+          </button>
+        </div>
+
         <input id="cut-volume" class="volume__range" type="range" min="0" max="100" value={ui.volumeValue} step="1" aria-label="Volume" oninput={(e) => doSetVolume(Number(e.currentTarget.value))} />
       </div>
     </div>

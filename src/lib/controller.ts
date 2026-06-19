@@ -749,10 +749,11 @@ export function toggleMore(): void {
   setMoreOpen(!ui.moreOpen);
 }
 
-// Progressive overflow: collapse to the SMALLEST level whose layout fits the
-// one-row flex bar, so it shows as many controls as fit and never wraps.
-//   0 = everything inline       1 = secondary tools in the ⋯ menu
-//   2 = level 1 + volume slider dropped (the floor — always fits at the 640px min)
+// Progressive overflow: collapse a one-row flex control bar to the SMALLEST level
+// whose layout fits, so it shows as many controls as fit and never wraps. The same
+// engine drives BOTH the standard player bar (#controls) and the timeline-view
+// transport (.cut__transport) — each lays out three flex groups on a non-wrapping
+// row, and `data-collapse` (0/1/2) is the CSS hook for what each level hides.
 let measureScheduled = false;
 let measuring = false;
 
@@ -768,55 +769,69 @@ export function requestControlsMeasure(): void {
   });
 }
 
-function measureControlsOverflow(): void {
-  if (measuring) return;
-  // Only meaningful while the control bar is actually laid out.
-  if (ui.view !== "playing" || ui.cutMode) return;
-  const controls = document.getElementById("controls");
-  if (!controls || controls.getClientRects().length === 0) return;
-  const left = controls.querySelector<HTMLElement>(".controls__left");
-  const right = controls.querySelector<HTMLElement>(".controls__right");
-  const row = controls.querySelector<HTMLElement>(".controls__row");
-  const center = controls.querySelector<HTMLElement>(".controls__center");
-  if (!left || !right || !row || !center) return;
-
-  measuring = true;
+/**
+ * Fit one non-wrapping flex bar: try collapse levels 0..maxLevel and KEEP the
+ * smallest whose groups (the row's children) + the inter-group gaps fit the row
+ * width. The groups never shrink (flex:0 0 auto), so each offsetWidth is the true
+ * content width at the level being tried (the level CSS hides the collapsed
+ * controls). The decision is written DIRECTLY to the DOM (`scope`'s data-collapse)
+ * rather than via a Svelte binding, whose render flush is async and lags while the
+ * window is not foreground — a direct write is synchronous and never overwritten.
+ * Returns the chosen level. `maxLevel` is the floor (assumed to fit at the 640px
+ * minimum window).
+ */
+function fitBar(scope: HTMLElement, row: HTMLElement, maxLevel: number): number {
   const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
-  // The row is a non-wrapping flex line, so the three groups never drop to a
-  // second row; the question is only whether their content + the two gaps fit the
-  // row width. The groups never shrink (flex:0 0 auto), so each offsetWidth is the
-  // true content width at the level being tried (the level CSS hides the collapsed
-  // buttons / the volume slider). Level 2 is the floor and always fits at the
-  // 640px minimum, so it is used when nothing smaller fits.
-  const MAX_LEVEL = 2;
-  let level = MAX_LEVEL;
-  for (let l = 0; l < MAX_LEVEL; l++) {
-    controls.setAttribute("data-collapse", String(l));
-    const needed = left.offsetWidth + center.offsetWidth + right.offsetWidth + 2 * gap;
+  const groups = Array.from(row.children) as HTMLElement[];
+  let level = maxLevel;
+  for (let l = 0; l < maxLevel; l++) {
+    scope.setAttribute("data-collapse", String(l));
+    let needed = gap * Math.max(0, groups.length - 1);
+    for (const g of groups) needed += g.offsetWidth;
     if (needed - row.clientWidth <= 1) {
       level = l;
       break;
     }
   }
-  // Apply the decision DIRECTLY to the DOM rather than via a Svelte binding: the
-  // framework's render flush is async (and lags while the window is not
-  // foreground), which would leave the bar in a stale (wrapped/overflowing) state.
-  // A direct attribute write takes effect synchronously and is never overwritten.
-  controls.setAttribute("data-collapse", String(level));
-  measuring = false;
+  scope.setAttribute("data-collapse", String(level));
+  return level;
+}
 
-  ui.controlsOverflow = level > 0;
-  if (level === 0) ui.moreOpen = false; // no menu when nothing is collapsed
+function measureControlsOverflow(): void {
+  if (measuring) return;
+  if (ui.view !== "playing") return;
+  measuring = true;
+
+  // Standard player bar (hidden in cut mode -> getClientRects() empty -> skipped).
+  const controls = document.getElementById("controls");
+  const row = controls?.querySelector<HTMLElement>(".controls__row");
+  if (controls && row && controls.getClientRects().length > 0) {
+    const level = fitBar(controls, row, 2);
+    ui.controlsOverflow = level > 0;
+    if (level === 0) ui.moreOpen = false;
+  }
+
+  // Timeline-view transport (hidden outside cut mode -> getClientRects() empty).
+  const cut = document.querySelector<HTMLElement>(".cut__transport");
+  if (cut && cut.getClientRects().length > 0) {
+    const level = fitBar(cut, cut, 2);
+    if (level === 0) ui.moreOpen = false;
+  }
+
+  measuring = false;
 }
 
 function wireControlsOverflow(): void {
-  const controls = document.getElementById("controls");
-  if (controls && "ResizeObserver" in window) {
-    new ResizeObserver(() => requestControlsMeasure()).observe(controls);
+  if ("ResizeObserver" in window) {
+    const ro = new ResizeObserver(() => requestControlsMeasure());
+    const controls = document.getElementById("controls");
+    if (controls) ro.observe(controls);
+    const cut = document.getElementById("cut");
+    if (cut) ro.observe(cut);
   }
   window.addEventListener("resize", () => requestControlsMeasure());
-  // Re-measure once webfonts land: a font swap changes the button text widths but
-  // not the #controls box, so the ResizeObserver alone would miss it.
+  // Re-measure once webfonts land: a font swap changes the button/label text
+  // widths but not the bar's box, so the ResizeObserver alone would miss it.
   document.fonts?.ready.then(() => requestControlsMeasure());
   requestControlsMeasure();
 }
@@ -2456,7 +2471,8 @@ function wireMoreMenu(): void {
   document.addEventListener("click", (e) => {
     if (!ui.moreOpen) return;
     const t = e.target as HTMLElement | null;
-    if (t && t.closest("#btn-more")) return; // the toggle manages its own state
+    // The toggles (player + timeline view) manage their own open state.
+    if (t && (t.closest("#btn-more") || t.closest("#cut-more"))) return;
     setMoreOpen(false);
   });
 }
