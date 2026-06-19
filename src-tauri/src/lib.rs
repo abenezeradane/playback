@@ -28,11 +28,20 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
 
 /// Holds a media path supplied on the command line, if any.
 struct LaunchPath(Option<String>);
+
+/// Pick the file path passed on a command line ("Open with…" / `playback.exe
+/// <file>`): the first non-flag argument, skipping the program name in `args[0]`.
+/// Shared by the startup launch parse and the single-instance handler (a second
+/// invocation forwards its whole argv here), so both agree on which token is the
+/// file. Pure (no env/IO) → unit-testable.
+fn first_file_arg(args: &[String]) -> Option<String> {
+    args.iter().skip(1).find(|a| !a.starts_with('-')).cloned()
+}
 
 /// Bundle identifier — must match `tauri.conf.json` `identifier`. Used to locate
 /// the per-user config directory where the hardware-acceleration preference is
@@ -703,7 +712,7 @@ fn list_folder_videos_impl(allow: &AllowList, path: &str) -> Result<Vec<String>,
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // First non-flag argument is treated as a file to open.
-    let launch = std::env::args().skip(1).find(|a| !a.starts_with('-'));
+    let launch = first_file_arg(&std::env::args().collect::<Vec<_>>());
 
     // play-010: set the WebView2 GPU launch flag from the saved preference BEFORE
     // the webview is created (the flag is fixed at creation time). No-op unless the
@@ -711,6 +720,25 @@ pub fn run() {
     apply_hwaccel_launch_flag();
 
     tauri::Builder::default()
+        // play-019: run as a SINGLE instance. Without this, double-clicking a video
+        // ("Open with…") while Playback is already open spawned a SECOND process +
+        // window; that second instance wrote the file to the shared localStorage
+        // recents, but the already-open window never re-read it, so the recently-
+        // played list only updated after closing and relaunching. With the plugin,
+        // a second invocation is routed HERE instead of spawning a window: we focus
+        // the existing window and forward the file path to the WebView, which loads
+        // it through the same funnel as every other open — so recents (and the
+        // player) update live. NOTE: must be the FIRST plugin registered.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+            if let Some(path) = first_file_arg(&argv) {
+                let _ = app.emit("open-file", path);
+            }
+        }))
         .manage(LaunchPath(launch))
         .manage(AllowList::default())
         .plugin(tauri_plugin_dialog::init())
@@ -997,6 +1025,27 @@ mod tests {
         assert!(!read_hwaccel_pref());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn first_file_arg_skips_program_name_and_flags() {
+        let s = |a: &str| a.to_string();
+        // Program name only -> no file (a plain launch shows the home screen).
+        assert_eq!(first_file_arg(&[s("playback.exe")]), None);
+        // The first non-flag arg after argv[0] is the file ("Open with…").
+        assert_eq!(
+            first_file_arg(&[s("playback.exe"), s("C:\\Videos\\clip.mp4")]),
+            Some("C:\\Videos\\clip.mp4".to_string())
+        );
+        // Leading flags are skipped; the first non-flag token wins.
+        assert_eq!(
+            first_file_arg(&[s("playback.exe"), s("--flag"), s("clip.mp4"), s("other.mp4")]),
+            Some("clip.mp4".to_string())
+        );
+        // All flags -> no file (e.g. a single-instance relaunch with only switches).
+        assert_eq!(first_file_arg(&[s("playback.exe"), s("--flag")]), None);
+        // Empty argv (defensive) -> no file.
+        assert_eq!(first_file_arg(&[]), None);
     }
 
     #[test]

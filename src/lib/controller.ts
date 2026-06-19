@@ -2779,6 +2779,27 @@ async function loadLaunchFile(): Promise<void> {
   }
 }
 
+/**
+ * play-019: the app runs as a single instance. When the user opens another file
+ * while it's already running ("Open with…" / double-click), the native shell
+ * focuses this window and emits `open-file` with that path instead of spawning a
+ * second window. Loading it through the same loadFromPath funnel means addRecent
+ * runs in THIS (the live) window, so the recently-played list updates immediately
+ * — the bug was that a second instance wrote recents to shared localStorage that
+ * the running window never re-read (they only appeared after a relaunch).
+ */
+async function wireSecondInstance(): Promise<void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen<string>("open-file", (event) => {
+      const path = event.payload;
+      if (path) void loadFromPath(path);
+    });
+  } catch {
+    /* Not running under Tauri — single-instance forwarding is unavailable. */
+  }
+}
+
 /** The deck canvases are display-sized — repaint them when the window resizes. */
 function wireResize(): void {
   window.addEventListener("resize", () => {
@@ -2825,6 +2846,7 @@ export function init(): void {
   void loadHwaccel();
   void registerDragAndDrop();
   void loadLaunchFile();
+  void wireSecondInstance();
   renderRecents();
   renderPlaylists();
   renderTimestamps();
