@@ -1,13 +1,26 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
   import { confirmNextPrompt, closeNextPrompt } from "./controller";
+
+  // Any open side panel / overlay / popover should COVER the prompt — the user
+  // can't act on a card hidden behind a panel, and the queue panel + the ⋯ menu
+  // share the prompt's bottom-right corner at the same z-index. The prompt stays
+  // pending in state and reappears once the panel closes.
+  const covered = $derived(
+    ui.panelOpen ||
+      ui.queueOpen ||
+      ui.settingsOpen ||
+      ui.shortcutsOpen ||
+      ui.playlistEditorOpen ||
+      ui.moreOpen,
+  );
 </script>
 
 <!-- End-of-video "Up Next" prompt (play-018). Shown when a queue item ends while
      autoplay is OFF (the default): instead of auto-advancing, ask the user whether
      to play the next clip. Enter confirms / Esc dismisses (wired in the keyboard
      handler); the autoplay toggle in the queue panel skips this prompt entirely. -->
-{#if ui.nextPromptOpen}
+{#if ui.nextPromptOpen && !covered}
   <div id="next-prompt" class="next-prompt" role="dialog" aria-label="Play next video" aria-live="polite">
     <div class="next-prompt__card">
       <p class="next-prompt__label">UP NEXT</p>
