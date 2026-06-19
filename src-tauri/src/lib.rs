@@ -53,6 +53,17 @@ fn path_within_roots(roots: &HashSet<PathBuf>, candidate: &Path) -> bool {
     roots.iter().any(|root| candidate.starts_with(root))
 }
 
+/// Log a command's underlying error natively (for diagnostics) and return a
+/// stable, generic message for the WebView (sec-005 / F-5). Raw OS error strings
+/// can embed absolute paths and system detail (e.g. "The system cannot find the
+/// path … C:\Users\<name>\…"); forwarding them across the IPC boundary is a minor
+/// info-leak / fingerprinting hygiene issue. The `detail` stays on the native side
+/// (stderr); only the stable `public` string crosses to the WebView.
+fn ipc_error(context: &str, detail: impl std::fmt::Display, public: &str) -> String {
+    eprintln!("[playback] {context}: {detail}");
+    public.to_string()
+}
+
 /// Canonicalize `path` and confirm it lands inside the allow-list, returning a
 /// generic error otherwise. This is the single security gate shared by the two
 /// file-reading commands.
@@ -310,7 +321,8 @@ async fn remux_ts(
 #[tauri::command]
 fn stream_status(allow: tauri::State<'_, AllowList>, path: String) -> Result<StreamStatus, String> {
     ensure_allowed(&allow, &path)?;
-    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    let meta =
+        fs::metadata(&path).map_err(|e| ipc_error("stream_status: metadata", e, "file not found"))?;
     let size = meta.len();
     let live = Path::new(&format!("{path}.live")).exists();
     let complete = Path::new(&format!("{path}.done")).exists();
@@ -353,15 +365,21 @@ fn read_stream_chunk(
     max_len: u64,
 ) -> Result<String, String> {
     ensure_allowed(&allow, &path)?;
-    let mut file = fs::File::open(&path).map_err(|e| e.to_string())?;
-    let size = file.metadata().map_err(|e| e.to_string())?.len();
+    let mut file =
+        fs::File::open(&path).map_err(|e| ipc_error("read_stream_chunk: open", e, "read failed"))?;
+    let size = file
+        .metadata()
+        .map_err(|e| ipc_error("read_stream_chunk: metadata", e, "read failed"))?
+        .len();
     if offset >= size {
         return Ok(String::new());
     }
     let read_len = clamp_read_len(size - offset, max_len);
-    file.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|e| ipc_error("read_stream_chunk: seek", e, "read failed"))?;
     let mut buf = vec![0u8; read_len];
-    file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+    file.read_exact(&mut buf)
+        .map_err(|e| ipc_error("read_stream_chunk: read", e, "read failed"))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
 }
 
@@ -504,6 +522,28 @@ mod tests {
             Err("path not allowed".to_string())
         );
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ipc_error_returns_generic_string_not_raw_os_detail() {
+        // A raw OS error embedding an absolute path is exactly what F-5 says must
+        // not cross the IPC boundary. ipc_error must hand the WebView only the
+        // stable generic string — never the path-bearing detail.
+        let detail = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "The system cannot find the path specified: C:\\Users\\Abenezer\\secret\\id_rsa",
+        );
+        let msg = ipc_error("read_stream_chunk: open", detail, "read failed");
+        assert_eq!(msg, "read failed");
+        // No absolute path or username leaks through.
+        assert!(!msg.contains("C:\\"));
+        assert!(!msg.contains("Abenezer"));
+        assert!(!msg.contains("secret"));
+        // The other generic string the commands use is likewise pass-through-clean.
+        assert_eq!(
+            ipc_error("stream_status: metadata", "raw os detail", "file not found"),
+            "file not found"
+        );
     }
 
     #[test]
