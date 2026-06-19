@@ -121,10 +121,11 @@
     <span id="now-chapter-label" class="now-chapter__label">{ui.nowChapter?.label ?? ""}</span>
   </div>
 
-  <!-- Bottom control bar. data-overflow is owned imperatively by the controller's
-       measurement (controller.ts measureControlsOverflow), NOT bound here, so the
-       collapse applies synchronously and never lags the async render flush. -->
-  <div id="controls" class="controls" data-visible={ui.chromeVisible}>
+  <!-- Bottom control bar. data-collapse (0/1/2) is owned imperatively by the
+       controller's measurement (controller.ts measureControlsOverflow), NOT bound
+       here, so the collapse applies synchronously and never lags the async render
+       flush. Default 0 = everything inline until the first measure. -->
+  <div id="controls" class="controls" data-visible={ui.chromeVisible} data-collapse="0">
     <!-- Scrubber -->
     <div class="scrubber">
       <div class="scrubber__track" aria-hidden="true">

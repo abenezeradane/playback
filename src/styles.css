@@ -1146,51 +1146,42 @@ body {
   color: var(--mute);
 }
 
-/* Controls row: left (transport handled below) · center · right.
-   A 1fr·auto·1fr grid keeps the transport centered. The side groups carry
-   `flex-wrap` and their children never shrink (see the rule below), so if a side
-   group is ever wider than its track it WRAPS within the track instead of
-   overflowing into the centered transport — a hard guarantee that the buttons
-   can never overlap, at any width (ui-005). The overflow menu keeps that wrap
-   from triggering at sane sizes. */
+/* Controls row: left (transport · volume · time) · center (transport) · right
+   (actions). A single flex row with NO wrapping anywhere — combined with the
+   non-shrinking groups/items below, nothing can ever drop to a second row. When
+   the content would not fit, the controller collapses the right group's secondary
+   tools into the ⋯ menu (and, if still needed, drops the volume slider) until it
+   does — so the bar is always exactly one row and never overlaps (ui-005). */
 .controls__row {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
 }
 
 .controls__left {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  row-gap: 8px;
-  justify-self: start;
-  min-width: 0;
 }
 
 .controls__center {
   display: flex;
   align-items: center;
   gap: 6px;
-  justify-self: center;
 }
 
 .controls__right {
   position: relative; /* anchor for the .controls__more popover */
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  row-gap: 8px;
-  justify-self: end;
-  min-width: 0;
 }
 
-/* Control-bar items keep their size — they never squish into one another. With
-   the wrapping side groups above, this makes overlap structurally impossible. */
+/* The three groups and every control keep their size — they never shrink or wrap,
+   so the only way to make room is to collapse controls into the ⋯ menu. */
+.controls__row > *,
 .controls__left > *,
 .controls__center > *,
 .controls__right > *,
@@ -3028,19 +3019,20 @@ button.shortcuts__backdrop {
 /* Responsive                                                            */
 /* ===================================================================== */
 
-/* When the bar can't fit every control on one row, the secondary tools (speed,
-   A-B loop, loop, timeline, PiP, shortcuts) relocate from the right group into
-   the ⋯ popover (ui-005). The transport, mute/time, chapters, queue and
-   fullscreen stay on the bar — the controls reached most often while watching.
-   Every collapsed action is still one click away in the menu (and still has its
-   hotkey). `data-overflow` is set by JS (controller.ts measureControlsOverflow):
-   the ⋯ is shown ONLY when the buttons would otherwise overflow, so a roomy bar
-   keeps everything inline regardless of the exact window width. */
-.controls[data-overflow="true"] .controls__more-toggle {
+/* Progressive overflow collapse (ui-005). `data-collapse` is set by JS
+   (controller.ts measureControlsOverflow) to the SMALLEST level whose layout fits
+   the one-row flex bar, so it shows as many controls as fit and NEVER wraps:
+     0 = everything inline (no ⋯)
+     1 = secondary tools (speed, A-B, loop, timeline, PiP, shortcuts) in the ⋯ menu
+     2 = level 1 + the volume slider dropped (mute + ↑/↓ keys remain)
+   The transport, mute/time, chapters, queue and fullscreen always stay on the bar
+   — they fit even at the 640px minimum. Every collapsed action is still one click
+   away in the menu (and still has its hotkey). */
+.controls:not([data-collapse="0"]) .controls__more-toggle {
   display: inline-flex;
 }
 
-.controls[data-overflow="true"] .controls__more {
+.controls:not([data-collapse="0"]) .controls__more {
   position: absolute;
   right: 0;
   bottom: calc(100% + 12px);
@@ -3058,16 +3050,21 @@ button.shortcuts__backdrop {
 }
 
 /* Closed: out of flow entirely. Open: a column popover. */
-.controls[data-overflow="true"] .controls__more:not([data-open="true"]) {
+.controls:not([data-collapse="0"]) .controls__more:not([data-open="true"]) {
   display: none;
 }
-.controls[data-overflow="true"] .controls__more[data-open="true"] {
+.controls:not([data-collapse="0"]) .controls__more[data-open="true"] {
   display: flex;
 }
 
+/* Level 2: drop the volume slider so the left group can't overflow. */
+.controls[data-collapse="2"] .volume__range {
+  display: none;
+}
+
 /* Popover rows: full-width, left-aligned glyph + label. */
-.controls[data-overflow="true"] .controls__more .iconbtn,
-.controls[data-overflow="true"] .controls__more .pill {
+.controls:not([data-collapse="0"]) .controls__more .iconbtn,
+.controls:not([data-collapse="0"]) .controls__more .pill {
   width: 100%;
   height: 40px;
   justify-content: flex-start;
@@ -3076,31 +3073,31 @@ button.shortcuts__backdrop {
   border-radius: var(--radius-md);
   color: var(--on-dark);
 }
-.controls[data-overflow="true"] .controls__more .iconbtn:hover,
-.controls[data-overflow="true"] .controls__more .pill:hover {
+.controls:not([data-collapse="0"]) .controls__more .iconbtn:hover,
+.controls:not([data-collapse="0"]) .controls__more .pill:hover {
   background: var(--hairline-soft);
 }
 /* The speed pill becomes a normal row: gauge + label + the current value. */
-.controls[data-overflow="true"] .controls__more .pill {
+.controls:not([data-collapse="0"]) .controls__more .pill {
   background: transparent;
   border: 0;
   font-size: 13px;
   font-weight: 500;
 }
-.controls[data-overflow="true"] .controls__more #btn-rate .ic--more-only {
+.controls:not([data-collapse="0"]) .controls__more #btn-rate .ic--more-only {
   display: block;
 }
-.controls[data-overflow="true"] .controls__more #btn-rate .rate-val {
+.controls:not([data-collapse="0"]) .controls__more #btn-rate .rate-val {
   margin-left: auto;
   color: var(--mute);
   font-variant-numeric: tabular-nums;
 }
-.controls[data-overflow="true"] .controls__more .loopbtn__glyph {
+.controls:not([data-collapse="0"]) .controls__more .loopbtn__glyph {
   width: 20px;
   text-align: center;
   flex: 0 0 auto;
 }
-.controls[data-overflow="true"] .controls__more .iconbtn__more-label {
+.controls:not([data-collapse="0"]) .controls__more .iconbtn__more-label {
   display: inline;
   font-size: 13px;
   font-weight: 500;
@@ -3108,23 +3105,10 @@ button.shortcuts__backdrop {
   white-space: nowrap;
 }
 
-/* Measuring pass (controller.ts): the bar is forced fully-expanded and no-wrap so
-   each group lays out on a single row and its offsetWidth is its true content
-   width; the controller sums them against the row width to decide whether to
-   collapse. Applied synchronously and removed before paint — never visible. */
-.controls.measuring .controls__left,
-.controls.measuring .controls__right {
-  flex-wrap: nowrap;
-}
-
-/* Below ~720px the volume slider is dropped (mute + the ↑/↓ keys remain) and the
-   gaps/secondary buttons tighten, so the bar stays on one row down to the 640px
-   minimum window width even with a folder queue present (prev/next/queue) — the
-   wrap safety net never has to trigger in normal use (ui-005). */
+/* Below ~720px the gaps/secondary buttons tighten, giving the measurement more
+   room to keep controls inline before it has to collapse. (The volume slider is
+   dropped by collapse level 2 above, not here, so it stays visible when it fits.) */
 @media (max-width: 720px) {
-  .volume__range {
-    display: none;
-  }
   .controls__row {
     gap: 8px;
   }
