@@ -657,6 +657,152 @@ body {
   font-size: 14px;
 }
 
+/* Playlists (user-created, saved; play-014) — mirrors the Recent section. */
+.playlists {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.playlists__new {
+  /* Reuses .recent__clear (mute text + icon); the "+" reads as an add action. */
+}
+
+.playlists__cards {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+/* A playlist card: an "open" button (thumb + name + count) plus hover actions. */
+.pl-card {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.pl-card:hover {
+  border-color: var(--hairline-strong);
+  background: var(--surface-elevated);
+}
+
+.pl-card__open {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-lg);
+}
+
+.pl-card__thumb {
+  flex: 0 0 auto;
+  position: relative;
+  width: 54px;
+  height: 54px;
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+  border: 1px solid var(--hairline);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--charcoal);
+  font-size: 20px;
+}
+
+.pl-card__count {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  background: var(--ink);
+  color: var(--canvas);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pl-card__meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pl-card__name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pl-card__sub {
+  font-size: 12px;
+  color: var(--mute);
+}
+
+.pl-card__actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding-right: 8px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.pl-card:hover .pl-card__actions,
+.pl-card:focus-within .pl-card__actions {
+  opacity: 1;
+}
+
+.pl-card__act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ash);
+  cursor: pointer;
+  font-size: 13px;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.pl-card__act:hover {
+  color: var(--ink);
+  background: var(--surface-card);
+}
+
+.pl-card__act--danger:hover {
+  color: var(--warning);
+}
+
 /* Drag-over affordance. */
 .app[data-dragover="true"] .home-hero {
   border-color: var(--hairline-strong);
@@ -2160,6 +2306,203 @@ body {
   flex: 0 0 auto;
   font-size: 15px;
   color: var(--mute);
+}
+
+/* ---- Playlist editor (play-014) — reuses the .shortcuts overlay chrome ---- */
+/* Top-anchor this overlay (the shared .shortcuts container centers): the editor
+   grows downward as items are added, so the head + add zone keep a stable position. */
+#playlist-editor {
+  align-items: flex-start;
+}
+
+.pl-editor {
+  width: min(560px, 92vw);
+  margin-top: 56px;
+}
+
+.pl-items__label {
+  margin-top: 2px;
+}
+
+/* The editor's backdrop is a <button> (interactive by default, so no a11y
+   warning) — reset the button chrome so it matches the div backdrops. */
+button.shortcuts__backdrop {
+  border: 0;
+  padding: 0;
+  cursor: default;
+  font: inherit;
+}
+
+/* The editable name lives where the .shortcuts__title would: a borderless field
+   that reads as a heading until focused. */
+.pl-editor__heading {
+  min-width: 0;
+}
+
+.pl-editor__name {
+  width: 100%;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.pl-editor__name:hover {
+  border-color: var(--hairline);
+}
+
+.pl-editor__name:focus {
+  outline: none;
+  border-color: var(--hairline-strong);
+  background: var(--surface-card);
+}
+
+.pl-editor__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.pl-editor__head-actions .pill .ic {
+  font-size: 13px;
+}
+
+.pl-editor__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: var(--space-lg) var(--space-xl) var(--space-xl);
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+}
+
+.pl-editor__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pl-editor__hint {
+  color: var(--mute);
+  font-size: 12px;
+}
+
+/* The item list reuses .ts-list rows; rows here carry move + remove controls. */
+.pl-items {
+  gap: 2px;
+}
+
+.pl-item {
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+}
+
+.pl-item__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--body);
+  font-size: 13px;
+}
+
+.pl-item__move {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--mute);
+  cursor: pointer;
+  font-size: 13px;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.pl-item__move:hover:not(:disabled) {
+  color: var(--ink);
+  border-color: var(--hairline-strong);
+  background: var(--surface-card);
+}
+
+.pl-item__move:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.pl-item__remove {
+  position: static;
+  opacity: 1;
+}
+
+.pl-empty-row {
+  padding: 16px 10px;
+  text-align: center;
+  color: var(--mute);
+  font-size: 13px;
+}
+
+.pl-editor__recent {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hairline-soft);
+}
+
+.pl-recent-row {
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+}
+
+.pl-recent__add {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--body);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.pl-recent__add:hover {
+  color: var(--ink);
+  border-color: var(--hairline-strong);
+  background: var(--surface-card);
+}
+
+.pl-recent__add .ic {
+  font-size: 12px;
+}
+
+.pl-editor__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline-soft);
 }
 
 .keys {

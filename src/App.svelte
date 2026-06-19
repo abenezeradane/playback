@@ -8,6 +8,7 @@
   import LiveUnavailable from "./lib/LiveUnavailable.svelte";
   import ShortcutsOverlay from "./lib/ShortcutsOverlay.svelte";
   import Settings from "./lib/Settings.svelte";
+  import PlaylistEditor from "./lib/PlaylistEditor.svelte";
 
   // Boot the runtime once the whole tree (and every bind:this handle) is mounted.
   // This replaces main.ts's former imperative boot block; global listeners (the
@@ -31,6 +32,7 @@
   <LiveUnavailable />
   <ShortcutsOverlay />
   <Settings />
+  <PlaylistEditor />
 
   {#if ui.prepping}
     <!-- Transport-stream remux progress (play-016): a non-blocking overlay shown

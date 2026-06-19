@@ -10,7 +10,7 @@
  * imperative media plumbing genuinely needs (the <video>, the deck canvases, the
  * scrub surface, the add-timestamp field) — populated via `bind:this` on mount.
  */
-import type { Timestamp } from "../player-core";
+import type { Timestamp, Playlist } from "../player-core";
 
 /** A recent file (home-screen history), persisted in localStorage. */
 export interface RecentFile {
@@ -109,6 +109,17 @@ export const ui = $state({
   queueIndex: -1,
   repeatAll: false,
   queueOpen: false,
+  // Label shown above the queue-panel list: "FOLDER QUEUE" for the play-013 auto
+  // queue, or the playlist's name when a user-created playlist (play-014) is playing.
+  queueLabel: "FOLDER QUEUE",
+
+  // --- User-created playlists (play-014) ---
+  // The saved playlist collection (home-screen "Playlists" section), mirrored from
+  // the `playback:playlists` localStorage store. `playlistEditorOpen` shows the
+  // editor overlay for `editingPlaylistId` (create/rename, add/remove/reorder items).
+  playlists: [] as Playlist[],
+  playlistEditorOpen: false,
+  editingPlaylistId: null as string | null,
 
   // --- Cut / timeline view (play-004) ---
   cutTitle: "",

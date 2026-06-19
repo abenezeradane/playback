@@ -33,7 +33,7 @@
   </label>
 
   <div class="ts-panel__list-head">
-    <p class="ts-panel__label">FOLDER QUEUE</p>
+    <p class="ts-panel__label">{ui.queueLabel}</p>
   </div>
 
   <ul id="queue-list" class="ts-list q-list" aria-label="Folder queue">

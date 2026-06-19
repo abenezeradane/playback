@@ -70,9 +70,21 @@ import {
   currentIndexOf,
   nextIndex,
   prevIndex,
+  parsePlaylistStore,
+  serializePlaylistStore,
+  createPlaylist,
+  addPlaylist,
+  removePlaylist,
+  renamePlaylist,
+  addPlaylistItems,
+  removePlaylistItem,
+  movePlaylistItem,
+  findPlaylist,
   type PlayerState,
   type Timestamp,
   type TimestampStore,
+  type Playlist,
+  type PlaylistStore,
   type Shuttle,
 } from "../player-core";
 
@@ -100,7 +112,7 @@ function extensionOf(path: string): string {
 function isImagePath(path: string): boolean {
   return IMAGE_EXTENSIONS.includes(extensionOf(path));
 }
-function isVideoPath(path: string): boolean {
+export function isVideoPath(path: string): boolean {
   return VIDEO_EXTENSIONS.includes(extensionOf(path));
 }
 function isMediaPath(path: string): boolean {
@@ -1458,14 +1470,18 @@ function clearQueue(): void {
   ui.queue = [];
   ui.queueIndex = -1;
   ui.queueOpen = false;
+  ui.queueLabel = "FOLDER QUEUE";
+  playlistActive = false;
 }
 
-/** Load and play the queue item at `i` (no-op when out of range). */
+/** Load and play the queue item at `i` (no-op when out of range). The load is
+ *  flagged `fromQueue` so it keeps the current queue (a user playlist is preserved;
+ *  a folder queue is rebuilt for the new path, exactly as before — see loadFromPath). */
 function playQueueIndex(i: number): void {
   const item = ui.queue[i];
   if (!item) return;
-  ui.queueIndex = i; // optimistic highlight; buildFolderQueue reconciles on load
-  void loadFromPath(item.path);
+  ui.queueIndex = i; // optimistic highlight; the load reconciles it
+  void loadFromPath(item.path, true);
 }
 
 /** Next / Previous controls (buttons + the ] / [ hotkeys): step the queue. */
@@ -1525,6 +1541,146 @@ export function setQueueOpen(open: boolean): void {
 
 export function toggleQueue(): void {
   setQueueOpen(!ui.queueOpen);
+}
+
+// ---------------------------------------------------------------------------
+// User-created playlists (play-014)
+//
+// The user-curated counterpart to play-013's auto folder-queue: same playback
+// engine (ui.queue + queueIndex + auto-advance + Next/Prev + repeat-all), but the
+// list is hand-built and PERSISTED (localStorage `playback:playlists`) rather than
+// derived from a folder. The pure store helpers (player-core) own creation, the
+// per-playlist edits, and (de)serialization; this layer persists them and seeds the
+// queue. While a playlist is playing, `playlistActive` keeps loadFromPath from
+// overwriting the queue with the opened file's folder siblings.
+// ---------------------------------------------------------------------------
+const PLAYLISTS_KEY = "playback:playlists";
+
+/** True while a user playlist (not the auto folder-queue) is driving ui.queue. */
+let playlistActive = false;
+
+function loadPlaylistStore(): PlaylistStore {
+  return parsePlaylistStore(localStorage.getItem(PLAYLISTS_KEY));
+}
+
+function savePlaylistStore(store: PlaylistStore): void {
+  try {
+    localStorage.setItem(PLAYLISTS_KEY, serializePlaylistStore(store));
+  } catch {
+    /* storage unavailable / quota — playlists are best-effort, like recents */
+  }
+  ui.playlists = store; // reflect immediately (the reactive home + editor read this)
+}
+
+/** Refresh the reactive playlists list from storage. */
+function renderPlaylists(): void {
+  ui.playlists = loadPlaylistStore();
+}
+
+/** Generate a stable unique id for a new playlist. */
+function newPlaylistId(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    /* fall through to the timestamp+random fallback */
+  }
+  return `pl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Create a new (empty) playlist and immediately open it in the editor. */
+export function createNewPlaylist(): void {
+  const pl = createPlaylist("Untitled playlist", newPlaylistId());
+  savePlaylistStore(addPlaylist(loadPlaylistStore(), pl));
+  openPlaylistEditor(pl.id);
+}
+
+export function openPlaylistEditor(id: string): void {
+  ui.editingPlaylistId = id;
+  ui.playlistEditorOpen = true;
+  renderPlaylists();
+}
+
+export function closePlaylistEditor(): void {
+  ui.playlistEditorOpen = false;
+  ui.editingPlaylistId = null;
+}
+
+/** Rename a playlist (from the editor's name field). */
+export function renamePlaylistName(id: string, name: string): void {
+  savePlaylistStore(renamePlaylist(loadPlaylistStore(), id, name));
+}
+
+/** Delete a whole playlist; close the editor if it was the one being edited. */
+export function deletePlaylist(id: string): void {
+  savePlaylistStore(removePlaylist(loadPlaylistStore(), id));
+  if (ui.editingPlaylistId === id) closePlaylistEditor();
+}
+
+/** Append already-known video paths to a playlist (drag-drop / from Recent). */
+function addPathsToPlaylist(id: string, paths: string[]): void {
+  const videos = paths.filter((p) => isVideoPath(p));
+  if (videos.length === 0) return;
+  savePlaylistStore(addPlaylistItems(loadPlaylistStore(), id, videos));
+}
+
+/** Add a single video (e.g. a Recent card) to the playlist being edited. */
+export function addRecentToPlaylist(id: string, path: string): void {
+  addPathsToPlaylist(id, [path]);
+}
+
+/** Open the native picker (multiple) and append the chosen videos to a playlist. */
+export async function addVideosToPlaylist(id: string): Promise<void> {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: true,
+      directory: false,
+      filters: [{ name: "Video", extensions: VIDEO_EXTENSIONS }],
+    });
+    const paths = Array.isArray(selected)
+      ? selected
+      : typeof selected === "string"
+        ? [selected]
+        : [];
+    if (paths.length > 0) addPathsToPlaylist(id, paths);
+  } catch (err) {
+    showError(`Open dialog unavailable: ${String(err)}`);
+  }
+}
+
+export function removeItemFromPlaylist(id: string, index: number): void {
+  savePlaylistStore(removePlaylistItem(loadPlaylistStore(), id, index));
+}
+
+export function moveItemInPlaylist(id: string, index: number, delta: number): void {
+  savePlaylistStore(movePlaylistItem(loadPlaylistStore(), id, index, delta));
+}
+
+/**
+ * Open a playlist card from the home screen. A populated playlist seeds the
+ * play-013 queue and plays its first item (auto-advance + Next/Prev then reuse the
+ * shared engine); an empty playlist opens the editor instead so the user can fill it.
+ */
+export function activatePlaylist(id: string): void {
+  const pl = findPlaylist(loadPlaylistStore(), id);
+  if (!pl) return;
+  if (pl.items.length === 0) {
+    openPlaylistEditor(id);
+    return;
+  }
+  playPlaylist(pl, 0);
+}
+
+/** Seed the queue from a playlist and start playing at `startIndex`. */
+function playPlaylist(pl: Playlist, startIndex: number): void {
+  closePlaylistEditor();
+  ui.queue = pl.items.map((p): QueueItem => ({ path: p, name: basename(p) }));
+  ui.queueLabel = pl.name;
+  ui.queueIndex = clamp(startIndex, 0, ui.queue.length - 1);
+  playlistActive = true; // keep loadFromPath from rebuilding a folder queue
+  void loadFromPath(ui.queue[ui.queueIndex].path, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -1604,8 +1760,12 @@ function renderRecents(): void {
   ui.recents = loadRecents();
 }
 
-async function loadFromPath(path: string): Promise<void> {
+async function loadFromPath(path: string, fromQueue = false): Promise<void> {
   currentPath = path;
+  // A fresh user-initiated open (dialog / drop / Recent / launch arg) leaves any
+  // active playlist; a load that steps the current queue (Next/Prev, click-to-jump,
+  // playPlaylist) passes fromQueue=true to preserve it.
+  if (!fromQueue) playlistActive = false;
   addRecent(path, basename(path));
   // sec-002: authorize this file's directory before any native read of it.
   await authorizeMediaDir(path);
@@ -1637,9 +1797,16 @@ async function loadFromPath(path: string): Promise<void> {
     const src = convertFileSrc(playPath);
     loadSrc(src, basename(path), parentDir(path));
     prepareCutDeck(playPath, basename(path));
-    // Treat the folder's other videos as an auto-advancing queue (play-013). Built
-    // from the ORIGINAL path (not the remuxed temp .mp4) so siblings resolve.
-    void buildFolderQueue(path);
+    if (playlistActive) {
+      // A user playlist (play-014) is driving the queue — keep it; just reconcile
+      // the highlight to the loaded item (already set optimistically by the caller).
+      const idx = ui.queue.findIndex((q) => q.path === path);
+      if (idx >= 0) ui.queueIndex = idx;
+    } else {
+      // Treat the folder's other videos as an auto-advancing queue (play-013). Built
+      // from the ORIGINAL path (not the remuxed temp .mp4) so siblings resolve.
+      void buildFolderQueue(path);
+    }
   } catch (err) {
     ui.prepping = false;
     showError(`Could not open the file: ${String(err)}`);
@@ -2336,11 +2503,16 @@ function wireKeyboard(): void {
         break;
       case "Escape": {
         const hadOverlay =
-          ui.shortcutsOpen || ui.panelOpen || ui.settingsOpen || ui.queueOpen;
+          ui.shortcutsOpen ||
+          ui.panelOpen ||
+          ui.settingsOpen ||
+          ui.queueOpen ||
+          ui.playlistEditorOpen;
         setShortcutsOpen(false);
         setSettingsOpen(false);
         setPanelOpen(false);
         setQueueOpen(false);
+        closePlaylistEditor();
         if (!hadOverlay) void setFullscreen(false);
         break;
       }
@@ -2373,6 +2545,12 @@ async function registerDragAndDrop(): Promise<void> {
       } else if (payload.type === "drop") {
         ui.dragover = false;
         const paths = payload.paths ?? [];
+        // While the playlist editor is open, dropped videos are ADDED to that
+        // playlist rather than opened (the dropzone "add" channel for play-014).
+        if (ui.playlistEditorOpen && ui.editingPlaylistId) {
+          addPathsToPlaylist(ui.editingPlaylistId, paths);
+          return;
+        }
         const mediaPath = paths.find((p) => isMediaPath(p));
         if (mediaPath) void loadFromPath(mediaPath);
       } else {
@@ -2439,6 +2617,7 @@ export function init(): void {
   void registerDragAndDrop();
   void loadLaunchFile();
   renderRecents();
+  renderPlaylists();
   renderTimestamps();
   render();
 }

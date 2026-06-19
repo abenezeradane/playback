@@ -1,6 +1,15 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
-  import { openFileDialog, clearRecents, openRecent, setSettingsOpen } from "./controller";
+  import {
+    openFileDialog,
+    clearRecents,
+    openRecent,
+    setSettingsOpen,
+    createNewPlaylist,
+    activatePlaylist,
+    openPlaylistEditor,
+    deletePlaylist,
+  } from "./controller";
   import { formatTime } from "../player-core";
 
   /** "just now" / "5m ago" / "3h ago" / "yesterday" / … (former main.ts helper). */
@@ -71,6 +80,48 @@
           </div>
 
           <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span><span>TS</span><span>GIF</span></span>
+        </div>
+      </section>
+
+      <!-- Playlists (user-created, saved; play-014) -->
+      <section class="playlists">
+        <div class="recent__head">
+          <div class="recent__title">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15V6" /><path d="M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" /><path d="M12 12H3" /><path d="M16 6H3" /><path d="M12 18H3" /></svg>
+            Playlists
+          </div>
+          <button id="btn-new-playlist" class="recent__clear playlists__new" type="button" onclick={createNewPlaylist}>
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+            New playlist
+          </button>
+        </div>
+        <div id="playlist-cards" class="playlists__cards" hidden={ui.playlists.length === 0}>
+          {#each ui.playlists as p (p.id)}
+            <div class="pl-card" title={p.name}>
+              <button type="button" class="pl-card__open" onclick={() => activatePlaylist(p.id)}>
+                <span class="pl-card__thumb">
+                  <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15V6" /><path d="M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" /><path d="M12 12H3" /><path d="M16 6H3" /><path d="M12 18H3" /></svg>
+                  <span class="pl-card__count">{p.items.length}</span>
+                </span>
+                <span class="pl-card__meta">
+                  <span class="pl-card__name">{p.name}</span>
+                  <span class="pl-card__sub">{p.items.length === 1 ? "1 video" : `${p.items.length} videos`}</span>
+                </span>
+              </button>
+              <div class="pl-card__actions">
+                <button type="button" class="pl-card__act" title="Edit playlist" aria-label="Edit {p.name}" onclick={() => openPlaylistEditor(p.id)}>
+                  <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                </button>
+                <button type="button" class="pl-card__act pl-card__act--danger" title="Delete playlist" aria-label="Delete {p.name}" onclick={() => deletePlaylist(p.id)}>
+                  <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+                </button>
+              </div>
+            </div>
+          {/each}
+        </div>
+        <div id="playlist-empty" class="recent__empty" hidden={ui.playlists.length > 0}>
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15V6" /><path d="M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" /><path d="M12 12H3" /><path d="M16 6H3" /><path d="M12 18H3" /></svg>
+          <span>Build a playlist to queue up videos in your own order.</span>
         </div>
       </section>
 

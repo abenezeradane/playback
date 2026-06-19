@@ -1023,3 +1023,182 @@ export function prevIndex(current: number, length: number, repeatAll: boolean): 
   if (current - 1 >= 0) return current - 1;
   return repeatAll ? length - 1 : -1;
 }
+
+// ---------------------------------------------------------------------------
+// User-created playlists (play-014)
+//
+// The user-curated counterpart to play-013's auto folder-queue: the SAME playback
+// engine (the ordered list + current index + auto-advance + next/prev + "repeat
+// all" above), but the list is hand-built and PERSISTED rather than derived from a
+// folder. A playlist is { id, name, ordered video paths }; the whole collection is
+// stored as a flat array. These helpers own creation, the per-playlist edits
+// (rename, add/remove/reorder items), and the (de)serialization — all pure and
+// DOM/storage-free so they can be unit-tested headlessly, exactly like the play-007
+// timestamp store. The controller persists the serialized string to localStorage
+// (key `playback:playlists`) and seeds the play-013 queue from a playlist's items.
+// ---------------------------------------------------------------------------
+
+/** A named, ordered list of video file paths the user curates and saves. */
+export interface Playlist {
+  /** Stable unique id (generated once on creation; the storage/lookup key). */
+  id: string;
+  /** Human label shown on the home card and the editor. */
+  name: string;
+  /** Ordered video file paths; de-duplicated, played in this order. */
+  items: string[];
+}
+
+/** The whole saved collection — a flat, ordered array of playlists. */
+export type PlaylistStore = Playlist[];
+
+/** Upper bound on a playlist name length (defensive against pasted garbage). */
+export const MAX_PLAYLIST_NAME = 80;
+
+/**
+ * Normalize a playlist name: collapse whitespace, trim, cap the length, and fall
+ * back to a sensible default for an empty/blank value so a playlist is never
+ * nameless. Pure.
+ */
+export function sanitizePlaylistName(name: unknown): string {
+  const text = typeof name === "string" ? name : "";
+  const trimmed = text.replace(/\s+/g, " ").trim().slice(0, MAX_PLAYLIST_NAME);
+  return trimmed || "Untitled playlist";
+}
+
+/** Keep only non-empty string paths, de-duplicated, preserving first-seen order. */
+function sanitizePlaylistItems(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of value) {
+    if (typeof raw !== "string") continue;
+    const path = raw.trim();
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    out.push(path);
+  }
+  return out;
+}
+
+/** Coerce an unknown value into a well-formed Playlist, or null if unusable. */
+function sanitizePlaylist(value: unknown): Playlist | null {
+  if (!value || typeof value !== "object") return null;
+  const { id, name, items } = value as Partial<Playlist>;
+  if (typeof id !== "string" || id.trim() === "") return null;
+  return { id, name: sanitizePlaylistName(name), items: sanitizePlaylistItems(items) };
+}
+
+/**
+ * Parse the serialized playlist store, dropping anything malformed: non-array
+ * input, entries without a string id, duplicate ids, and per-playlist garbage
+ * items are all discarded. Returns an empty store for null/corrupt JSON so a bad
+ * stored value can never break loading. Mirrors `parseTimestampStore` (play-007).
+ */
+export function parsePlaylistStore(json: string | null | undefined): PlaylistStore {
+  if (!json) return [];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(raw)) return [];
+  const out: PlaylistStore = [];
+  const seenIds = new Set<string>();
+  for (const value of raw) {
+    const pl = sanitizePlaylist(value);
+    if (!pl || seenIds.has(pl.id)) continue;
+    seenIds.add(pl.id);
+    out.push(pl);
+  }
+  return out;
+}
+
+/** Serialize the store for persistence. */
+export function serializePlaylistStore(store: PlaylistStore): string {
+  return JSON.stringify(store);
+}
+
+/** A fresh, empty playlist with the given id and (sanitized) name. Pure: the
+ *  caller supplies the id so id generation stays out of the testable core. */
+export function createPlaylist(name: string, id: string): Playlist {
+  return { id, name: sanitizePlaylistName(name), items: [] };
+}
+
+/** Append a playlist to the store (returns a new array; input not mutated). */
+export function addPlaylist(store: PlaylistStore, playlist: Playlist): PlaylistStore {
+  return [...store, playlist];
+}
+
+/** Remove the playlist with `id` entirely. */
+export function removePlaylist(store: PlaylistStore, id: string): PlaylistStore {
+  return store.filter((p) => p.id !== id);
+}
+
+/** Rename the playlist with `id` (name re-sanitized); others untouched. */
+export function renamePlaylist(store: PlaylistStore, id: string, name: string): PlaylistStore {
+  return store.map((p) => (p.id === id ? { ...p, name: sanitizePlaylistName(name) } : p));
+}
+
+/**
+ * Append `paths` to the playlist with `id`, in order, skipping blanks and any
+ * path already present (a playlist is a de-duplicated ordered set). Returns a new
+ * store; the input is not mutated.
+ */
+export function addPlaylistItems(
+  store: PlaylistStore,
+  id: string,
+  paths: string[],
+): PlaylistStore {
+  return store.map((p) => {
+    if (p.id !== id) return p;
+    const seen = new Set(p.items);
+    const items = [...p.items];
+    for (const raw of paths) {
+      if (typeof raw !== "string") continue;
+      const path = raw.trim();
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      items.push(path);
+    }
+    return items.length === p.items.length ? p : { ...p, items };
+  });
+}
+
+/** Remove the item at `index` from the playlist with `id`. Out-of-range is a no-op. */
+export function removePlaylistItem(
+  store: PlaylistStore,
+  id: string,
+  index: number,
+): PlaylistStore {
+  return store.map((p) =>
+    p.id === id ? { ...p, items: p.items.filter((_, i) => i !== index) } : p,
+  );
+}
+
+/**
+ * Move the item at `index` by `delta` positions within the playlist with `id`
+ * (delta -1 = up, +1 = down). A move that would leave the list bounds is a no-op,
+ * so the up/down controls clamp at the ends. Returns a new store; not mutated.
+ */
+export function movePlaylistItem(
+  store: PlaylistStore,
+  id: string,
+  index: number,
+  delta: number,
+): PlaylistStore {
+  return store.map((p) => {
+    if (p.id !== id) return p;
+    const to = index + delta;
+    if (index < 0 || index >= p.items.length || to < 0 || to >= p.items.length) return p;
+    const items = [...p.items];
+    const [moved] = items.splice(index, 1);
+    items.splice(to, 0, moved);
+    return { ...p, items };
+  });
+}
+
+/** The playlist with `id`, or undefined when none matches. */
+export function findPlaylist(store: PlaylistStore, id: string): Playlist | undefined {
+  return store.find((p) => p.id === id);
+}

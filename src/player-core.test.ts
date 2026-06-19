@@ -67,6 +67,19 @@ import {
   currentIndexOf,
   nextIndex,
   prevIndex,
+  parsePlaylistStore,
+  serializePlaylistStore,
+  sanitizePlaylistName,
+  createPlaylist,
+  addPlaylist,
+  removePlaylist,
+  renamePlaylist,
+  addPlaylistItems,
+  removePlaylistItem,
+  movePlaylistItem,
+  findPlaylist,
+  MAX_PLAYLIST_NAME,
+  type PlaylistStore,
   DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
   SHUTTLE_SPEEDS,
@@ -968,6 +981,157 @@ describe("folder queue / playlist (play-013)", () => {
       expect(nextIndex(0, 1, false)).toBe(-1);
       expect(nextIndex(0, 1, true)).toBe(0); // wrap onto itself = replay the queue
       expect(prevIndex(0, 1, true)).toBe(0);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// User-created playlists (play-014)
+// ---------------------------------------------------------------------------
+describe("playlist store (play-014)", () => {
+  const sample = (): PlaylistStore => [
+    { id: "a", name: "Favorites", items: ["/v/clip-01.mp4", "/v/clip-02.mp4"] },
+    { id: "b", name: "Watch later", items: ["/v/clip-03.mp4"] },
+  ];
+
+  describe("sanitizePlaylistName", () => {
+    it("trims, collapses whitespace, and caps the length", () => {
+      expect(sanitizePlaylistName("  My   Mix  ")).toBe("My Mix");
+      expect(sanitizePlaylistName("x".repeat(200)).length).toBe(MAX_PLAYLIST_NAME);
+    });
+    it("falls back to a default for blank / non-string input", () => {
+      expect(sanitizePlaylistName("")).toBe("Untitled playlist");
+      expect(sanitizePlaylistName("   ")).toBe("Untitled playlist");
+      expect(sanitizePlaylistName(null as unknown as string)).toBe("Untitled playlist");
+      expect(sanitizePlaylistName(42 as unknown as string)).toBe("Untitled playlist");
+    });
+  });
+
+  describe("parsePlaylistStore", () => {
+    it("round-trips a serialized store", () => {
+      const store = sample();
+      expect(parsePlaylistStore(serializePlaylistStore(store))).toEqual(store);
+    });
+    it("returns an empty store for null / garbage / corrupt JSON", () => {
+      expect(parsePlaylistStore(null)).toEqual([]);
+      expect(parsePlaylistStore(undefined)).toEqual([]);
+      expect(parsePlaylistStore("")).toEqual([]);
+      expect(parsePlaylistStore("not json {{{")).toEqual([]);
+      expect(parsePlaylistStore("{}")).toEqual([]); // an object, not an array
+      expect(parsePlaylistStore("42")).toEqual([]);
+    });
+    it("drops entries without a string id and de-duplicates ids", () => {
+      const json = JSON.stringify([
+        { id: "a", name: "Keep", items: ["/v/1.mp4"] },
+        { name: "No id", items: ["/v/2.mp4"] },
+        { id: "", name: "Empty id", items: [] },
+        { id: "a", name: "Dupe id dropped", items: ["/v/x.mp4"] },
+      ]);
+      const out = parsePlaylistStore(json);
+      expect(out).toHaveLength(1);
+      expect(out[0]).toEqual({ id: "a", name: "Keep", items: ["/v/1.mp4"] });
+    });
+    it("sanitizes per-playlist items (drops blanks/non-strings, de-dupes, names)", () => {
+      const json = JSON.stringify([
+        { id: "a", name: "  ", items: ["/v/1.mp4", "", 7, "/v/1.mp4", "/v/2.mp4", null] },
+      ]);
+      const out = parsePlaylistStore(json);
+      expect(out[0].name).toBe("Untitled playlist");
+      expect(out[0].items).toEqual(["/v/1.mp4", "/v/2.mp4"]);
+    });
+  });
+
+  describe("CRUD on the store", () => {
+    it("createPlaylist makes an empty, named playlist with the given id", () => {
+      expect(createPlaylist("  My Mix  ", "id-1")).toEqual({
+        id: "id-1",
+        name: "My Mix",
+        items: [],
+      });
+    });
+    it("addPlaylist appends without mutating the input", () => {
+      const store = sample();
+      const pl = createPlaylist("New", "c");
+      const next = addPlaylist(store, pl);
+      expect(next).toHaveLength(3);
+      expect(next[2]).toBe(pl);
+      expect(store).toHaveLength(2); // not mutated
+    });
+    it("removePlaylist deletes by id only", () => {
+      const next = removePlaylist(sample(), "a");
+      expect(next.map((p) => p.id)).toEqual(["b"]);
+    });
+    it("renamePlaylist re-sanitizes the target name, leaving others", () => {
+      const next = renamePlaylist(sample(), "b", "  Renamed  Mix ");
+      expect(findPlaylist(next, "b")?.name).toBe("Renamed Mix");
+      expect(findPlaylist(next, "a")?.name).toBe("Favorites");
+    });
+    it("renamePlaylist falls back to the default for a blank name", () => {
+      expect(findPlaylist(renamePlaylist(sample(), "a", "   "), "a")?.name).toBe(
+        "Untitled playlist",
+      );
+    });
+  });
+
+  describe("per-playlist item edits", () => {
+    it("addPlaylistItems appends in order, skipping blanks and duplicates", () => {
+      const next = addPlaylistItems(sample(), "b", [
+        "/v/clip-03.mp4", // already present -> skipped
+        "/v/clip-04.mp4",
+        "  ", // blank -> skipped
+        "/v/clip-05.mp4",
+        "/v/clip-04.mp4", // duplicate within the batch -> skipped
+      ]);
+      expect(findPlaylist(next, "b")?.items).toEqual([
+        "/v/clip-03.mp4",
+        "/v/clip-04.mp4",
+        "/v/clip-05.mp4",
+      ]);
+    });
+    it("addPlaylistItems returns the same playlist reference when nothing changes", () => {
+      const store = sample();
+      const next = addPlaylistItems(store, "a", ["/v/clip-01.mp4"]); // already present
+      expect(findPlaylist(next, "a")).toBe(findPlaylist(store, "a"));
+    });
+    it("removePlaylistItem drops the item at the index", () => {
+      const next = removePlaylistItem(sample(), "a", 0);
+      expect(findPlaylist(next, "a")?.items).toEqual(["/v/clip-02.mp4"]);
+    });
+    it("removePlaylistItem ignores an out-of-range index", () => {
+      const next = removePlaylistItem(sample(), "a", 9);
+      expect(findPlaylist(next, "a")?.items).toEqual(["/v/clip-01.mp4", "/v/clip-02.mp4"]);
+    });
+    it("movePlaylistItem reorders up/down and clamps at the ends", () => {
+      const three: PlaylistStore = [{ id: "a", name: "n", items: ["x", "y", "z"] }];
+      expect(findPlaylist(movePlaylistItem(three, "a", 2, -1), "a")?.items).toEqual([
+        "x",
+        "z",
+        "y",
+      ]);
+      expect(findPlaylist(movePlaylistItem(three, "a", 0, 1), "a")?.items).toEqual([
+        "y",
+        "x",
+        "z",
+      ]);
+      // Out-of-bounds moves are no-ops (clamp at the ends).
+      expect(findPlaylist(movePlaylistItem(three, "a", 0, -1), "a")?.items).toEqual([
+        "x",
+        "y",
+        "z",
+      ]);
+      expect(findPlaylist(movePlaylistItem(three, "a", 2, 1), "a")?.items).toEqual([
+        "x",
+        "y",
+        "z",
+      ]);
+    });
+    it("does not mutate the input store on any edit", () => {
+      const store = sample();
+      addPlaylistItems(store, "a", ["/v/new.mp4"]);
+      removePlaylistItem(store, "a", 0);
+      movePlaylistItem(store, "a", 0, 1);
+      renamePlaylist(store, "a", "changed");
+      expect(store).toEqual(sample());
     });
   });
 });
