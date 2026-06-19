@@ -309,6 +309,13 @@ body {
   color: var(--mute);
 }
 
+/* Top-bar action cluster: the Settings gear next to the "Open file" chip. */
+.home__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .home__body {
   flex: 1 1 auto;
   min-height: 0;
@@ -2054,6 +2061,60 @@ body {
 
 .shortcuts__col .shortcuts__group:not(:first-child) {
   margin-top: var(--space-xl);
+}
+
+/* Settings overlay body (play-010) — reuses the .shortcuts chrome above. */
+.settings__body {
+  padding: var(--space-xl);
+}
+
+/* A setting row: title + description on the left, the toggle switch on the right. */
+.settings__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  padding: 6px 2px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.settings__row-text {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings__row-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.settings__row-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--mute);
+}
+
+/* "Restart to apply" hint, shown after the hwaccel toggle is flipped. */
+.settings__hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: var(--space-md) 0 0;
+  padding: 9px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+  border: 1px solid var(--hairline-soft);
+  color: var(--body);
+  font-size: 12px;
+}
+
+.settings__hint .ic {
+  flex: 0 0 auto;
+  font-size: 15px;
+  color: var(--mute);
 }
 
 .keys {

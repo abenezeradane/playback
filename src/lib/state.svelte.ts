@@ -79,6 +79,15 @@ export const ui = $state({
   addInputOpen: false,
   shortcutsOpen: false,
 
+  // --- Settings (play-010) ---
+  settingsOpen: false,
+  // Hardware-accelerated video decode. Mirrors the native pref (the real source of
+  // truth, since it drives the WebView2 launch flag); true = GPU decode (default).
+  hwaccel: true,
+  // Shown after the user flips hwaccel: the launch flag is fixed at webview
+  // creation, so the change only applies on the next launch.
+  hwaccelRestartHint: false,
+
   // --- Loop / A-B (play-011) ---
   loopOn: false,
   abA: null as number | null,

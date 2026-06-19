@@ -34,6 +34,21 @@ use tauri_plugin_shell::ShellExt;
 /// Holds a media path supplied on the command line, if any.
 struct LaunchPath(Option<String>);
 
+/// Bundle identifier — must match `tauri.conf.json` `identifier`. Used to locate
+/// the per-user config directory where the hardware-acceleration preference is
+/// stored (play-010). We compute this path manually rather than via the Tauri
+/// `AppHandle`, because the preference must be read BEFORE the WebView is created
+/// (the GPU launch flag is fixed at webview-creation time), i.e. before an
+/// `AppHandle` exists.
+const APP_IDENTIFIER: &str = "com.playback.player";
+
+/// Chromium browser argument that forces SOFTWARE video decoding (play-010). It
+/// disables only the GPU's video-decode engine; GPU compositing stays on, so the
+/// play-004 cut-view canvas capture (which depends on the composited video plane —
+/// see the webview2-canvas-video-capture gotcha) keeps working. Applied to the
+/// WebView2 launch only when the user has turned hardware acceleration OFF.
+const SW_DECODE_FLAG: &str = "--disable-accelerated-video-decode";
+
 /// Canonical directories the WebView is allowed to read from (sec-002). Seeded
 /// only by `allow_media_dir`, which the frontend calls for every file the user
 /// actually opens (dialog / drag-drop / "Open with" launch arg / Recent) — never
@@ -86,6 +101,104 @@ fn ensure_allowed(allow: &AllowList, path: &str) -> Result<PathBuf, String> {
 #[tauri::command]
 fn launch_path(state: tauri::State<'_, LaunchPath>) -> Option<String> {
     state.0.clone()
+}
+
+// ---------------------------------------------------------------------------
+// Hardware-acceleration preference (play-010)
+//
+// Playback's <video> is decoded and composited by the WebView2/Chromium media
+// pipeline, which uses the GPU's video-decode + compositing path by default. When
+// a specific GPU/driver misbehaves (green/black/torn frames) the user can turn
+// hardware acceleration OFF, which appends `--disable-accelerated-video-decode` to
+// the WebView2 launch so decoding falls back to software. Because those launch
+// flags are fixed when the WebView is created, the change only takes effect on the
+// NEXT launch — hence the UI's "restart to apply" hint.
+//
+// The preference can't live solely in the WebView's localStorage: it must be read
+// BEFORE the WebView exists, to decide the launch flag. So the source of truth is a
+// tiny native file in the per-user config dir (the frontend mirrors it into
+// `playback:hwaccel` localStorage purely for display). `set_hwaccel` writes it and
+// `get_hwaccel` reads it; `run()` reads it at startup to set the launch flag.
+// ---------------------------------------------------------------------------
+
+/// Path of the native hardware-acceleration preference file (`hwaccel` under the
+/// app's per-user config dir). Computed from the environment — `%APPDATA%` on
+/// Windows, `$XDG_CONFIG_HOME`/`$HOME/.config` elsewhere — so it is available at
+/// startup without an `AppHandle`. The SAME function backs both the read (startup)
+/// and the write (`set_hwaccel`), so the two always agree on the location.
+fn hwaccel_pref_path() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    }?;
+    Some(base.join(APP_IDENTIFIER).join("hwaccel"))
+}
+
+/// Read the persisted hardware-acceleration preference. Defaults to `true`
+/// (hardware acceleration ON, the Chromium default) unless the file explicitly
+/// holds `"off"` — so a missing/unreadable file, or a first run, keeps GPU decode.
+fn read_hwaccel_pref() -> bool {
+    match hwaccel_pref_path().and_then(|p| fs::read_to_string(p).ok()) {
+        Some(contents) => contents.trim() != "off",
+        None => true,
+    }
+}
+
+/// Build the `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` value for the given preference,
+/// PRESERVING any args already present (e.g. the smoke harness's TEST-ONLY
+/// `--disable-features=DirectCompositionVideoOverlays`, set externally before
+/// launch). When hardware acceleration is enabled (the default) the existing value
+/// is returned unchanged — production carries no extra flag. When disabled, the
+/// software-decode flag is appended exactly once (idempotent if already present).
+/// Pure (no env/IO), so the arg composition is unit-testable on its own.
+fn browser_args_for_hwaccel(existing: &str, hwaccel_enabled: bool) -> String {
+    if hwaccel_enabled || existing.split_whitespace().any(|a| a == SW_DECODE_FLAG) {
+        return existing.to_string();
+    }
+    if existing.is_empty() {
+        SW_DECODE_FLAG.to_string()
+    } else {
+        format!("{existing} {SW_DECODE_FLAG}")
+    }
+}
+
+/// Apply the persisted hardware-acceleration preference to the WebView2 launch by
+/// setting `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` BEFORE the webview is created.
+/// Only mutates the env var when the value actually changes (i.e. when accel is OFF
+/// and the flag isn't already there), so the default path leaves the environment —
+/// and any externally-set test flags — exactly as-is. Must be called before
+/// `tauri::Builder::run()`.
+fn apply_hwaccel_launch_flag() {
+    let existing = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+    let updated = browser_args_for_hwaccel(&existing, read_hwaccel_pref());
+    if updated != existing {
+        std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", updated);
+    }
+}
+
+/// Report the persisted hardware-acceleration preference to the frontend so the
+/// Settings toggle reflects what will actually apply on the next launch.
+#[tauri::command]
+fn get_hwaccel() -> bool {
+    read_hwaccel_pref()
+}
+
+/// Persist the hardware-acceleration preference (play-010). Written natively so the
+/// next launch can read it before the WebView exists and set the GPU launch flag
+/// accordingly. Takes effect on relaunch.
+#[tauri::command]
+fn set_hwaccel(enabled: bool) -> Result<(), String> {
+    let path = hwaccel_pref_path().ok_or_else(|| "could not save setting".to_string())?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| ipc_error("set_hwaccel: mkdir", e, "could not save setting"))?;
+    }
+    fs::write(&path, if enabled { "on" } else { "off" })
+        .map_err(|e| ipc_error("set_hwaccel: write", e, "could not save setting"))?;
+    Ok(())
 }
 
 /// Current state of a (possibly still-growing) media file on disk.
@@ -388,6 +501,11 @@ pub fn run() {
     // First non-flag argument is treated as a file to open.
     let launch = std::env::args().skip(1).find(|a| !a.starts_with('-'));
 
+    // play-010: set the WebView2 GPU launch flag from the saved preference BEFORE
+    // the webview is created (the flag is fixed at creation time). No-op unless the
+    // user has turned hardware acceleration off.
+    apply_hwaccel_launch_flag();
+
     tauri::Builder::default()
         .manage(LaunchPath(launch))
         .manage(AllowList::default())
@@ -398,7 +516,9 @@ pub fn run() {
             allow_media_dir,
             stream_status,
             read_stream_chunk,
-            remux_ts
+            remux_ts,
+            get_hwaccel,
+            set_hwaccel
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playback");
@@ -544,6 +664,67 @@ mod tests {
             ipc_error("stream_status: metadata", "raw os detail", "file not found"),
             "file not found"
         );
+    }
+
+    #[test]
+    fn browser_args_for_hwaccel_appends_flag_only_when_disabled() {
+        // Hardware acceleration ON (the default): the launch args are untouched, so
+        // production carries NO extra flag and GPU decode stays on.
+        assert_eq!(browser_args_for_hwaccel("", true), "");
+        assert_eq!(
+            browser_args_for_hwaccel("--autoplay-policy=no-user-gesture-required", true),
+            "--autoplay-policy=no-user-gesture-required"
+        );
+
+        // Hardware acceleration OFF: the software-decode flag is appended, PRESERVING
+        // anything already present (e.g. the smoke harness's TEST-ONLY
+        // DirectCompositionVideoOverlays flag set externally before launch).
+        assert_eq!(browser_args_for_hwaccel("", false), SW_DECODE_FLAG);
+        let test_flags = "--autoplay-policy=no-user-gesture-required --disable-features=DirectCompositionVideoOverlays";
+        let combined = browser_args_for_hwaccel(test_flags, false);
+        assert!(combined.starts_with(test_flags)); // the test flags survive
+        assert!(combined.contains(SW_DECODE_FLAG)); // ...with the SW flag added
+
+        // Idempotent: if the flag is already in the args it is not added twice.
+        assert_eq!(browser_args_for_hwaccel(SW_DECODE_FLAG, false), SW_DECODE_FLAG);
+        // A token that merely CONTAINS the flag as a prefix is not mistaken for it.
+        let near = "--disable-accelerated-video-decode-foo";
+        assert_eq!(
+            browser_args_for_hwaccel(near, false),
+            format!("{near} {SW_DECODE_FLAG}")
+        );
+    }
+
+    #[test]
+    fn hwaccel_pref_round_trips_through_the_file() {
+        // Point the pref at an isolated temp dir for this test (the helper reads
+        // %APPDATA% / XDG_CONFIG_HOME / HOME). Writing "off" must read back as
+        // disabled; "on" / a missing file must read back as enabled (default ON).
+        let base = temp_root("hwaccel");
+        // Drive both the Windows (%APPDATA%) and Unix (XDG_CONFIG_HOME) branches.
+        std::env::set_var("APPDATA", &base);
+        std::env::set_var("XDG_CONFIG_HOME", &base);
+
+        let path = hwaccel_pref_path().expect("a pref path");
+        assert!(path.starts_with(&base));
+        assert!(path.ends_with(PathBuf::from(APP_IDENTIFIER).join("hwaccel")));
+
+        // No file yet → default ON.
+        let _ = fs::remove_file(&path);
+        assert!(read_hwaccel_pref());
+
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "off").unwrap();
+        assert!(!read_hwaccel_pref());
+
+        fs::write(&path, "on").unwrap();
+        assert!(read_hwaccel_pref());
+
+        // Trailing whitespace/newlines are tolerated (the value is trimmed).
+        fs::write(&path, "off\n").unwrap();
+        assert!(!read_hwaccel_pref());
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]

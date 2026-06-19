@@ -565,6 +565,63 @@ function loadPinChapter(): void {
   setPinChapter(saved);
 }
 
+// ---------------------------------------------------------------------------
+// Hardware acceleration (play-010)
+//
+// The real source of truth is a NATIVE preference file (it has to be — the GPU
+// launch flag is decided in Rust before the WebView exists). localStorage is a
+// display mirror so the toggle renders even before the async native read returns.
+// Flipping the toggle persists both and shows a "restart to apply" hint, because
+// the WebView2 launch flag only changes on the next launch.
+// ---------------------------------------------------------------------------
+const HWACCEL_KEY = "playback:hwaccel";
+
+/** Restore the hardware-acceleration setting on startup (native truth first). */
+async function loadHwaccel(): Promise<void> {
+  // Optimistic mirror first so the toggle isn't briefly wrong before the await.
+  try {
+    ui.hwaccel = localStorage.getItem(HWACCEL_KEY) !== "off";
+  } catch {
+    ui.hwaccel = true;
+  }
+  // The native file is authoritative (it drives the launch flag); reconcile to it.
+  try {
+    const enabled = await tauriInvoke<boolean>("get_hwaccel", {});
+    ui.hwaccel = enabled;
+    try {
+      localStorage.setItem(HWACCEL_KEY, enabled ? "on" : "off");
+    } catch {
+      /* storage unavailable — keep the in-memory state */
+    }
+  } catch {
+    /* Not running under Tauri — keep the localStorage mirror. */
+  }
+}
+
+/** Set the hardware-acceleration preference; takes effect on the next launch. */
+export function setHwaccel(enabled: boolean): void {
+  ui.hwaccel = enabled;
+  ui.hwaccelRestartHint = true;
+  try {
+    localStorage.setItem(HWACCEL_KEY, enabled ? "on" : "off");
+  } catch {
+    /* storage unavailable — the native write below is what actually matters */
+  }
+  // Persist natively so the next launch reads it before the WebView is created.
+  void tauriInvoke("set_hwaccel", { enabled }).catch(() => {
+    /* Not under Tauri — the toggle is inert outside the desktop shell. */
+  });
+}
+
+export function setSettingsOpen(open: boolean): void {
+  ui.settingsOpen = open;
+  if (!open) ui.hwaccelRestartHint = false;
+}
+
+export function toggleSettings(): void {
+  setSettingsOpen(!ui.settingsOpen);
+}
+
 /** Show the active chapter's time + title in the control chrome, or hide it. */
 function updateNowChapter(idx: number): void {
   if (idx < 0) {
@@ -2129,8 +2186,9 @@ function wireKeyboard(): void {
         toggleShortcuts();
         break;
       case "Escape": {
-        const hadOverlay = ui.shortcutsOpen || ui.panelOpen;
+        const hadOverlay = ui.shortcutsOpen || ui.panelOpen || ui.settingsOpen;
         setShortcutsOpen(false);
+        setSettingsOpen(false);
         setPanelOpen(false);
         if (!hadOverlay) void setFullscreen(false);
         break;
@@ -2226,6 +2284,7 @@ export function init(): void {
   wireResize();
   loadPinChapter();
   loadLoopPref();
+  void loadHwaccel();
   void registerDragAndDrop();
   void loadLaunchFile();
   renderRecents();
