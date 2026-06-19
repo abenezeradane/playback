@@ -780,9 +780,8 @@ function measureControlsOverflow(): void {
   if (!row || !center) return;
 
   measuring = true;
-  const prev = controls.getAttribute("data-overflow");
-  controls.setAttribute("data-overflow", "false"); // force every control inline
   controls.classList.add("measuring"); // force nowrap so each group is one row
+  controls.setAttribute("data-overflow", "false"); // force every control inline
   // With the groups laid out on a single row (and shrink-to-fit via justify-self)
   // each offsetWidth is its true content width. If the three groups + the two
   // column gaps need more than the row can give, a side group would overflow into
@@ -793,7 +792,11 @@ function measureControlsOverflow(): void {
   const needed = left.offsetWidth + center.offsetWidth + right.offsetWidth + 2 * gap;
   const overflow = needed - row.clientWidth > 1;
   controls.classList.remove("measuring");
-  if (prev !== null) controls.setAttribute("data-overflow", prev);
+  // Apply the decision DIRECTLY to the DOM rather than via a Svelte binding: the
+  // framework's render flush is asynchronous (and can lag while the window is not
+  // foreground), which would leave the ⋯ + all icons wrapping. A direct attribute
+  // write takes effect synchronously and is never overwritten (nothing binds it).
+  controls.setAttribute("data-overflow", overflow ? "true" : "false");
   measuring = false;
 
   ui.controlsOverflow = overflow;
@@ -806,6 +809,9 @@ function wireControlsOverflow(): void {
     new ResizeObserver(() => requestControlsMeasure()).observe(controls);
   }
   window.addEventListener("resize", () => requestControlsMeasure());
+  // Re-measure once webfonts land: a font swap changes the button text widths but
+  // not the #controls box, so the ResizeObserver alone would miss it.
+  document.fonts?.ready.then(() => requestControlsMeasure());
   requestControlsMeasure();
 }
 
