@@ -852,6 +852,22 @@ const LIVE_GROWTH_SAMPLE_MS = 400;
 const LIVE_GROWTH_THRESHOLD = 8 * 1024;
 const LIVE_GROWTH_WINDOW_MS = 6_000;
 
+// ISO-BMFF (MP4-family) containers whose *fragmented* variant the WebView can't
+// start playing (play-020): a finished Twitch/OBS/Streamlink recording is a
+// fragmented MP4 that declares no duration in its `moov`, and Chromium's progressive
+// <video> demuxer responds by scanning EVERY fragment to end-of-file before it
+// reports metadata — so a multi-GB recording opens but never starts (VLC/mpv, which
+// use the tail `mfra` index, play it fine). We detect those natively
+// (`is_fragmented_mp4`) and remux to a plain faststart .mp4 first — but only above
+// MIN_FRAGMENTED_REMUX_BYTES: a small fragmented file scans fast enough to play
+// directly, so it skips the (cached) remux and its temp copy.
+const ISO_BMFF_EXTENSIONS = ["mp4", "m4v", "mov"];
+const MIN_FRAGMENTED_REMUX_BYTES = 256 * 1024 * 1024; // 256 MiB
+
+function isIsoBmffPath(path: string): boolean {
+  return ISO_BMFF_EXTENSIONS.includes(extensionOf(path));
+}
+
 /** Bytes pulled per Rust read_stream_chunk call (used by the image-viewer animated
  * decode via readWholeFile; the cut-view waveform now reads peaks natively — perf-002). */
 const READ_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -1953,12 +1969,14 @@ async function loadFromPath(path: string, fromQueue = false): Promise<void> {
       openEmptyLivePlayer(path);
       return;
     }
-    // MPEG-TS containers can't be demuxed by the WebView's <video>; remux to a
-    // temp .mp4 via the ffmpeg sidecar and play that instead (play-016). Every
-    // downstream consumer (the player src AND the cut deck) uses the .mp4.
+    // Some containers the WebView's <video> can't start playing are remuxed to a
+    // temp .mp4 via the ffmpeg sidecar first, and that .mp4 is played instead — an
+    // MPEG-TS container it can't demux (play-016), or a large fragmented MP4 it would
+    // otherwise stall scanning for a duration (play-020). Every downstream consumer
+    // (the player src AND the cut deck) uses the remuxed .mp4.
     let playPath = path;
-    if (isTransportStreamPath(path)) {
-      const remuxed = await remuxTransportStream(path);
+    if (isTransportStreamPath(path) || (await needsFragmentedRemux(path, status))) {
+      const remuxed = await remuxForPlayback(path);
       if (remuxed === null) return; // error already surfaced
       playPath = remuxed;
     }
@@ -1983,11 +2001,29 @@ async function loadFromPath(path: string, fromQueue = false): Promise<void> {
 }
 
 /**
- * Remux a transport stream to a playable temp .mp4 via the native ffmpeg sidecar,
+ * True when `path` is a fragmented MP4 large enough that the WebView would stall
+ * scanning it for a duration, so it must be remuxed before playing (play-020). The
+ * size gate (status from the prior stream_status) keeps small fragmented files —
+ * which scan quickly — on the direct, no-remux path. Best-effort: with no native
+ * backend (status null / invoke rejects) it returns false (the remux is also native,
+ * so there is nothing to do).
+ */
+async function needsFragmentedRemux(
+  path: string,
+  status: StreamStatus | null,
+): Promise<boolean> {
+  if (!status || status.size < MIN_FRAGMENTED_REMUX_BYTES) return false;
+  if (!isIsoBmffPath(path)) return false;
+  return tauriInvoke<boolean>("is_fragmented_mp4", { path }).catch(() => false);
+}
+
+/**
+ * Remux a container the WebView can't start playing (an MPEG-TS file, play-016, or a
+ * fragmented MP4, play-020) to a playable temp .mp4 via the native ffmpeg sidecar,
  * showing a progress overlay. Returns the temp .mp4 path, or null on failure (in
  * which case the error is already surfaced and the home screen is shown).
  */
-async function remuxTransportStream(path: string): Promise<string | null> {
+async function remuxForPlayback(path: string): Promise<string | null> {
   ui.preppingLabel = basename(path);
   ui.prepping = true;
   try {

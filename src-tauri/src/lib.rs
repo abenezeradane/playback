@@ -11,9 +11,10 @@
 //!     size + live-capture markers (so the frontend can DETECT a livestream and
 //!     open an empty player — livestream playback itself is temporarily
 //!     deprecated) and read byte ranges (used by the cut-view waveform),
-//!   * `remux_ts` converts an MPEG-TS file (.ts/.m2ts/.mts) into a playable temp
-//!     .mp4 via a bundled ffmpeg sidecar — Chromium's <video> decodes H.264/AAC but
-//!     cannot demux the TS container — and caches the result (play-016).
+//!   * `remux_ts` converts a container the WebView can't start playing — an MPEG-TS
+//!     file (.ts/.m2ts/.mts, play-016) or a fragmented MP4 the demuxer would have to
+//!     scan to EOF to find a duration (`is_fragmented_mp4`, play-020) — into a
+//!     playable faststart temp .mp4 via a bundled ffmpeg sidecar, and caches it.
 //!
 //! Filesystem reads are scoped (sec-002): the WebView may only read inside
 //! directories it has opened a file from. `allow_media_dir` records each opened
@@ -377,14 +378,103 @@ fn prune_ts_cache(dir: &Path) {
     }
 }
 
-/// Remux a transport-stream file (.ts/.m2ts/.mts) into a playable temp .mp4 and
-/// return its path. Chromium's <video> can decode H.264/AAC but cannot demux the
-/// MPEG-2 TS container, so on open the frontend calls this for TS files and plays
-/// the returned .mp4 instead. The bundled ffmpeg sidecar stream-copies the streams
-/// into MP4 (no re-encode). The source must already be authorized (the frontend
-/// calls `allow_media_dir` first); the temp output's directory is authorized here so
-/// the WebView can play it back. Result is cached by source identity, so re-opening
-/// the same file is instant.
+/// Read a big-endian `u32` / `u64` from a reader (ISO-BMFF box fields).
+fn read_be_u32<R: Read>(r: &mut R) -> std::io::Result<u32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(u32::from_be_bytes(b))
+}
+fn read_be_u64<R: Read>(r: &mut R) -> std::io::Result<u64> {
+    let mut b = [0u8; 8];
+    r.read_exact(&mut b)?;
+    Ok(u64::from_be_bytes(b))
+}
+
+/// True when the ISO-BMFF (MP4) stream in `r` is a *fragmented* MP4 — i.e. it has a
+/// top-level `moof` (movie-fragment) box, or a `moov` that contains an `mvex`
+/// (movie-extends) box. Fragmented captures (Twitch/OBS/Streamlink "live" MP4s)
+/// declare no usable duration in `moov`, and Chromium's progressive `<video>`
+/// demuxer responds by scanning EVERY fragment to end-of-file before it reports
+/// metadata — so a multi-GB fragmented recording opens but never starts playing
+/// (play-020). The frontend remuxes such files to a plain, faststart MP4 first.
+///
+/// Only box HEADERS are read; box bodies (incl. multi-GB `mdat`s) are seeked over,
+/// so this is cheap regardless of file size. A non-fragmented file is recognised by
+/// a `moov` with no `mvex` and returns `false`. Pure over a `Read + Seek`, so it is
+/// unit-tested with an in-memory cursor.
+fn scan_is_fragmented<R: Read + Seek>(r: &mut R) -> std::io::Result<bool> {
+    let end = r.seek(SeekFrom::End(0))?;
+    r.seek(SeekFrom::Start(0))?;
+    scan_boxes_for_fragmentation(r, 0, end, false)
+}
+
+/// Walk the boxes in `[start, region_end)`. At the top level (`in_moov == false`) a
+/// `moof` means fragmented and a `moov` is descended into; inside `moov`
+/// (`in_moov == true`) an `mvex` means fragmented. A complete `moov` with no `mvex`
+/// is conclusive (a file has exactly one `moov`), so we stop and report `false`.
+fn scan_boxes_for_fragmentation<R: Read + Seek>(
+    r: &mut R,
+    start: u64,
+    region_end: u64,
+    in_moov: bool,
+) -> std::io::Result<bool> {
+    let mut pos = start;
+    let mut steps = 0u32;
+    while pos + 8 <= region_end {
+        steps += 1;
+        if steps > 8192 {
+            break; // guard against a pathological/malformed box chain
+        }
+        r.seek(SeekFrom::Start(pos))?;
+        let size32 = read_be_u32(r)?;
+        let mut ty = [0u8; 4];
+        r.read_exact(&mut ty)?;
+        let mut header = 8u64;
+        let size = match size32 {
+            0 => region_end - pos, // box runs to the end of the region
+            1 => {
+                header = 16;
+                read_be_u64(r)?
+            }
+            n => u64::from(n),
+        };
+        if size < header || pos + size > region_end {
+            break; // malformed / truncated header
+        }
+        if in_moov {
+            if &ty == b"mvex" {
+                return Ok(true);
+            }
+        } else if &ty == b"moof" {
+            return Ok(true);
+        } else if &ty == b"moov" {
+            return scan_boxes_for_fragmentation(r, pos + header, pos + size, true);
+        }
+        pos += size;
+    }
+    Ok(false)
+}
+
+/// Report whether `path` is a fragmented MP4 that the WebView cannot start playing
+/// directly (see `scan_is_fragmented`). The frontend calls this on open for ISO-BMFF
+/// files and, when true, remuxes via `remux_ts` before playing (play-020). The path
+/// must already be authorized (`allow_media_dir` runs first).
+#[tauri::command]
+fn is_fragmented_mp4(allow: tauri::State<'_, AllowList>, path: String) -> Result<bool, String> {
+    let resolved = ensure_allowed(&allow, &path)?;
+    let mut file = fs::File::open(&resolved).map_err(|_| "file not found".to_string())?;
+    scan_is_fragmented(&mut file).map_err(|_| "could not read file".to_string())
+}
+
+/// Remux a container the WebView's `<video>` cannot start playing — an MPEG-TS file
+/// (.ts/.m2ts/.mts, play-016) or a fragmented MP4 (play-020) — into a plain,
+/// faststart temp .mp4 and return its path. Chromium can decode H.264/AAC but cannot
+/// demux MPEG-TS, and for a fragmented MP4 it scans every fragment to EOF before it
+/// will play (so a large one never starts); a stream-copy remux fixes both. The
+/// bundled ffmpeg sidecar copies the streams (no re-encode). The source must already
+/// be authorized (the frontend calls `allow_media_dir` first); the temp output's
+/// directory is authorized here so the WebView can play it back. The result is cached
+/// by source identity, so re-opening the same file is instant.
 #[tauri::command]
 async fn remux_ts(
     app: tauri::AppHandle,
@@ -749,6 +839,7 @@ pub fn run() {
             stream_status,
             read_stream_chunk,
             compute_waveform_peaks,
+            is_fragmented_mp4,
             remux_ts,
             list_folder_videos,
             get_hwaccel,
@@ -1132,5 +1223,40 @@ mod tests {
         assert_eq!(clamp_read_len(MAX_CHUNK, 100), 100);
         // Exactly at the ceiling stays at the ceiling (no off-by-one).
         assert_eq!(clamp_read_len(MAX_CHUNK, MAX_CHUNK), MAX_CHUNK as usize);
+    }
+
+    #[test]
+    fn scan_is_fragmented_distinguishes_fragmented_from_plain_mp4() {
+        use std::io::Cursor;
+        // size(4 BE) + type(4) + body
+        fn boxed(ty: &[u8; 4], body: &[u8]) -> Vec<u8> {
+            let mut v = ((8 + body.len()) as u32).to_be_bytes().to_vec();
+            v.extend_from_slice(ty);
+            v.extend_from_slice(body);
+            v
+        }
+        let ftyp = boxed(b"ftyp", b"isom\0\0\0\0");
+        let mvhd = boxed(b"mvhd", &[0u8; 100]);
+        let mvex = boxed(b"mvex", &boxed(b"trex", &[0u8; 24]));
+        let moof = boxed(b"moof", &[0u8; 16]);
+        let mdat = boxed(b"mdat", &[0u8; 64]);
+        let mut frag_moov_body = mvhd.clone();
+        frag_moov_body.extend_from_slice(&mvex);
+        let frag_moov = boxed(b"moov", &frag_moov_body); // mvhd + mvex
+        let plain_moov = boxed(b"moov", &mvhd); // mvhd only, no mvex
+        let cat = |parts: &[&[u8]]| -> Vec<u8> { parts.concat() };
+
+        // Fragmented (faststart): moov carries an mvex.
+        assert!(scan_is_fragmented(&mut Cursor::new(cat(&[&ftyp, &frag_moov, &moof, &mdat]))).unwrap());
+        // Fragmented (streaming): a top-level moof, moov not at the front.
+        assert!(scan_is_fragmented(&mut Cursor::new(cat(&[&ftyp, &moof, &mdat]))).unwrap());
+        // Plain MP4: a complete moov with no mvex.
+        assert!(!scan_is_fragmented(&mut Cursor::new(cat(&[&ftyp, &plain_moov, &mdat]))).unwrap());
+        // Plain MP4 with moov AFTER a large mdat (exercises the seek-over-body path).
+        let big_mdat = boxed(b"mdat", &vec![0u8; 5000]);
+        assert!(!scan_is_fragmented(&mut Cursor::new(cat(&[&ftyp, &big_mdat, &plain_moov]))).unwrap());
+        // Degenerate inputs never panic and report "not fragmented".
+        assert!(!scan_is_fragmented(&mut Cursor::new(Vec::<u8>::new())).unwrap());
+        assert!(!scan_is_fragmented(&mut Cursor::new(ftyp.clone())).unwrap());
     }
 }
