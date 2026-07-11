@@ -104,11 +104,12 @@ export const ui = $state({
   // the NATIVE engine is active — mpv's hwdec switches at runtime.)
   hwaccelRestartHint: false,
 
-  // --- Playback engine (native-001) ---
-  // "web" (default) = the original <video> path; "native" = embedded libmpv
-  // (instant fMP4/TS/MKV open, hardware decode, video under the transparent
-  // WebView). Mirrors the native pref file; applies to the NEXT opened file.
-  enginePref: "web" as "web" | "native",
+  // --- Playback engine (native-001; default flipped in native-003) ---
+  // "native" (default) = embedded libmpv (instant fMP4/TS/MKV open, hardware
+  // decode, video under the transparent WebView); "web" = the original <video>
+  // path, kept as the compatibility fallback (PiP, or a broken libmpv).
+  // Mirrors the native pref file; applies to the NEXT opened file.
+  enginePref: "native" as "web" | "native",
   // The engine that loaded the CURRENT file (drives PiP gating, hwaccel hint).
   engineActive: "web" as "web" | "native",
   // False when libmpv-2.dll is missing/incompatible — the Settings row then

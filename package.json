@@ -1,6 +1,6 @@
 {
   "name": "playback",
-  "version": "0.41.0",
+  "version": "0.42.0",
   "description": "A fully featured video player built with Tauri 2.0",
   "type": "module",
   "license": "MIT",
@@ -13,7 +13,9 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "//tauri:bundle": "installer-only overlay: libmpv-2.dll + LGPL notices live in tauri.bundle.conf.json (NOT tauri.conf.json) because tauri-build validates resource paths on every cargo build and the DLL is gitignored — listing it in the base config breaks fresh-clone cargo test (native-001 review finding). Run scripts/fetch-libmpv.mjs first.",
+    "tauri:bundle": "tauri build --config src-tauri/tauri.bundle.conf.json"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",

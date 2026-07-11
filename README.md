@@ -100,9 +100,21 @@ npm run tauri:dev    # launch the app (Vite dev server + native window)
 
 ```bash
 npm run build              # frontend: tsc type-check + Vite production build
-npm run tauri:build        # full release build + installers
 npm run tauri -- build --no-bundle   # release exe only (no installers)
+
+# The shippable installer (NSIS). Provision the gitignored binaries first —
+# the installer bundles libmpv-2.dll (the DEFAULT playback engine since
+# native-003) + the LGPL notices via the src-tauri/tauri.bundle.conf.json
+# overlay. Plain `npm run tauri:build` uses the base config and produces
+# installers WITHOUT libmpv — every install of those silently falls back to
+# the WebView engine, so don't ship them.
+node scripts/fetch-ffmpeg.mjs
+node scripts/fetch-libmpv.mjs
+npm run tauri:bundle
 ```
+
+NSIS is the only supported installer target; the MSI/WiX target is not wired
+to the libmpv bundling overlay.
 
 ## Verify
 

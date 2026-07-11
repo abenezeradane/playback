@@ -202,12 +202,14 @@ fn get_hwaccel() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Playback-engine preference (native-001)
+// Playback-engine preference (native-001; default flipped in native-003)
 //
-// "native" = the embedded-libmpv engine; "web" = the original WebView <video>
-// path (the DEFAULT in native-001 — flipping it is native-003's scope). Stored
-// as a native pref file next to `hwaccel` (NOT localStorage) so smoke scripts
-// can preseed it before launch, exactly like the smoke-hwaccel precedent.
+// "native" = the embedded-libmpv engine (the DEFAULT since native-003 —
+// instant open for fMP4/TS/MKV, no remux); "web" = the original WebView
+// <video> path, kept as the compatibility fallback (and what the frontend
+// degrades to when libmpv-2.dll is missing). Stored as a native pref file
+// next to `hwaccel` (NOT localStorage) so smoke scripts can preseed it
+// before launch, exactly like the smoke-hwaccel precedent.
 // ---------------------------------------------------------------------------
 
 /// Path of the engine preference file (`engine` under the app config dir) —
@@ -217,12 +219,14 @@ fn engine_pref_path() -> Option<PathBuf> {
 }
 
 /// Normalize a stored/requested engine value; anything unrecognized is the
-/// safe default ("web"). Pure + unit-tested.
+/// default ("native" since native-003 — a missing DLL is still safe: the
+/// frontend probes availability and degrades to the web engine). Pure +
+/// unit-tested.
 fn normalize_engine(value: &str) -> &'static str {
-    if value.trim() == "native" {
-        "native"
-    } else {
+    if value.trim() == "web" {
         "web"
+    } else {
+        "native"
     }
 }
 
@@ -230,7 +234,7 @@ fn normalize_engine(value: &str) -> &'static str {
 #[tauri::command]
 fn get_engine_pref() -> String {
     let stored = engine_pref_path().and_then(|p| fs::read_to_string(p).ok());
-    normalize_engine(stored.as_deref().unwrap_or("web")).to_string()
+    normalize_engine(stored.as_deref().unwrap_or("native")).to_string()
 }
 
 /// Persist the playback-engine preference. Applies to the next file opened.
@@ -1421,13 +1425,15 @@ mod tests {
     }
 
     #[test]
-    fn normalize_engine_defaults_everything_but_native_to_web() {
-        assert_eq!(normalize_engine("native"), "native");
-        assert_eq!(normalize_engine(" native\n"), "native"); // file read w/ newline
+    fn normalize_engine_defaults_everything_but_web_to_native() {
+        // native-003: the native engine is the default — only an explicit
+        // "web" opts into the WebView compatibility engine.
         assert_eq!(normalize_engine("web"), "web");
-        assert_eq!(normalize_engine(""), "web");
-        assert_eq!(normalize_engine("NATIVE"), "web"); // unrecognized -> safe default
-        assert_eq!(normalize_engine("mpv"), "web");
+        assert_eq!(normalize_engine(" web\n"), "web"); // file read w/ newline
+        assert_eq!(normalize_engine("native"), "native");
+        assert_eq!(normalize_engine(""), "native");
+        assert_eq!(normalize_engine("WEB"), "native"); // unrecognized -> default
+        assert_eq!(normalize_engine("mpv"), "native");
     }
 
     #[test]

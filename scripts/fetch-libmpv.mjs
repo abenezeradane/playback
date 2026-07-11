@@ -7,23 +7,62 @@
 // (the mpv-dev-lgpl asset: libmpv-2.dll with FFmpeg statically inside, LGPL-2.1 —
 // see licenses/libmpv-NOTICE.md), extracts it with Windows' bsdtar (System32
 // tar.exe reads 7z; falls back to 7-Zip if installed), and places the DLL at:
-//   * src-tauri/binaries/libmpv-2.dll        (source of truth, .gitignored)
-//   * src-tauri/target/{debug,release}/      (next to the exe for dev + smokes;
-//                                             build.rs also does this on build)
+//   * src-tauri/binaries/libmpv-2.dll        (source of truth, .gitignored;
+//                                             the installer bundles from here —
+//                                             see src-tauri/tauri.bundle.conf.json)
+//   * src-tauri/target/{debug,release}/      (next to the exe for dev + smokes)
 // Run once after a fresh checkout (like fetch-ffmpeg.mjs), before building.
 // LIBMPV_ARCHIVE can point at an already-downloaded mpv-dev-*.7z to skip the network.
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, basename } from "node:path";
 import { tmpdir } from "node:os";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const binDir = join(root, "src-tauri", "binaries");
 const dest = join(binDir, "libmpv-2.dll");
+// LGPL source-offer record: which exact zhongfly/mpv-winbuild release the DLL
+// came from + its SHA-256. Shipped INTO the installer as licenses/libmpv-SOURCE.txt
+// (see src-tauri/tauri.bundle.conf.json), so a recipient can fetch the complete
+// corresponding source for the exact binary they received.
+const sourceRecord = join(binDir, "libmpv-2.dll.source.txt");
+
+function sha256(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+/** Write the source-offer record. `release` is null when the provenance is not
+ *  known (DLL provisioned before this script recorded it, or a local archive). */
+function writeSourceRecord(release) {
+  const lines = [
+    "libmpv-2.dll provenance (LGPL-2.1 source offer — see libmpv-NOTICE.md)",
+    "",
+    `sha256(libmpv-2.dll) = ${sha256(dest)}`,
+    `provisioned = ${new Date().toISOString()}`,
+  ];
+  if (release?.tag) {
+    lines.push(`release = https://github.com/zhongfly/mpv-winbuild/releases/tag/${release.tag}`);
+  } else {
+    lines.push(
+      "release = (tag not recorded at provisioning time — match the sha256/date",
+      "          against the assets on https://github.com/zhongfly/mpv-winbuild/releases)",
+    );
+  }
+  if (release?.asset) lines.push(`asset = ${release.asset}`);
+  lines.push(
+    "",
+    "Each zhongfly/mpv-winbuild release names the mpv/FFmpeg git revisions it was",
+    "built from and links the corresponding source.",
+    "",
+  );
+  writeFileSync(sourceRecord, lines.join("\n"));
+  console.log(`Recorded provenance: ${sourceRecord}`);
+}
 
 /** Copy the provisioned DLL next to any existing build outputs so a rebuilt or
- *  previously-built exe can load it immediately (build.rs repeats this on build). */
+ *  previously-built exe can load it immediately. */
 function copyToTargets() {
   for (const profile of ["debug", "release"]) {
     const dir = join(root, "src-tauri", "target", profile);
@@ -36,15 +75,17 @@ function copyToTargets() {
 
 if (existsSync(dest) && statSync(dest).size > 10 * 1024 * 1024) {
   console.log(`libmpv already present: ${dest}`);
+  if (!existsSync(sourceRecord)) writeSourceRecord(null); // pre-tracking DLL: record its hash
   copyToTargets();
   process.exit(0);
 }
 
 /** Resolve the .7z archive: LIBMPV_ARCHIVE override, else download the latest
- *  mpv-dev-lgpl-x86_64 release asset from zhongfly/mpv-winbuild. */
+ *  mpv-dev-lgpl-x86_64 release asset from zhongfly/mpv-winbuild. Returns
+ *  { archive, release } — release is null when provenance is unknown. */
 function resolveArchive() {
   if (process.env.LIBMPV_ARCHIVE && existsSync(process.env.LIBMPV_ARCHIVE)) {
-    return process.env.LIBMPV_ARCHIVE;
+    return { archive: process.env.LIBMPV_ARCHIVE, release: null };
   }
   console.log("Fetching latest zhongfly/mpv-winbuild release metadata…");
   const meta = execFileSync(
@@ -62,7 +103,7 @@ function resolveArchive() {
       stdio: "inherit",
     });
   }
-  return archive;
+  return { archive, release: { tag: release.tag_name, asset: asset.name } };
 }
 
 /** Extract libmpv-2.dll out of the .7z into a temp dir; returns the DLL path. */
@@ -83,10 +124,11 @@ function extractDll(archive) {
   return dll;
 }
 
-const archive = resolveArchive();
+const { archive, release } = resolveArchive();
 console.log(`Extracting libmpv-2.dll from ${archive}…`);
 const dll = extractDll(archive);
 mkdirSync(binDir, { recursive: true });
 copyFileSync(dll, dest);
 console.log(`Provisioned ${dest} (${Math.round(statSync(dest).size / 1024 / 1024)} MB)`);
+writeSourceRecord(release ?? { tag: null, asset: basename(archive) });
 copyToTargets();

@@ -27,13 +27,15 @@
 
     <div class="settings__body">
       <p class="shortcuts__group">PLAYBACK</p>
-      <!-- Playback engine (native-001): opt-in embedded libmpv. Native decodes
-           fragmented MP4 / MPEG-TS / MKV recordings instantly (no conversion
-           step) with hardware decode; the WebView engine remains the default. -->
+      <!-- Playback engine (native-001; DEFAULT since native-003): embedded
+           libmpv decodes fragmented MP4 / MPEG-TS / MKV recordings instantly
+           (no conversion step) with hardware decode. Turning it off selects
+           the WebView compatibility engine (restores picture-in-picture;
+           large OBS/Streamlink recordings then need a conversion step). -->
       <label class="settings__row">
         <span class="settings__row-text">
           <span class="settings__row-title">Native playback engine (mpv)</span>
-          <span class="settings__row-desc">Play videos with the built-in native engine: OBS/Streamlink recordings (fragmented MP4, MPEG-TS, MKV) start instantly with no conversion step. Applies to the next video you open. Picture-in-picture is unavailable while it's active.</span>
+          <span class="settings__row-desc">The default engine: OBS/Streamlink recordings (fragmented MP4, MPEG-TS, MKV) start instantly with no conversion step. Turn off to use the compatibility engine — restores picture-in-picture, but large recordings need a conversion step before playback. Applies to the next video you open.</span>
         </span>
         <input
           id="engine-toggle"

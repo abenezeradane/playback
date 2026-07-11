@@ -14,10 +14,12 @@ which statically includes [FFmpeg](https://ffmpeg.org) and other libraries.
 - libmpv is kept as a **separate, user-replaceable DLL** (loaded at runtime;
   the app runs without it). You may replace `libmpv-2.dll` next to the
   executable with any ABI-2-compatible build.
-- **Source offer**: the complete corresponding source for the bundled DLL is
-  published with the exact release it was downloaded from on the
-  zhongfly/mpv-winbuild releases page (each release names the mpv/FFmpeg git
-  revisions it was built from). Provision/update the DLL with
-  `node scripts/fetch-libmpv.mjs`, which records the release used in its output.
+- **Source offer**: `libmpv-SOURCE.txt` (next to this file in an installed
+  copy; `src-tauri/binaries/libmpv-2.dll.source.txt` in a checkout) records the
+  bundled DLL's SHA-256, provisioning date, and the exact
+  zhongfly/mpv-winbuild release it was downloaded from. The complete
+  corresponding source is published with that release (each release names the
+  mpv/FFmpeg git revisions it was built from). Provision/update the DLL with
+  `node scripts/fetch-libmpv.mjs`, which (re)writes that record.
 
 Playback itself does not link libmpv at build time and contains no mpv code.

@@ -649,14 +649,25 @@ async function loadHwaccel(): Promise<void> {
   }
 }
 
-/** Set the hardware-acceleration preference; takes effect on the next launch. */
+/** Set the hardware-acceleration preference. */
 export function setHwaccel(enabled: boolean): void {
   ui.hwaccel = enabled;
-  // Under the NATIVE engine hardware decode is an mpv property applied right
-  // now — no restart needed (the pref file still drives the engine's initial
-  // hwdec AND the web engine's WebView2 launch flag, so it is written either way).
-  ui.hwaccelRestartHint = ui.engineActive !== "native";
-  if (ui.engineActive === "native") nativeEngine?.setHwdec(enabled);
+  // Under the NATIVE engine (the default since native-003) hardware decode is
+  // an mpv property applied right now — an existing core via player_set_hwdec
+  // (best-effort no-op with no core), a future core from the pref file at
+  // create. Only the WEB engine's WebView2 launch flag is fixed at process
+  // start, so the restart hint shows when web playback is what the flip
+  // affects: the next file open will use the web engine (explicit web pref,
+  // or libmpv unavailable), or something is playing through the web element
+  // RIGHT NOW (a web-pref file, or a URL/stream — those bypass the engine
+  // choice entirely). engineActive alone can't gate this: it starts as "web"
+  // before anything plays and goes stale after Back-to-home, which is how the
+  // old `engineActive !== "native"` term wrongly suppressed the hint after
+  // switching the pref to web mid-native-file (review finding).
+  const nativeNext = ui.enginePref === "native" && ui.engineAvailable;
+  const webPlayingNow = ui.view === "playing" && ui.engineActive === "web";
+  ui.hwaccelRestartHint = !nativeNext || webPlayingNow;
+  nativeEngine?.setHwdec(enabled);
   try {
     localStorage.setItem(HWACCEL_KEY, enabled ? "on" : "off");
   } catch {
@@ -669,11 +680,13 @@ export function setHwaccel(enabled: boolean): void {
 }
 
 // ---------------------------------------------------------------------------
-// Playback-engine choice (native-001)
+// Playback-engine choice (native-001; default flipped in native-003)
 //
-// "web" (default) = the original <video> path, remuxes and all. "native" = the
-// embedded-libmpv engine: raw-path loads with NO remux (the fMP4/TS instant-open
-// win), video rendered by mpv's child window UNDER the transparent WebView.
+// "native" (default) = the embedded-libmpv engine: raw-path loads with NO remux
+// (the fMP4/TS instant-open win), video rendered by mpv's child window UNDER
+// the transparent WebView. "web" = the original <video> path, remuxes and all —
+// the compatibility fallback (PiP needs it; a missing libmpv-2.dll degrades to
+// it automatically via engineForLoad's nativeEngine check).
 // The pref is a native file next to `hwaccel` (smokes preseed it before launch);
 // it applies per-load, so switching takes effect on the next opened file.
 // ---------------------------------------------------------------------------
@@ -686,8 +699,12 @@ async function initEngineChoice(): Promise<void> {
   } catch {
     ui.enginePref = "web"; // not under Tauri — the web element is all there is
   }
-  if (ui.enginePref === "native") {
-    await ensureNativeEngine();
+  if (ui.enginePref === "native" && !(await ensureNativeEngine())) {
+    // libmpv missing/broken under the native DEFAULT: reflect reality in the
+    // UI (unchecked toggle + the unavailable hint) exactly like setEngine's
+    // failure path — but ONLY in memory. The pref file stays untouched, so a
+    // repaired DLL restores the native default on the next launch.
+    ui.enginePref = "web";
   }
   try {
     const flags = await tauriInvoke<{ shotEnabled: boolean }>("test_flags", {});

@@ -43,7 +43,7 @@ IPC as generic strings (detail to stderr via `ipc_error`, sec-005).
 | `player_set_video_margin_ratio` | `{ left, right, top, bottom }` (0–0.9) | — | `video-margin-ratio-*` properties. Called by the cut view (native-002): the frontend measures `#video-surface`'s box and converts it to window fractions (`marginRatiosForBox`, opposing pairs scaled to sum ≤ 0.9); zeros = full-window video. The adapter mirrors the last value and re-pushes it after every `player_load` (the mpv core is created lazily / can be reaped) |
 | `player_screenshot` | `{ mode: "video" \| "window" }` | shot path | `screenshot-to-file <dir>/shot-N.png <mode>`; **errors unless `PLAYBACK_TEST_SHOT_DIR` is set** |
 | `test_flags` | — | `{ shotEnabled: bool }` | env probe; frontend binds F9/Shift+F9 iff true |
-| `get_engine_pref` | — | `"native" \| "web"` | native pref file `engine` (next to `hwaccel`); default `"web"` |
+| `get_engine_pref` | — | `"native" \| "web"` | native pref file `engine` (next to `hwaccel`); default `"native"` (flipped in native-003; only an explicit `web` selects the WebView engine) |
 | `set_engine_pref` | `{ engine: "native" \| "web" }` | — | writes the pref file |
 
 Related but OUTSIDE the engine (no mpv core involved): `extract_video_still`
