@@ -87,6 +87,7 @@ import {
   type PlaylistStore,
   type Shuttle,
 } from "../player-core";
+import { NativeEngine, type EngineSurface } from "./engine-native";
 
 // ---------------------------------------------------------------------------
 // File-type routing
@@ -136,7 +137,20 @@ function imageMimeType(path: string): string {
 // ---------------------------------------------------------------------------
 // DOM handles (set in init() from the bind:this registry) + module state
 // ---------------------------------------------------------------------------
-let video!: HTMLVideoElement;
+/**
+ * The ACTIVE playback engine (native-001): either the real `<video>` element
+ * (web engine) or the NativeEngine adapter (embedded libmpv), which impersonates
+ * the exact member subset this controller touches. Every command helper drives
+ * whichever engine loaded the current file; element-only features (PiP, rVFC)
+ * use `els.video` directly and are gated off under native.
+ */
+let video!: EngineSurface;
+/** The libmpv adapter, constructed once the native engine is first needed. */
+let nativeEngine: NativeEngine | null = null;
+/** Resolves once the persisted engine preference has been read (init()). */
+let enginePrefReady: Promise<void> = Promise.resolve();
+/** F9/Shift+F9 screenshot hotkeys — live only when the Rust test hooks are. */
+let shotHotkeysEnabled = false;
 let cutGen!: HTMLVideoElement;
 let cutFilmstrip!: HTMLCanvasElement;
 let cutWaveform!: HTMLCanvasElement;
@@ -350,24 +364,33 @@ export async function doToggleFullscreen(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Picture-in-picture (play-015)
 // ---------------------------------------------------------------------------
-/** True when this WebView can put the current <video> into picture-in-picture. */
+/**
+ * True when this WebView can put the current <video> into picture-in-picture.
+ * PiP is a browser feature of the ELEMENT — under the native engine the pixels
+ * never touch the WebView, so it is unavailable (the button hides via the
+ * existing ui.pipSupported gate; native-003 tracks any future story).
+ */
 function pipSupported(): boolean {
+  const el = els.video;
   return (
+    ui.engineActive !== "native" &&
     document.pictureInPictureEnabled === true &&
-    typeof video.requestPictureInPicture === "function" &&
-    !video.disablePictureInPicture
+    !!el &&
+    typeof el.requestPictureInPicture === "function" &&
+    !el.disablePictureInPicture
   );
 }
 
 /** Toggle picture-in-picture for the main <video> (no-op when unsupported). */
 export async function doTogglePip(): Promise<void> {
-  if (!ui.pipSupported) return;
+  if (!ui.pipSupported || ui.engineActive === "native") return;
+  const el = els.video!;
   try {
-    if (document.pictureInPictureElement === video) {
+    if (document.pictureInPictureElement === el) {
       await document.exitPictureInPicture();
     } else {
-      if (!playerVisible() || video.readyState === 0) return;
-      await video.requestPictureInPicture();
+      if (!playerVisible() || el.readyState === 0) return;
+      await el.requestPictureInPicture();
     }
   } catch {
     /* user gesture missing / no video track / already transitioning — ignore */
@@ -625,7 +648,11 @@ async function loadHwaccel(): Promise<void> {
 /** Set the hardware-acceleration preference; takes effect on the next launch. */
 export function setHwaccel(enabled: boolean): void {
   ui.hwaccel = enabled;
-  ui.hwaccelRestartHint = true;
+  // Under the NATIVE engine hardware decode is an mpv property applied right
+  // now — no restart needed (the pref file still drives the engine's initial
+  // hwdec AND the web engine's WebView2 launch flag, so it is written either way).
+  ui.hwaccelRestartHint = ui.engineActive !== "native";
+  if (ui.engineActive === "native") nativeEngine?.setHwdec(enabled);
   try {
     localStorage.setItem(HWACCEL_KEY, enabled ? "on" : "off");
   } catch {
@@ -637,9 +664,124 @@ export function setHwaccel(enabled: boolean): void {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Playback-engine choice (native-001)
+//
+// "web" (default) = the original <video> path, remuxes and all. "native" = the
+// embedded-libmpv engine: raw-path loads with NO remux (the fMP4/TS instant-open
+// win), video rendered by mpv's child window UNDER the transparent WebView.
+// The pref is a native file next to `hwaccel` (smokes preseed it before launch);
+// it applies per-load, so switching takes effect on the next opened file.
+// ---------------------------------------------------------------------------
+
+/** Read the persisted engine pref + wire test hooks; runs once from init(). */
+async function initEngineChoice(): Promise<void> {
+  try {
+    const pref = await tauriInvoke<string>("get_engine_pref", {});
+    ui.enginePref = pref === "native" ? "native" : "web";
+  } catch {
+    ui.enginePref = "web"; // not under Tauri — the web element is all there is
+  }
+  if (ui.enginePref === "native") {
+    await ensureNativeEngine();
+  }
+  try {
+    const flags = await tauriInvoke<{ shotEnabled: boolean }>("test_flags", {});
+    shotHotkeysEnabled = flags.shotEnabled === true;
+  } catch {
+    /* not under Tauri */
+  }
+}
+
+/** Construct + wire the libmpv adapter once; false when the DLL is missing. */
+async function ensureNativeEngine(): Promise<boolean> {
+  if (nativeEngine) return true;
+  try {
+    const status = await tauriInvoke<{ available: boolean }>("player_engine_status", {});
+    if (!status.available) {
+      ui.engineAvailable = false;
+      return false;
+    }
+    const engine = new NativeEngine({
+      onLoadedMetadata: onNativeLoadedMetadata,
+      onTimeUpdate,
+      onPlay,
+      onPause,
+      onEnded,
+      onEngineError: onNativeEngineError,
+      onPresented: onNativePresented,
+    });
+    await engine.init();
+    nativeEngine = engine;
+    ui.engineAvailable = true;
+    return true;
+  } catch {
+    ui.engineAvailable = false;
+    return false;
+  }
+}
+
+/** Which engine the NEXT load should use (await the pref read first). */
+async function engineForLoad(): Promise<"native" | "web"> {
+  await enginePrefReady;
+  return ui.enginePref === "native" && nativeEngine ? "native" : "web";
+}
+
+/** The Settings "Playback engine" toggle. Applies to the next opened file. */
+export async function setEngine(pref: "native" | "web"): Promise<void> {
+  if (pref === "native" && !(await ensureNativeEngine())) {
+    ui.enginePref = "web"; // DLL missing — stay on web; the row shows the hint
+    return;
+  }
+  ui.enginePref = pref;
+  ui.engineHint = true;
+  void tauriInvoke("set_engine_pref", { engine: pref }).catch(() => {
+    /* not under Tauri */
+  });
+}
+
+/**
+ * Open/close the transparent "hole" the native video shows through. DIRECT
+ * setAttribute — a Svelte-bound attribute rides the rAF-gated render flush,
+ * which stalls when the window isn't foreground (the ui-005 lesson), and this
+ * flag is exactly what unfocused smoke runs assert.
+ */
+function syncVideoHole(on: boolean): void {
+  document.getElementById("app")?.setAttribute("data-native-video", on ? "true" : "false");
+}
+
+/** First presented frame of the current native load — open the hole now (never
+ *  earlier, so the desktop can't flash through between load and first frame). */
+function onNativePresented(): void {
+  if (ui.engineActive === "native" && ui.view === "playing") syncVideoHole(true);
+}
+
+/** Native metadata: the demuxer knows the exact container fps — no rVFC
+ *  sampling needed (the web path's startFpsDetection self-disables on the
+ *  adapter, which has no requestVideoFrameCallback). */
+function onNativeLoadedMetadata(): void {
+  const fps = nativeEngine?.containerFps;
+  if (fps) {
+    detectedFps = snapFps(fps);
+    updateCutMeta();
+  }
+  onLoadedMetadata();
+}
+
+/** Native load/playback failure — same surface as a remux failure. */
+function onNativeEngineError(message: string): void {
+  ui.prepping = false;
+  syncVideoHole(false);
+  ui.view = "empty";
+  showError(`Could not play this file: ${message}`);
+}
+
 export function setSettingsOpen(open: boolean): void {
   ui.settingsOpen = open;
-  if (!open) ui.hwaccelRestartHint = false;
+  if (!open) {
+    ui.hwaccelRestartHint = false;
+    ui.engineHint = false;
+  }
 }
 
 export function toggleSettings(): void {
@@ -708,6 +850,7 @@ export function togglePanel(): void {
 
 /** Back button: tear down the current video and return to the home screen. */
 export function goHome(): void {
+  syncVideoHole(false); // close the native hole before the view swaps
   video.pause();
   setCutMode(false);
   clearCutDeck();
@@ -984,7 +1127,14 @@ function buildCutDeck(): void {
   window.clearTimeout(cutDeckBuildTimer);
   cutDeckBuildTimer = window.setTimeout(() => {
     if (ftoken !== filmstripToken) return;
-    void captureFilmstripFromGenerator(path, ftoken);
+    // The filmstrip generator is a second <video> decode pipeline — it can't
+    // decode what the WebView can't (unremuxed fMP4/TS, exactly what the
+    // native engine plays), so under native the strip keeps its dark
+    // placeholder slots until native-002 adds native thumbnail extraction.
+    // The waveform is already native (ffmpeg sidecar) and works for both.
+    if (ui.engineActive !== "native") {
+      void captureFilmstripFromGenerator(path, ftoken);
+    }
     void buildWaveform(path, wtoken);
   }, CUT_DECK_BUILD_DELAY_MS);
 }
@@ -1359,6 +1509,8 @@ function resetShuttle(): void {
   shuttle = createShuttle();
   stopShuttleLoop();
   video.playbackRate = state.rate;
+  // Native engine: scrub commits / chapter jumps go back to frame-exact seeks.
+  nativeEngine?.setSeekPrecision("exact");
 }
 
 /** One reverse-shuttle tick: HTML5 can't play backwards, so step currentTime. */
@@ -1398,6 +1550,10 @@ function applyShuttle(): void {
   } else {
     video.playbackRate = state.rate;
     video.pause();
+    // Native engine: the 60 fps reverse stepper's currentTime writes funnel
+    // through the adapter's seek coalescer (one in flight, latest wins) —
+    // keyframe seeks keep that pacing responsive on long-GOP recordings.
+    if (ui.engineActive === "native") nativeEngine?.setSeekPrecision("fast");
     shuttleLast = performance.now();
     shuttleRAF = requestAnimationFrame(reverseStep);
   }
@@ -1969,20 +2125,28 @@ async function loadFromPath(path: string, fromQueue = false): Promise<void> {
       openEmptyLivePlayer(path);
       return;
     }
-    // Some containers the WebView's <video> can't start playing are remuxed to a
-    // temp .mp4 via the ffmpeg sidecar first, and that .mp4 is played instead — an
-    // MPEG-TS container it can't demux (play-016), or a large fragmented MP4 it would
-    // otherwise stall scanning for a duration (play-020). Every downstream consumer
-    // (the player src AND the cut deck) uses the remuxed .mp4.
     let playPath = path;
-    if (isTransportStreamPath(path) || (await needsFragmentedRemux(path, status))) {
-      const remuxed = await remuxForPlayback(path);
-      if (remuxed === null) return; // error already surfaced
-      playPath = remuxed;
+    if ((await engineForLoad()) === "native") {
+      // NATIVE engine (native-001): mpv demuxes fragmented MP4 / MPEG-TS / MKV
+      // directly from the raw path — no remux, no asset URL, no "Preparing
+      // video…" step. This is the whole point of the engine: the play-016/020
+      // preprocessing below exists only for the WebView's <video>.
+      loadNative(path, basename(path), parentDir(path));
+    } else {
+      // WEB engine: some containers the WebView's <video> can't start playing
+      // are remuxed to a temp .mp4 via the ffmpeg sidecar first — an MPEG-TS
+      // container it can't demux (play-016), or a large fragmented MP4 it would
+      // otherwise stall scanning for a duration (play-020). Every downstream
+      // consumer (the player src AND the cut deck) uses the remuxed .mp4.
+      if (isTransportStreamPath(path) || (await needsFragmentedRemux(path, status))) {
+        const remuxed = await remuxForPlayback(path);
+        if (remuxed === null) return; // error already surfaced
+        playPath = remuxed;
+      }
+      const { convertFileSrc } = await import("@tauri-apps/api/core");
+      const src = convertFileSrc(playPath);
+      loadSrc(src, basename(path), parentDir(path));
     }
-    const { convertFileSrc } = await import("@tauri-apps/api/core");
-    const src = convertFileSrc(playPath);
-    loadSrc(src, basename(path), parentDir(path));
     prepareCutDeck(playPath, basename(path));
     if (playlistActive) {
       // A user playlist (play-014) is driving the queue — keep it; just reconcile
@@ -2065,10 +2229,16 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-/** Load a media file from an already-resolved URL (asset://). */
+/** Load a media file from an already-resolved URL (asset://) — the WEB engine. */
 function loadSrc(src: string, title: string, subtitle = ""): void {
   ui.emptyError = "";
   clearImageView();
+  // Engine switch (native → web): silence the native engine and close its hole.
+  if (nativeEngine && video === (nativeEngine as EngineSurface)) nativeEngine.stop();
+  video = els.video!;
+  ui.engineActive = "web";
+  syncVideoHole(false);
+  ui.pipSupported = pipSupported();
   video.src = src;
   ui.title = title;
   ui.subtitle = subtitle;
@@ -2086,10 +2256,45 @@ function loadSrc(src: string, title: string, subtitle = ""): void {
   showControls();
 }
 
+/** Load a media file into the NATIVE engine by raw path (native-001). */
+function loadNative(path: string, title: string, subtitle = ""): void {
+  ui.emptyError = "";
+  clearImageView();
+  // Engine switch (web → native): silence the idle/previous <video> element.
+  const el = els.video;
+  if (el) {
+    el.pause();
+    el.removeAttribute("src");
+    el.load();
+  }
+  video = nativeEngine!;
+  ui.engineActive = "native";
+  ui.pipSupported = false; // PiP is a browser feature of the element
+  ui.bufferedPct = 0; // no progressive buffer natively; the bar stays empty
+  // The hole opens on the FIRST PRESENTED FRAME (onNativePresented), not here —
+  // until then the stage keeps painting its opaque black, like the web player
+  // before first frame.
+  syncVideoHole(false);
+  void nativeEngine!.loadPath(path).catch((err) => {
+    onNativeEngineError(err instanceof Error ? err.message : String(err));
+  });
+  ui.title = title;
+  ui.subtitle = subtitle;
+  document.title = `${title} — Playback`;
+  ui.view = "playing";
+  state = createInitialState();
+  applyAudioToVideo();
+  resetShuttle();
+  clearAbLoop();
+  applyLoopState();
+  showControls();
+}
+
 /** A detected livestream opens the "Livestream · Unavailable" screen (frame 04b). */
 function openEmptyLivePlayer(path: string): void {
   const title = basename(path);
   const folder = parentDir(path);
+  syncVideoHole(false);
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -2143,6 +2348,7 @@ function clearImageView(): void {
 /** Open an animated / still image in the dedicated viewer (play-012). */
 async function openImage(path: string): Promise<void> {
   const token = ++imgToken;
+  syncVideoHole(false); // the image viewer paints on the opaque app canvas
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -2462,7 +2668,10 @@ export function commitSeek(sliderValue: number): void {
 export function onLoadedMetadata(): void {
   syncFromVideo();
   render();
-  if (currentPath) setRecentDuration(currentPath, video.duration);
+  // Guard duration > 0: the native engine can report metadata before any
+  // duration is known (zero-duration fragmented MP4) and re-fires this when
+  // the real duration arrives — don't write a bogus 0 into recents meanwhile.
+  if (currentPath && video.duration > 0) setRecentDuration(currentPath, video.duration);
   renderTimestamps();
   renderAbMarkers();
   buildRuler(video.duration);
@@ -2731,6 +2940,17 @@ function wireKeyboard(): void {
         e.preventDefault();
         toggleShortcuts();
         break;
+      case "F9":
+        // TEST-ONLY frame oracle (native-001): live only when the Rust side
+        // reports PLAYBACK_TEST_SHOT_DIR is set by a smoke harness. F9 = the
+        // decoded frame, Shift+F9 = the presented window.
+        if (shotHotkeysEnabled && playerVisible()) {
+          e.preventDefault();
+          void tauriInvoke("player_screenshot", {
+            mode: e.shiftKey ? "window" : "video",
+          }).catch(() => {});
+        }
+        break;
       case "Escape": {
         // Esc dismisses the TOPMOST layer only. A side panel / overlay COVERS the
         // "Up Next" prompt, so an Esc that closes the panel must only reveal the
@@ -2862,12 +3082,16 @@ export function init(): void {
   imgEl = els.imgEl!;
   tsAddInput = els.tsAddInput!;
 
+  // Resolve the persisted engine choice (native-001) before the first load —
+  // loadFromPath awaits this promise, so launch files pick the right engine.
+  enginePrefReady = initEngineChoice();
+
   ui.pipSupported = pipSupported();
   // Mirror the OS PiP window's state onto the button (play-015). These events are
-  // non-standard, so they're attached imperatively rather than in the template.
+  // non-standard and element-only, so they're attached to the real <video>.
   if (ui.pipSupported) {
-    video.addEventListener("enterpictureinpicture", onEnterPip);
-    video.addEventListener("leavepictureinpicture", onLeavePip);
+    els.video!.addEventListener("enterpictureinpicture", onEnterPip);
+    els.video!.addEventListener("leavepictureinpicture", onLeavePip);
   }
 
   wireKeyboard();

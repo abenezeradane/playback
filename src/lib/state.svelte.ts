@@ -100,8 +100,22 @@ export const ui = $state({
   // truth, since it drives the WebView2 launch flag); true = GPU decode (default).
   hwaccel: true,
   // Shown after the user flips hwaccel: the launch flag is fixed at webview
-  // creation, so the change only applies on the next launch.
+  // creation, so the change only applies on the next launch. (Suppressed while
+  // the NATIVE engine is active — mpv's hwdec switches at runtime.)
   hwaccelRestartHint: false,
+
+  // --- Playback engine (native-001) ---
+  // "web" (default) = the original <video> path; "native" = embedded libmpv
+  // (instant fMP4/TS/MKV open, hardware decode, video under the transparent
+  // WebView). Mirrors the native pref file; applies to the NEXT opened file.
+  enginePref: "web" as "web" | "native",
+  // The engine that loaded the CURRENT file (drives PiP gating, hwaccel hint).
+  engineActive: "web" as "web" | "native",
+  // False when libmpv-2.dll is missing/incompatible — the Settings row then
+  // shows the unavailable hint and the app silently stays on the web engine.
+  engineAvailable: true,
+  // Shown after flipping the engine: applies to the next video opened.
+  engineHint: false,
 
   // --- Loop / A-B (play-011) ---
   loopOn: false,

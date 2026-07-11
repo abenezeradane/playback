@@ -88,6 +88,18 @@ import {
   type PlayerState,
   type Shuttle,
   type Timestamp,
+  createEngineSnapshot,
+  applyPlayerEvent,
+  createSeekCoalescer,
+  seekRequest,
+  seekSettle,
+  seekTimedOut,
+  SEEK_MIN_INTERVAL_MS,
+  SEEK_WATCHDOG_MS,
+  volumeToMpv,
+  mpvToVolume,
+  type EngineSnapshot,
+  type NativePlayerEvent,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -1133,5 +1145,358 @@ describe("playlist store (play-014)", () => {
       renamePlaylist(store, "a", "changed");
       expect(store).toEqual(sample());
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Native (libmpv) engine — pure event/seek logic (native-001)
+// ---------------------------------------------------------------------------
+const engineSnap = (overrides: Partial<EngineSnapshot> = {}): EngineSnapshot => ({
+  ...createEngineSnapshot(),
+  loadSeq: 1,
+  loaded: true,
+  duration: 100,
+  ...overrides,
+});
+
+describe("native engine — stale-event guard (native-001)", () => {
+  it("drops an event whose loadSeq does not match the snapshot's", () => {
+    const s = engineSnap({ currentTime: 10 });
+    const before = JSON.parse(JSON.stringify(s));
+    const out = applyPlayerEvent(s, { kind: "time", loadSeq: 2, position: 50 });
+    expect(out.effects).toEqual([]);
+    expect(out.snapshot).toBe(s); // untouched — same object, zero effects
+    expect(s).toEqual(before);
+    // a stale eof from the replaced file must not latch ended either
+    const eof = applyPlayerEvent(s, { kind: "eof", loadSeq: 0 });
+    expect(eof.effects).toEqual([]);
+    expect(eof.snapshot.ended).toBe(false);
+  });
+
+  it("drops every event while a load is awaiting (loadSeq -1)", () => {
+    const fresh = createEngineSnapshot();
+    const events: NativePlayerEvent[] = [
+      { kind: "loaded", loadSeq: -1, duration: 60, width: 640, height: 480, containerFps: 30 },
+      { kind: "duration", loadSeq: 0, duration: 60 },
+      { kind: "time", loadSeq: -1, position: 5 },
+      { kind: "pause", loadSeq: 1, paused: false },
+      { kind: "eof", loadSeq: -1 },
+      { kind: "playbackRestart", loadSeq: 0 },
+      { kind: "endFile", loadSeq: -1, reason: "error", message: "boom" },
+    ];
+    for (const ev of events) {
+      const out = applyPlayerEvent(fresh, ev);
+      expect(out.effects).toEqual([]);
+      expect(out.snapshot).toBe(fresh);
+    }
+    expect(fresh).toEqual(createEngineSnapshot()); // nothing leaked through
+  });
+
+  it("shutdown applies regardless of loadSeq and resets to a fresh snapshot", () => {
+    const busy = engineSnap({ currentTime: 42, ended: true, seekInFlight: true });
+    const out = applyPlayerEvent(busy, { kind: "shutdown" });
+    expect(out.effects).toEqual(["shutdown"]);
+    expect(out.snapshot).toEqual(createEngineSnapshot());
+  });
+});
+
+describe("native engine — loaded + late duration (native-001)", () => {
+  it("loaded sets metadata, clears ended, and fires loadedmetadata", () => {
+    const s = engineSnap({ loaded: false, ended: true, paused: true, currentTime: 42, duration: 0 });
+    const out = applyPlayerEvent(s, {
+      kind: "loaded",
+      loadSeq: 1,
+      duration: 120,
+      width: 1920,
+      height: 1080,
+      containerFps: 29.97,
+    });
+    expect(out.effects).toEqual(["loadedmetadata"]);
+    expect(out.snapshot.loaded).toBe(true);
+    expect(out.snapshot.ended).toBe(false);
+    expect(out.snapshot.paused).toBe(false);
+    expect(out.snapshot.currentTime).toBe(0);
+    expect(out.snapshot.duration).toBe(120);
+    expect(out.snapshot.width).toBe(1920);
+    expect(out.snapshot.height).toBe(1080);
+    expect(out.snapshot.containerFps).toBe(29.97);
+  });
+
+  it("loaded guards a non-positive or non-finite duration with 0", () => {
+    const s = engineSnap({ loaded: false, duration: 0 });
+    for (const duration of [0, -5, NaN, Infinity]) {
+      const out = applyPlayerEvent(s, {
+        kind: "loaded",
+        loadSeq: 1,
+        duration,
+        width: 640,
+        height: 480,
+        containerFps: null,
+      });
+      expect(out.snapshot.duration).toBe(0);
+      expect(out.effects).toEqual(["loadedmetadata"]);
+    }
+  });
+
+  it("a late duration updates and re-fires loadedmetadata only once loaded", () => {
+    // The zero-duration fragmented-MP4 case: duration refines after loaded.
+    const loaded = engineSnap({ duration: 0 });
+    const out = applyPlayerEvent(loaded, { kind: "duration", loadSeq: 1, duration: 90 });
+    expect(out.snapshot.duration).toBe(90);
+    expect(out.effects).toEqual(["loadedmetadata"]);
+    // Before loaded, the event fires nothing.
+    const early = engineSnap({ loaded: false, duration: 0 });
+    expect(applyPlayerEvent(early, { kind: "duration", loadSeq: 1, duration: 90 }).effects).toEqual([]);
+  });
+
+  it("a late duration of zero or less is dropped", () => {
+    const s = engineSnap();
+    for (const duration of [0, -1, NaN]) {
+      const out = applyPlayerEvent(s, { kind: "duration", loadSeq: 1, duration });
+      expect(out.snapshot).toBe(s);
+      expect(out.effects).toEqual([]);
+    }
+  });
+
+  it("eof and pause before loaded are dropped (stale events racing a load)", () => {
+    // Review-found race: an old file's queued eof/pause drained after a new
+    // player_load could otherwise auto-advance the queue past the file the
+    // user just opened, or flip the paused UI, before `loaded` arrives.
+    const awaitingMeta = engineSnap({ loaded: false, ended: false });
+    const eof = applyPlayerEvent(awaitingMeta, { kind: "eof", loadSeq: 1 });
+    expect(eof.snapshot).toBe(awaitingMeta);
+    expect(eof.effects).toEqual([]);
+    const pause = applyPlayerEvent(awaitingMeta, { kind: "pause", loadSeq: 1, paused: true });
+    expect(pause.snapshot).toBe(awaitingMeta);
+    expect(pause.effects).toEqual([]);
+  });
+
+  it("a shrinking duration estimate never reduces the known duration", () => {
+    // Found live in the native smoke: for a zero-duration fragmented MP4,
+    // mpv's demuxer estimate GROWS as fragments demux (8.3 s of a 60 s file)
+    // and can undercut the mfra probe's value — accepting it re-clamped every
+    // arrow-key seek to the partial estimate. Lower estimates must be ignored.
+    const s = engineSnap({ duration: 58.4 }); // the mfra probe's lower bound
+    const lower = applyPlayerEvent(s, { kind: "duration", loadSeq: 1, duration: 12.5 });
+    expect(lower.snapshot.duration).toBe(58.4);
+    expect(lower.effects).toEqual([]); // nothing changed -> nothing re-fires
+    const higher = applyPlayerEvent(s, { kind: "duration", loadSeq: 1, duration: 60.02 });
+    expect(higher.snapshot.duration).toBe(60.02);
+    expect(higher.effects).toEqual(["loadedmetadata"]);
+  });
+});
+
+describe("native engine — eof / ended latch (native-001)", () => {
+  it("the first eof fires ended once, pauses, and pins currentTime to the duration", () => {
+    const s = engineSnap({ paused: false, currentTime: 99.9 });
+    const out = applyPlayerEvent(s, { kind: "eof", loadSeq: 1 });
+    expect(out.effects).toEqual(["ended"]);
+    expect(out.snapshot.ended).toBe(true);
+    expect(out.snapshot.paused).toBe(true);
+    expect(out.snapshot.currentTime).toBe(100);
+  });
+
+  it("a second eof is dropped (pause-toggle re-notify at EOF)", () => {
+    const first = applyPlayerEvent(engineSnap({ paused: false }), { kind: "eof", loadSeq: 1 });
+    const second = applyPlayerEvent(first.snapshot, { kind: "eof", loadSeq: 1 });
+    expect(second.effects).toEqual([]);
+    expect(second.snapshot).toBe(first.snapshot);
+  });
+
+  it("seek-away clears the latch so a later eof fires ended again", () => {
+    const atEnd = applyPlayerEvent(engineSnap({ paused: false }), { kind: "eof", loadSeq: 1 }).snapshot;
+    expect(atEnd.ended).toBe(true);
+    // Seeking well before the end clears the latch...
+    const seekedAway = applyPlayerEvent(atEnd, { kind: "time", loadSeq: 1, position: 10 });
+    expect(seekedAway.effects).toEqual(["timeupdate"]);
+    expect(seekedAway.snapshot.ended).toBe(false);
+    // ...so ending the file again fires ended a second time.
+    const again = applyPlayerEvent(seekedAway.snapshot, { kind: "eof", loadSeq: 1 });
+    expect(again.effects).toEqual(["ended"]);
+    expect(again.snapshot.ended).toBe(true);
+  });
+});
+
+describe("native engine — time events (native-001)", () => {
+  it("updates currentTime and fires timeupdate", () => {
+    const out = applyPlayerEvent(engineSnap(), { kind: "time", loadSeq: 1, position: 33.5 });
+    expect(out.snapshot.currentTime).toBe(33.5);
+    expect(out.effects).toEqual(["timeupdate"]);
+  });
+
+  it("is dropped before loaded", () => {
+    const s = engineSnap({ loaded: false });
+    const out = applyPlayerEvent(s, { kind: "time", loadSeq: 1, position: 33.5 });
+    expect(out.snapshot).toBe(s);
+    expect(out.effects).toEqual([]);
+  });
+
+  it("is dropped while a seek is in flight (no rubber-banding)", () => {
+    const s = engineSnap({ seekInFlight: true, currentTime: 80 });
+    const out = applyPlayerEvent(s, { kind: "time", loadSeq: 1, position: 12 });
+    expect(out.snapshot).toBe(s);
+    expect(out.snapshot.currentTime).toBe(80);
+    expect(out.effects).toEqual([]);
+  });
+
+  it("near the very end it does not clear the ended latch", () => {
+    // Within 0.25s of the duration is not "away from the end".
+    const s = engineSnap({ ended: true, currentTime: 100 });
+    const out = applyPlayerEvent(s, { kind: "time", loadSeq: 1, position: 99.9 });
+    expect(out.snapshot.ended).toBe(true);
+    expect(out.snapshot.currentTime).toBe(99.9);
+    expect(out.effects).toEqual(["timeupdate"]);
+  });
+});
+
+describe("native engine — pause / playbackRestart / endFile (native-001)", () => {
+  it("pause events set paused and map to pause/play effects", () => {
+    const paused = applyPlayerEvent(engineSnap({ paused: false }), {
+      kind: "pause",
+      loadSeq: 1,
+      paused: true,
+    });
+    expect(paused.snapshot.paused).toBe(true);
+    expect(paused.effects).toEqual(["pause"]);
+    const playing = applyPlayerEvent(paused.snapshot, { kind: "pause", loadSeq: 1, paused: false });
+    expect(playing.snapshot.paused).toBe(false);
+    expect(playing.effects).toEqual(["play"]);
+  });
+
+  it("playbackRestart settles the seek and re-emits the position", () => {
+    const s = engineSnap({ seekInFlight: true, currentTime: 40 });
+    const out = applyPlayerEvent(s, { kind: "playbackRestart", loadSeq: 1 });
+    expect(out.snapshot.seekInFlight).toBe(false);
+    expect(out.effects).toContain("seekSettled");
+    expect(out.effects).toContain("timeupdate");
+  });
+
+  it("playbackRestart clears ended away from the end, keeps it at the end", () => {
+    const away = applyPlayerEvent(engineSnap({ ended: true, currentTime: 10, seekInFlight: true }), {
+      kind: "playbackRestart",
+      loadSeq: 1,
+    });
+    expect(away.snapshot.ended).toBe(false);
+    const atEnd = applyPlayerEvent(engineSnap({ ended: true, currentTime: 100, seekInFlight: true }), {
+      kind: "playbackRestart",
+      loadSeq: 1,
+    });
+    expect(atEnd.snapshot.ended).toBe(true);
+  });
+
+  it("endFile reason error fires error with the message and unloads", () => {
+    const out = applyPlayerEvent(engineSnap({ paused: false }), {
+      kind: "endFile",
+      loadSeq: 1,
+      reason: "error",
+      message: "demuxer: corrupt stream",
+    });
+    expect(out.effects).toEqual(["error"]);
+    expect(out.errorMessage).toBe("demuxer: corrupt stream");
+    expect(out.snapshot.loaded).toBe(false);
+    expect(out.snapshot.paused).toBe(true);
+  });
+
+  it("endFile reason error falls back to 'playback failed' without a message", () => {
+    const out = applyPlayerEvent(engineSnap(), { kind: "endFile", loadSeq: 1, reason: "error" });
+    expect(out.effects).toEqual(["error"]);
+    expect(out.errorMessage).toBe("playback failed");
+  });
+
+  it("endFile stop/quit/redirect are ignored (fire on every replace-load)", () => {
+    const s = engineSnap();
+    for (const reason of ["stop", "quit", "redirect"]) {
+      const out = applyPlayerEvent(s, { kind: "endFile", loadSeq: 1, reason });
+      expect(out.snapshot).toBe(s);
+      expect(out.effects).toEqual([]);
+      expect(out.errorMessage).toBeUndefined();
+    }
+  });
+});
+
+describe("native engine — seek coalescing (native-001)", () => {
+  it("the first request issues immediately", () => {
+    const d = seekRequest(createSeekCoalescer(), 12, 0);
+    expect(d.issue).toBe(12);
+    expect(d.coalescer.inFlight).toBe(true);
+    expect(d.coalescer.pending).toBeNull();
+  });
+
+  it("requests while in flight stash only the latest target", () => {
+    const first = seekRequest(createSeekCoalescer(), 12, 0);
+    const second = seekRequest(first.coalescer, 20, 10);
+    expect(second.issue).toBeNull();
+    expect(second.coalescer.pending).toBe(20);
+    const third = seekRequest(second.coalescer, 30, 20); // the later target wins
+    expect(third.issue).toBeNull();
+    expect(third.coalescer.pending).toBe(30);
+    expect(third.coalescer.inFlight).toBe(true);
+  });
+
+  it("settling with a pending target issues it and stays in flight", () => {
+    const first = seekRequest(createSeekCoalescer(), 12, 0);
+    const stashed = seekRequest(first.coalescer, 30, 10);
+    const settled = seekSettle(stashed.coalescer, 100);
+    expect(settled.issue).toBe(30);
+    expect(settled.coalescer.inFlight).toBe(true);
+    expect(settled.coalescer.pending).toBeNull();
+    expect(settled.coalescer.issuedAt).toBe(100);
+  });
+
+  it("settling without a pending target just releases", () => {
+    const first = seekRequest(createSeekCoalescer(), 12, 0);
+    const settled = seekSettle(first.coalescer, 100);
+    expect(settled.issue).toBeNull();
+    expect(settled.coalescer.inFlight).toBe(false);
+    expect(settled.coalescer.pending).toBeNull();
+  });
+
+  it("a request sooner than SEEK_MIN_INTERVAL_MS after the last issue is stashed, even when idle", () => {
+    const first = seekRequest(createSeekCoalescer(), 12, 0);
+    const idle = seekSettle(first.coalescer, 10).coalescer; // released, nothing pending
+    expect(idle.inFlight).toBe(false);
+    const tooSoon = seekRequest(idle, 45, SEEK_MIN_INTERVAL_MS - 1);
+    expect(tooSoon.issue).toBeNull();
+    expect(tooSoon.coalescer.pending).toBe(45);
+    // At the interval boundary the request goes out.
+    const onTime = seekRequest(idle, 45, SEEK_MIN_INTERVAL_MS);
+    expect(onTime.issue).toBe(45);
+  });
+
+  it("seekTimedOut trips at the watchdog deadline only while in flight", () => {
+    const inFlight = seekRequest(createSeekCoalescer(), 12, 0).coalescer;
+    expect(seekTimedOut(inFlight, SEEK_WATCHDOG_MS - 1)).toBe(false);
+    expect(seekTimedOut(inFlight, SEEK_WATCHDOG_MS)).toBe(true);
+    expect(seekTimedOut(inFlight, SEEK_WATCHDOG_MS + 1000)).toBe(true);
+    // Not in flight -> never timed out, no matter how old.
+    expect(seekTimedOut(createSeekCoalescer(), 1e9)).toBe(false);
+  });
+});
+
+describe("native engine — volume mapping (native-001)", () => {
+  it("maps element volume (0-1) to mpv (0-100) and back", () => {
+    expect(volumeToMpv(0)).toBe(0);
+    expect(volumeToMpv(1)).toBe(100);
+    expect(volumeToMpv(0.5)).toBe(50);
+    expect(mpvToVolume(0)).toBe(0);
+    expect(mpvToVolume(100)).toBe(1);
+    expect(mpvToVolume(50)).toBe(0.5);
+  });
+
+  it("clamps out-of-range values", () => {
+    expect(volumeToMpv(1.5)).toBe(100);
+    expect(volumeToMpv(-1)).toBe(0);
+    expect(mpvToVolume(150)).toBe(1);
+    expect(mpvToVolume(-10)).toBe(0);
+  });
+
+  it("guards NaN with the neutral full volume", () => {
+    expect(volumeToMpv(NaN)).toBe(100);
+    expect(mpvToVolume(NaN)).toBe(1);
+  });
+
+  it("round-trips through both directions", () => {
+    expect(mpvToVolume(volumeToMpv(0.3))).toBeCloseTo(0.3, 9);
+    expect(volumeToMpv(mpvToVolume(70))).toBeCloseTo(70, 9);
   });
 });

@@ -32,6 +32,10 @@ use std::time::UNIX_EPOCH;
 use tauri::{Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
 
+mod mp4probe;
+mod mpv;
+mod player;
+
 /// Holds a media path supplied on the command line, if any.
 struct LaunchPath(Option<String>);
 
@@ -64,9 +68,10 @@ const SW_DECODE_FLAG: &str = "--disable-accelerated-video-decode";
 /// actually opens (dialog / drag-drop / "Open with" launch arg / Recent) — never
 /// trusted from a caller-supplied read path. `stream_status` / `read_stream_chunk`
 /// reject any path that does not canonicalize to inside one of these roots, so the
-/// old whole-disk arbitrary-file-read primitive (F-1) is gone.
+/// old whole-disk arbitrary-file-read primitive (F-1) is gone. The native engine's
+/// `player_load` (native-001) routes through the same gate.
 #[derive(Default)]
-struct AllowList(Mutex<HashSet<PathBuf>>);
+pub(crate) struct AllowList(Mutex<HashSet<PathBuf>>);
 
 /// True when `candidate` (already canonicalized) resolves inside one of the
 /// allowed `roots`. `Path::starts_with` compares whole path components, so a
@@ -84,7 +89,7 @@ fn path_within_roots(roots: &HashSet<PathBuf>, candidate: &Path) -> bool {
 /// path … C:\Users\<name>\…"); forwarding them across the IPC boundary is a minor
 /// info-leak / fingerprinting hygiene issue. The `detail` stays on the native side
 /// (stderr); only the stable `public` string crosses to the WebView.
-fn ipc_error(context: &str, detail: impl std::fmt::Display, public: &str) -> String {
+pub(crate) fn ipc_error(context: &str, detail: impl std::fmt::Display, public: &str) -> String {
     eprintln!("[playback] {context}: {detail}");
     public.to_string()
 }
@@ -92,7 +97,7 @@ fn ipc_error(context: &str, detail: impl std::fmt::Display, public: &str) -> Str
 /// Canonicalize `path` and confirm it lands inside the allow-list, returning a
 /// generic error otherwise. This is the single security gate shared by the two
 /// file-reading commands.
-fn ensure_allowed(allow: &AllowList, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn ensure_allowed(allow: &AllowList, path: &str) -> Result<PathBuf, String> {
     let canonical = fs::canonicalize(path).map_err(|_| "file not found".to_string())?;
     let permitted = allow
         .0
@@ -150,7 +155,7 @@ fn hwaccel_pref_path() -> Option<PathBuf> {
 /// Read the persisted hardware-acceleration preference. Defaults to `true`
 /// (hardware acceleration ON, the Chromium default) unless the file explicitly
 /// holds `"off"` — so a missing/unreadable file, or a first run, keeps GPU decode.
-fn read_hwaccel_pref() -> bool {
+pub(crate) fn read_hwaccel_pref() -> bool {
     match hwaccel_pref_path().and_then(|p| fs::read_to_string(p).ok()) {
         Some(contents) => contents.trim() != "off",
         None => true,
@@ -194,6 +199,51 @@ fn apply_hwaccel_launch_flag() {
 #[tauri::command]
 fn get_hwaccel() -> bool {
     read_hwaccel_pref()
+}
+
+// ---------------------------------------------------------------------------
+// Playback-engine preference (native-001)
+//
+// "native" = the embedded-libmpv engine; "web" = the original WebView <video>
+// path (the DEFAULT in native-001 — flipping it is native-003's scope). Stored
+// as a native pref file next to `hwaccel` (NOT localStorage) so smoke scripts
+// can preseed it before launch, exactly like the smoke-hwaccel precedent.
+// ---------------------------------------------------------------------------
+
+/// Path of the engine preference file (`engine` under the app config dir) —
+/// same location scheme as `hwaccel_pref_path`.
+fn engine_pref_path() -> Option<PathBuf> {
+    hwaccel_pref_path().map(|p| p.with_file_name("engine"))
+}
+
+/// Normalize a stored/requested engine value; anything unrecognized is the
+/// safe default ("web"). Pure + unit-tested.
+fn normalize_engine(value: &str) -> &'static str {
+    if value.trim() == "native" {
+        "native"
+    } else {
+        "web"
+    }
+}
+
+/// Report the persisted playback-engine preference ("native" | "web").
+#[tauri::command]
+fn get_engine_pref() -> String {
+    let stored = engine_pref_path().and_then(|p| fs::read_to_string(p).ok());
+    normalize_engine(stored.as_deref().unwrap_or("web")).to_string()
+}
+
+/// Persist the playback-engine preference. Applies to the next file opened.
+#[tauri::command]
+fn set_engine_pref(engine: String) -> Result<(), String> {
+    let path = engine_pref_path().ok_or_else(|| "could not save setting".to_string())?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| ipc_error("set_engine_pref: mkdir", e, "could not save setting"))?;
+    }
+    fs::write(&path, normalize_engine(&engine))
+        .map_err(|e| ipc_error("set_engine_pref: write", e, "could not save setting"))?;
+    Ok(())
 }
 
 /// Persist the hardware-acceleration preference (play-010). Written natively so the
@@ -379,12 +429,13 @@ fn prune_ts_cache(dir: &Path) {
 }
 
 /// Read a big-endian `u32` / `u64` from a reader (ISO-BMFF box fields).
-fn read_be_u32<R: Read>(r: &mut R) -> std::io::Result<u32> {
+/// Shared with the native engine's duration probe (mp4probe.rs).
+pub(crate) fn read_be_u32<R: Read>(r: &mut R) -> std::io::Result<u32> {
     let mut b = [0u8; 4];
     r.read_exact(&mut b)?;
     Ok(u32::from_be_bytes(b))
 }
-fn read_be_u64<R: Read>(r: &mut R) -> std::io::Result<u64> {
+pub(crate) fn read_be_u64<R: Read>(r: &mut R) -> std::io::Result<u64> {
     let mut b = [0u8; 8];
     r.read_exact(&mut b)?;
     Ok(u64::from_be_bytes(b))
@@ -831,8 +882,20 @@ pub fn run() {
         }))
         .manage(LaunchPath(launch))
         .manage(AllowList::default())
+        .manage(player::PlayerState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        // native-001: tear the mpv engine down BEFORE the main window (the
+        // parent of mpv's child HWND) is destroyed — destroying the wid window
+        // under a live mpv VO is documented crash territory. The handler runs
+        // synchronously during CloseRequested, so the HWND still exists.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if window.label() == "main" {
+                    player::shutdown_player(&window.state::<player::PlayerState>());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             launch_path,
             allow_media_dir,
@@ -843,7 +906,22 @@ pub fn run() {
             remux_ts,
             list_folder_videos,
             get_hwaccel,
-            set_hwaccel
+            set_hwaccel,
+            get_engine_pref,
+            set_engine_pref,
+            player::player_engine_status,
+            player::player_load,
+            player::player_stop,
+            player::player_seek,
+            player::player_set_pause,
+            player::player_set_speed,
+            player::player_set_volume,
+            player::player_set_mute,
+            player::player_set_loop_file,
+            player::player_set_hwdec,
+            player::player_set_video_margin_ratio,
+            player::player_screenshot,
+            player::test_flags
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playback");
@@ -1116,6 +1194,16 @@ mod tests {
         assert!(!read_hwaccel_pref());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn normalize_engine_defaults_everything_but_native_to_web() {
+        assert_eq!(normalize_engine("native"), "native");
+        assert_eq!(normalize_engine(" native\n"), "native"); // file read w/ newline
+        assert_eq!(normalize_engine("web"), "web");
+        assert_eq!(normalize_engine(""), "web");
+        assert_eq!(normalize_engine("NATIVE"), "web"); // unrecognized -> safe default
+        assert_eq!(normalize_engine("mpv"), "web");
     }
 
     #[test]

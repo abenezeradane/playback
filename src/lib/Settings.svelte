@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
-  import { setSettingsOpen, setHwaccel } from "./controller";
+  import { setSettingsOpen, setHwaccel, setEngine } from "./controller";
 </script>
 
 <!-- ===================== SETTINGS OVERLAY (play-010) =====================
@@ -27,6 +27,40 @@
 
     <div class="settings__body">
       <p class="shortcuts__group">PLAYBACK</p>
+      <!-- Playback engine (native-001): opt-in embedded libmpv. Native decodes
+           fragmented MP4 / MPEG-TS / MKV recordings instantly (no conversion
+           step) with hardware decode; the WebView engine remains the default. -->
+      <label class="settings__row">
+        <span class="settings__row-text">
+          <span class="settings__row-title">Native playback engine (mpv)</span>
+          <span class="settings__row-desc">Play videos with the built-in native engine: OBS/Streamlink recordings (fragmented MP4, MPEG-TS, MKV) start instantly with no conversion step. Applies to the next video you open. Picture-in-picture is unavailable while it's active.</span>
+        </span>
+        <input
+          id="engine-toggle"
+          class="ts-setting__input"
+          type="checkbox"
+          checked={ui.enginePref === "native"}
+          disabled={!ui.engineAvailable}
+          onchange={(e) => {
+            void setEngine(e.currentTarget.checked ? "native" : "web");
+            e.currentTarget.blur();
+          }}
+        />
+        <span class="ts-setting__switch" aria-hidden="true"></span>
+      </label>
+
+      {#if !ui.engineAvailable}
+        <p id="engine-unavailable" class="settings__hint" role="status">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" /></svg>
+          Native engine unavailable (libmpv-2.dll not found) — using the WebView engine.
+        </p>
+      {:else if ui.engineHint}
+        <p id="engine-hint" class="settings__hint" role="status" aria-live="polite">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" /></svg>
+          Applies to the next video you open.
+        </p>
+      {/if}
+
       <label class="settings__row">
         <span class="settings__row-text">
           <span class="settings__row-title">Hardware acceleration</span>

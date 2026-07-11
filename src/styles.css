@@ -110,7 +110,12 @@ body {
 }
 
 body {
-  background: var(--canvas);
+  /* The canvas fill lives on .app (one level down) so the native engine can
+     hole-punch selectively (native-001): the Tauri window is transparent, and
+     while the native (libmpv) engine is presenting, .app + .stage go
+     transparent so the mpv child HWND shows through UNDER the web chrome.
+     Everywhere else .app paints the canvas — pixel-identical to before. */
+  background: transparent;
   color: var(--body);
   font-family: var(--font);
   font-feature-settings: var(--feat);
@@ -125,6 +130,7 @@ body {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+  background: var(--canvas);
 }
 
 /* Inline Lucide-style icons. Size follows font-size (1em). */
@@ -826,6 +832,35 @@ body {
   height: 100%;
   object-fit: contain;
   background: #000;
+}
+
+/* Native (libmpv) engine compositing (native-001). While the native engine is
+   presenting, the controller sets data-native-video="true" on .app via a DIRECT
+   setAttribute (a Svelte-bound attribute would stall when the window isn't
+   foreground — see the ui-005 rAF-flush lesson). Under the flag the app hole-
+   punches to transparent over the stage, the inert <video> element is hidden,
+   and the permanent #video-surface div becomes the video's geometry + click
+   surface (mpv's child HWND paints the pixels underneath the WebView). */
+.video--native {
+  display: none; /* web engine active: the surface div is inert */
+  background: #000;
+}
+.app[data-native-video="true"] {
+  background: transparent;
+}
+.app[data-native-video="true"] .stage {
+  background: transparent;
+}
+.app[data-native-video="true"] video#video {
+  display: none;
+}
+.app[data-native-video="true"] .video--native {
+  display: block;
+  background: transparent;
+}
+.app[data-native-video="true"] #buffered {
+  /* Native local playback has no progressive-download buffer to show. */
+  display: none;
 }
 
 /* Canvas-tinted scrims (frame 02) — not pure black. */
@@ -3430,3 +3465,4 @@ button.shortcuts__backdrop {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+

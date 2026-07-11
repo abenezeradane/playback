@@ -1,6 +1,6 @@
 [package]
 name = "playback"
-version = "0.39.0"
+version = "0.40.0"
 description = "A fully featured video player built with Tauri 2.0"
 authors = ["Playback"]
 edition = "2021"
@@ -22,6 +22,15 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# native-001: the embedded-libmpv playback engine. libmpv-2.dll is loaded at
+# RUNTIME (never linked) so a missing DLL degrades to the WebView engine instead
+# of failing process start.
+libloading = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+# Child-window z-order management for the mpv wid embed (push mpv's child HWND
+# below WebView2's so the web chrome composites above the video).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 panic = "abort"

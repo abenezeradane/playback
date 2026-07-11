@@ -82,6 +82,16 @@
     onended={onEnded}
   ></video>
 
+  <!-- Native-engine video surface (native-001). When the libmpv engine presents
+       (mpv's child HWND paints BELOW the transparent WebView), this permanent div
+       replaces the <video> as the geometry + click surface: same .video class so
+       every layout rule applies, same click handler (single = play/pause, double
+       = fullscreen). Permanently rendered — visibility is CSS-keyed on the
+       .app[data-native-video] flag, never a Svelte conditional, so it cannot
+       stall on the rAF-gated flush when the window isn't foreground. -->
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div id="video-surface" class="video video--native" role="presentation" onclick={onVideoClick}></div>
+
   <div class="scrim scrim--top" aria-hidden="true"></div>
   <div class="scrim scrim--bottom" aria-hidden="true"></div>
 

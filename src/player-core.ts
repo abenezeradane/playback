@@ -1202,3 +1202,273 @@ export function movePlaylistItem(
 export function findPlaylist(store: PlaylistStore, id: string): Playlist | undefined {
   return store.find((p) => p.id === id);
 }
+
+// ===========================================================================
+// Native (libmpv) engine — pure event/seek logic (native-001)
+// ===========================================================================
+// The native engine adapter (src/lib/engine-native.ts) is a thin shell around
+// these pure functions so the decision logic — stale-event dropping, the
+// ended latch, seek coalescing — is unit-tested here. The event payloads
+// mirror docs/native-engine-ipc.md exactly.
+
+/** The adapter's authoritative playback snapshot (element-parity semantics). */
+export interface EngineSnapshot {
+  /** The current load's sequence number; -1 = nothing loaded / load awaiting. */
+  loadSeq: number;
+  /** True once the current load's `loaded` event arrived. */
+  loaded: boolean;
+  paused: boolean;
+  /** The element-parity `ended` latch: set once per file end, cleared by
+   *  seek-away / play() / a new load — so `onEnded` fires exactly once. */
+  ended: boolean;
+  currentTime: number;
+  /** 0 until known (mirrors syncFromVideo's finite-or-zero read). */
+  duration: number;
+  width: number;
+  height: number;
+  containerFps: number | null;
+  /** True while a player_seek is unsettled (time events are dropped so the
+   *  scrubber can't rubber-band back to a stale position). */
+  seekInFlight: boolean;
+}
+
+export function createEngineSnapshot(): EngineSnapshot {
+  return {
+    loadSeq: -1,
+    loaded: false,
+    paused: true,
+    ended: false,
+    currentTime: 0,
+    duration: 0,
+    width: 0,
+    height: 0,
+    containerFps: null,
+    seekInFlight: false,
+  };
+}
+
+/** The tagged player-event union emitted by the Rust engine (see the IPC doc). */
+export type NativePlayerEvent =
+  | { kind: "loaded"; loadSeq: number; duration: number; width: number; height: number; containerFps: number | null }
+  | { kind: "duration"; loadSeq: number; duration: number }
+  | { kind: "time"; loadSeq: number; position: number }
+  | { kind: "pause"; loadSeq: number; paused: boolean }
+  | { kind: "eof"; loadSeq: number }
+  | { kind: "playbackRestart"; loadSeq: number }
+  | { kind: "endFile"; loadSeq: number; reason: string; message?: string }
+  | { kind: "shutdown" };
+
+/** What the adapter should DO after applying an event (element-event parity). */
+export type EngineEffect =
+  | "loadedmetadata"
+  | "timeupdate"
+  | "play"
+  | "pause"
+  | "ended"
+  | "seekSettled"
+  | "error"
+  | "shutdown";
+
+export interface AppliedPlayerEvent {
+  snapshot: EngineSnapshot;
+  effects: EngineEffect[];
+  /** Set with the "error" effect (endFile reason=error). */
+  errorMessage?: string;
+}
+
+/** Slack (seconds) when deciding a position is "before the end" — clears the
+ *  ended latch on seek-away without a frame-exact comparison. */
+const ENDED_CLEAR_EPSILON = 0.25;
+
+/**
+ * Apply one engine event to the snapshot, returning the new snapshot and the
+ * element-parity effects to fire. STALE-EVENT GUARD: any event carrying a
+ * loadSeq that does not match the snapshot's is dropped (events from a
+ * replaced file racing a new load — Next-spam, single-instance open-file);
+ * while a load is awaiting (loadSeq -1) everything is dropped. `shutdown`
+ * carries no seq and always applies.
+ */
+export function applyPlayerEvent(
+  snap: EngineSnapshot,
+  ev: NativePlayerEvent,
+): AppliedPlayerEvent {
+  if (ev.kind === "shutdown") {
+    return { snapshot: { ...createEngineSnapshot() }, effects: ["shutdown"] };
+  }
+  if (snap.loadSeq < 0 || ev.loadSeq !== snap.loadSeq) {
+    return { snapshot: snap, effects: [] };
+  }
+  switch (ev.kind) {
+    case "loaded":
+      return {
+        snapshot: {
+          ...snap,
+          loaded: true,
+          ended: false,
+          paused: false,
+          currentTime: 0,
+          duration: Number.isFinite(ev.duration) && ev.duration > 0 ? ev.duration : 0,
+          width: ev.width,
+          height: ev.height,
+          containerFps: ev.containerFps,
+        },
+        effects: ["loadedmetadata"],
+      };
+    case "duration": {
+      if (!(Number.isFinite(ev.duration) && ev.duration > 0)) {
+        return { snapshot: snap, effects: [] };
+      }
+      // A late/refined duration (zero-duration fragmented MP4) re-runs the
+      // idempotent loadedmetadata path (recent-duration, ruler, cut meta).
+      // NEVER let it shrink: mpv's estimate for such files GROWS as fragments
+      // demux and can undercut the mfra probe's value — a lower bound of the
+      // real duration — which would re-clamp seeks (observed in the smoke).
+      const duration = Math.max(snap.duration, ev.duration);
+      if (duration === snap.duration) return { snapshot: snap, effects: [] };
+      return {
+        snapshot: { ...snap, duration },
+        effects: snap.loaded ? ["loadedmetadata"] : [],
+      };
+    }
+    case "time": {
+      // Ignore until loaded (stray events from the replaced file can carry the
+      // new seq for a beat) and while a seek is unsettled (no rubber-banding).
+      if (!snap.loaded || snap.seekInFlight) return { snapshot: snap, effects: [] };
+      const awayFromEnd =
+        snap.duration > 0 && ev.position < snap.duration - ENDED_CLEAR_EPSILON;
+      return {
+        snapshot: {
+          ...snap,
+          currentTime: ev.position,
+          ended: snap.ended && !awayFromEnd,
+        },
+        effects: ["timeupdate"],
+      };
+    }
+    case "pause": {
+      // Defense in depth vs stale events racing a load (the Rust side latches
+      // seqs at file boundaries, but pre-loaded state changes are meaningless
+      // to the UI either way — `loaded` itself establishes paused=false).
+      if (!snap.loaded) return { snapshot: snap, effects: [] };
+      return {
+        snapshot: { ...snap, paused: ev.paused },
+        effects: [ev.paused ? "pause" : "play"],
+      };
+    }
+    case "eof": {
+      // Same guard: an eof that arrives before this load's `loaded` can only
+      // belong to a replaced file — acting on it would auto-advance the queue
+      // past the file the user just opened.
+      if (!snap.loaded) return { snapshot: snap, effects: [] };
+      if (snap.ended) return { snapshot: snap, effects: [] }; // the once-latch
+      return {
+        snapshot: {
+          ...snap,
+          ended: true,
+          paused: true,
+          currentTime: snap.duration > 0 ? snap.duration : snap.currentTime,
+        },
+        effects: ["ended"],
+      };
+    }
+    case "playbackRestart": {
+      const awayFromEnd =
+        snap.duration > 0 && snap.currentTime < snap.duration - ENDED_CLEAR_EPSILON;
+      return {
+        snapshot: {
+          ...snap,
+          seekInFlight: false,
+          ended: snap.ended && !awayFromEnd,
+        },
+        effects: ["seekSettled", "timeupdate"],
+      };
+    }
+    case "endFile": {
+      if (ev.reason === "error") {
+        return {
+          snapshot: { ...snap, loaded: false, paused: true },
+          effects: ["error"],
+          errorMessage: ev.message ?? "playback failed",
+        };
+      }
+      // stop/quit/redirect fire on every replace-load — deliberately ignored.
+      return { snapshot: snap, effects: [] };
+    }
+  }
+}
+
+// --- Seek coalescing --------------------------------------------------------
+// At most ONE native seek is in flight; while unsettled only the LATEST target
+// is remembered. Settling happens on playbackRestart, on invoke rejection, or
+// via a watchdog timeout — so a failed seek can never wedge the scrubber or
+// the reverse shuttle (which issues ~60 requests/s and relies on this pacing).
+
+export interface SeekCoalescer {
+  inFlight: boolean;
+  /** Monotonic ms when the in-flight seek was issued (watchdog input). */
+  issuedAt: number;
+  /** The newest requested target while in flight, or null. */
+  pending: number | null;
+  lastIssuedAt: number;
+}
+
+/** Minimum ms between issued seeks — bounds the reverse-shuttle/scrub rate. */
+export const SEEK_MIN_INTERVAL_MS = 50;
+/** An in-flight seek older than this is presumed failed and released. */
+export const SEEK_WATCHDOG_MS = 500;
+
+export function createSeekCoalescer(): SeekCoalescer {
+  return { inFlight: false, issuedAt: 0, pending: null, lastIssuedAt: -SEEK_MIN_INTERVAL_MS };
+}
+
+export interface SeekDecision {
+  coalescer: SeekCoalescer;
+  /** A target to actually issue now (invoke player_seek), or null. */
+  issue: number | null;
+}
+
+/** Request a seek to `target` at monotonic time `now`. */
+export function seekRequest(c: SeekCoalescer, target: number, now: number): SeekDecision {
+  if (c.inFlight || now - c.lastIssuedAt < SEEK_MIN_INTERVAL_MS) {
+    return { coalescer: { ...c, pending: target }, issue: null };
+  }
+  return {
+    coalescer: { ...c, inFlight: true, issuedAt: now, lastIssuedAt: now, pending: null },
+    issue: target,
+  };
+}
+
+/**
+ * Settle the in-flight seek (playbackRestart arrived, the invoke rejected, or
+ * the watchdog fired). Issues the newest pending target, if any.
+ */
+export function seekSettle(c: SeekCoalescer, now: number): SeekDecision {
+  const released = { ...c, inFlight: false };
+  if (released.pending === null) {
+    return { coalescer: released, issue: null };
+  }
+  const target = released.pending;
+  return {
+    coalescer: { ...released, inFlight: true, issuedAt: now, lastIssuedAt: now, pending: null },
+    issue: target,
+  };
+}
+
+/** True when the in-flight seek should be presumed failed (watchdog). */
+export function seekTimedOut(c: SeekCoalescer, now: number): boolean {
+  return c.inFlight && now - c.issuedAt >= SEEK_WATCHDOG_MS;
+}
+
+// --- Small mapping helpers ---------------------------------------------------
+
+/** Element volume (0–1) → mpv `volume` (0–100), clamped. */
+export function volumeToMpv(v01: number): number {
+  if (!Number.isFinite(v01)) return 100;
+  return Math.min(100, Math.max(0, v01 * 100));
+}
+
+/** mpv `volume` (0–100) → element volume (0–1), clamped. */
+export function mpvToVolume(v100: number): number {
+  if (!Number.isFinite(v100)) return 1;
+  return Math.min(1, Math.max(0, v100 / 100));
+}
