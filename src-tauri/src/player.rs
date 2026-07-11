@@ -127,7 +127,7 @@ fn end_file_reason_str(reason: i32) -> &'static str {
 // Test hooks (env-gated; inert in production — see the IPC contract)
 // ---------------------------------------------------------------------------
 
-fn test_log_path() -> Option<PathBuf> {
+pub(crate) fn test_log_path() -> Option<PathBuf> {
     std::env::var_os("PLAYBACK_TEST_LOG").map(PathBuf::from)
 }
 
@@ -137,11 +137,16 @@ fn test_shot_dir() -> Option<PathBuf> {
 
 /// Append one `t_ms=<n> ev=<name> [k=v…]` line to the test log (no-op without
 /// the env var; failures are swallowed — the log is evidence, not control flow).
-fn test_log(path: &Option<PathBuf>, start: Instant, line: &str) {
+/// The line is preformatted and written with ONE write_all: multiple threads
+/// log concurrently (the event thread + async command threads, native-002),
+/// and Windows append mode is only atomic per syscall — `writeln!` on a File
+/// issues one write per format fragment, which interleaved as torn lines.
+pub(crate) fn test_log(path: &Option<PathBuf>, start: Instant, line: &str) {
     let Some(p) = path else { return };
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
-        let _ = writeln!(f, "t_ms={} {}", start.elapsed().as_millis(), line);
+        let full = format!("t_ms={} {}\n", start.elapsed().as_millis(), line);
+        let _ = f.write_all(full.as_bytes());
     }
 }
 
@@ -404,6 +409,19 @@ fn event_loop(ctx: EventCtx) {
                     emit(&PlayerEventMsg::Duration { load_seq: seq, duration });
                 }
                 ("pause", PropValue::Flag(paused)) => {
+                    // A pause flip resets the time throttle so the NEXT time-pos
+                    // emits immediately. This is what makes frame-step (native-002)
+                    // position updates prompt: mpv's forward frame-step unpauses
+                    // for one frame and re-pauses WITHOUT any Seek/PlaybackRestart
+                    // event, so the post-step time-pos would otherwise wait out
+                    // the 250 ms cadence.
+                    throttle.reset();
+                    let t = ctx.mpv.get_prop_f64("time-pos").unwrap_or(-1.0);
+                    test_log(
+                        &ctx.log,
+                        ctx.start,
+                        &format!("ev=pause paused={paused} time={t:.3}"),
+                    );
                     emit(&PlayerEventMsg::Pause { load_seq: seq, paused });
                 }
                 ("eof-reached", PropValue::Flag(true)) => {
@@ -587,6 +605,20 @@ pub fn player_set_hwdec(state: tauri::State<'_, PlayerState>, on: bool) -> Resul
         p.mpv
             .set_prop_str("hwdec", if on { "auto-safe" } else { "no" })
             .map_err(|e| mpv_err("player_set_hwdec", e))
+    })
+}
+
+/// Step exactly one video frame forward/back (mpv `frame-step` /
+/// `frame-back-step`, cut view, native-002). mpv pauses on completion; the
+/// forward step briefly unpauses, so the event thread's pause-flip throttle
+/// reset is what delivers the post-step position promptly. The back step is
+/// internally an hr-seek and settles like any seek (playbackRestart).
+#[tauri::command]
+pub fn player_frame_step(state: tauri::State<'_, PlayerState>, back: bool) -> Result<(), String> {
+    with_player(&state, |p| {
+        p.mpv
+            .command(&[if back { "frame-back-step" } else { "frame-step" }])
+            .map_err(|e| mpv_err("player_frame_step", e))
     })
 }
 

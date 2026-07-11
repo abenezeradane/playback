@@ -24,7 +24,9 @@ import {
   seekTimedOut,
   volumeToMpv,
   SEEK_MIN_INTERVAL_MS,
+  ZERO_MARGINS,
   type EngineSnapshot,
+  type MarginRatios,
   type NativePlayerEvent,
   type SeekCoalescer,
 } from "../player-core";
@@ -91,6 +93,7 @@ export class NativeEngine implements EngineSurface {
   private muted0 = false;
   private rate0 = 1;
   private loop0 = false;
+  private margins0: MarginRatios = ZERO_MARGINS;
   private seekExact = true;
   /** Events that arrived while player_load was still awaiting its loadSeq. */
   private preloadQueue: NativePlayerEvent[] = [];
@@ -210,6 +213,11 @@ export class NativeEngine implements EngineSurface {
     void this.tryInvoke("player_set_mute", { mute: this.muted0 });
     void this.tryInvoke("player_set_speed", { speed: this.rate0 });
     void this.tryInvoke("player_set_loop_file", { on: this.loop0 });
+    // Margins are properties of the mpv core, not the load — but the core is
+    // created lazily and can be reaped/re-created, so re-push the mirror after
+    // every load exactly like the audio state (keeps the cut-view letterbox
+    // if a load happens while the timeline view is open).
+    void this.tryInvoke("player_set_video_margin_ratio", { ...this.margins0 });
   }
 
   // --- Extra (non-element) controls used by new controller code --------------
@@ -231,6 +239,32 @@ export class NativeEngine implements EngineSurface {
    */
   setSeekPrecision(mode: "exact" | "fast"): void {
     this.seekExact = mode === "exact";
+  }
+
+  /**
+   * Letterbox the natively-rendered video into a sub-box of the window (the
+   * cut-view viewer, native-002) via mpv video-margin-ratio; ZERO_MARGINS
+   * restores the full-window video. Mirrored and re-pushed after every load.
+   */
+  setVideoMarginRatio(margins: MarginRatios): void {
+    this.margins0 = margins;
+    void this.tryInvoke("player_set_video_margin_ratio", { ...margins });
+  }
+
+  /**
+   * Step exactly one video frame (mpv frame-step/frame-back-step, native-002).
+   * mpv pauses on completion; the echoed pause + throttle-reset time events
+   * bring the snapshot up to date (no optimistic time write — the step size is
+   * a decoder fact the adapter cannot know). A back step from the very end is
+   * a step AWAY from it, so it clears the element-parity ended latch (mirrors
+   * how any element seek-back clears `ended` on the web engine); a target
+   * parked in the seek coalescer is dropped — the step is the newer intent,
+   * and re-issuing the stale target afterwards would visibly undo the step.
+   */
+  frameStep(back: boolean): void {
+    this.coalescer = { ...this.coalescer, pending: null };
+    this.snap = { ...this.snap, paused: true, ended: back ? false : this.snap.ended };
+    void this.tryInvoke("player_frame_step", { back });
   }
 
   // --- EngineSurface ----------------------------------------------------------

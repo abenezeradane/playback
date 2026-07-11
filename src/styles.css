@@ -2755,6 +2755,22 @@ button.shortcuts__backdrop {
   background: var(--canvas);
 }
 
+/* Native engine in cut mode (native-002): mpv's child HWND paints the whole
+   window UNDER the WebView, so the stage must stay transparent here too (this
+   rule out-specifies the opaque cut-mode rule above, which would otherwise
+   win by source order over the native transparency and hide the video
+   entirely). The canvas around the viewer is painted by the surface div's
+   huge box-shadow spread instead — it follows the viewer's rounded corners,
+   so mpv shows through exactly the bordered box and nowhere else. The video
+   itself is letterboxed INTO that box natively via mpv video-margin-ratio
+   (controller syncCutMargins), mirroring the web engine's object-fit. */
+.app[data-native-video="true"][data-mode="cut"] .stage {
+  background: transparent;
+}
+.app[data-native-video="true"][data-mode="cut"] .video--native {
+  box-shadow: 0 0 0 200vmax var(--canvas);
+}
+
 /* A <video> is a *replaced* element: with width/height `auto` an absolutely
    positioned replaced box renders at its INTRINSIC resolution and ignores the
    over-constrained right/bottom insets (CSS 2.1 §10.3.8 / §10.6.5) — so a clip

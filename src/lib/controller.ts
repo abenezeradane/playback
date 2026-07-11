@@ -51,6 +51,10 @@ import {
   lastFrameTime,
   fractionToTime,
   rulerTicks,
+  marginRatiosForBox,
+  filmstripCellTime,
+  frameStepTarget,
+  ZERO_MARGINS,
   isTextEntryTarget,
   createShuttle,
   shuttleStop,
@@ -753,7 +757,13 @@ function syncVideoHole(on: boolean): void {
 /** First presented frame of the current native load — open the hole now (never
  *  earlier, so the desktop can't flash through between load and first frame). */
 function onNativePresented(): void {
-  if (ui.engineActive === "native" && ui.view === "playing") syncVideoHole(true);
+  if (ui.engineActive === "native" && ui.view === "playing") {
+    syncVideoHole(true);
+    // The surface div only has a layout box once the hole is open, so this is
+    // the first moment a load-while-in-cut-view can measure the letterbox
+    // (syncCutMargins self-skips while the box is collapsed).
+    syncCutMargins();
+  }
 }
 
 /** Native metadata: the demuxer knows the exact container fps — no rVFC
@@ -766,6 +776,11 @@ function onNativeLoadedMetadata(): void {
     updateCutMeta();
   }
   onLoadedMetadata();
+  // A load that lands while the timeline view is already open (auto-advance /
+  // Next while reviewing) must letterbox into the deck immediately — the
+  // adapter re-pushes its margin mirror after every load, but a first-ever
+  // native load in cut mode has never had the box measured (native-002).
+  syncCutMargins();
 }
 
 /** Native load/playback failure — same surface as a remux failure. */
@@ -1062,18 +1077,52 @@ export function setCutMode(on: boolean): void {
     // Build the deck media the FIRST time the user actually enters the cut view
     // (perf-003): opens that never reach it pay nothing. Guarded so toggling the
     // view on/off never re-scans. Then draw whatever is ready so far — canvases
-    // only size once visible, so (re)draw after the DOM reflects cut mode.
+    // only size once visible, so (re)draw after the DOM reflects cut mode; the
+    // native letterbox margins are measured then too, for the same reason.
     buildCutDeck();
     void tick().then(() => {
       drawFilmstrip();
       drawWaveform();
       renderCut();
+      syncCutMargins();
     });
     showControls();
   } else {
     resetShuttle();
+    // Restore the full-window native video (no-op under the web engine).
+    nativeEngine?.setVideoMarginRatio(ZERO_MARGINS);
     showControls();
   }
+}
+
+/**
+ * Letterbox the natively-rendered video into the cut view's viewer box
+ * (native-002). The web engine reframes the <video> element with pure CSS;
+ * mpv's child HWND fills the whole window, so the same box is described to it
+ * as window-fraction margins (video-margin-ratio). The box is measured from
+ * the #video-surface div — the element the cut-mode CSS already lays out — so
+ * CSS stays the single owner of the geometry. Called after the DOM reflects
+ * cut mode and again on every window resize while the deck is open; leaving
+ * the cut view resets to ZERO_MARGINS (setCutMode).
+ */
+function syncCutMargins(): void {
+  if (!ui.cutMode || ui.engineActive !== "native" || !nativeEngine) return;
+  const surface = document.getElementById("video-surface");
+  if (!surface) return;
+  const rect = surface.getBoundingClientRect();
+  // The surface is display:none while the video hole is closed (every load
+  // closes it until the first presented frame), so a load that lands while
+  // the timeline view is open would measure a COLLAPSED box here — pushing
+  // zeros and wiping the letterbox (review finding). Keep the previous
+  // margins instead; onNativePresented re-measures the moment the hole opens.
+  if (rect.width <= 0 || rect.height <= 0) return;
+  nativeEngine.setVideoMarginRatio(
+    marginRatiosForBox(
+      { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      window.innerWidth,
+      window.innerHeight,
+    ),
+  );
 }
 
 export function toggleCutMode(): void {
@@ -1129,10 +1178,12 @@ function buildCutDeck(): void {
     if (ftoken !== filmstripToken) return;
     // The filmstrip generator is a second <video> decode pipeline — it can't
     // decode what the WebView can't (unremuxed fMP4/TS, exactly what the
-    // native engine plays), so under native the strip keeps its dark
-    // placeholder slots until native-002 adds native thumbnail extraction.
-    // The waveform is already native (ffmpeg sidecar) and works for both.
-    if (ui.engineActive !== "native") {
+    // native engine plays), so under native the thumbnails are extracted
+    // natively instead: one bounded ffmpeg-sidecar still per cell
+    // (native-002). The waveform is already native and works for both.
+    if (ui.engineActive === "native") {
+      void captureFilmstripNative(path, ftoken);
+    } else {
       void captureFilmstripFromGenerator(path, ftoken);
     }
     void buildWaveform(path, wtoken);
@@ -1300,7 +1351,7 @@ function captureFilmstripFromGenerator(path: string, token: number): Promise<voi
     let done = false;
 
     const stale = (): boolean => token !== filmstripToken;
-    const targetTime = (): number => ((k + 0.5) / FILMSTRIP_CELLS) * genDur;
+    const targetTime = (): number => filmstripCellTime(k, FILMSTRIP_CELLS, genDur);
 
     const finish = (): void => {
       if (done) return;
@@ -1391,6 +1442,63 @@ function captureFilmstripFromGenerator(path: string, token: number): Promise<voi
       }
     })();
   });
+}
+
+/**
+ * Build the filmstrip NATIVELY (native-002): one ffmpeg-sidecar still per cell,
+ * sampled at the same cell midpoints as the generator scan. The native engine
+ * plays its media UNREMUXED — fragmented MP4s and MPEG-TS the generator
+ * <video> cannot decode — so the extraction must not depend on a second
+ * WebView decode pipeline. Cells are fetched serially (one bounded ffmpeg
+ * process at a time, mirroring the generator's serial seeks) and the strip
+ * repaints as each thumbnail lands; a failed cell (e.g. a time past the real
+ * EOF of a still-growing estimate) keeps its dark placeholder slot.
+ */
+async function captureFilmstripNative(path: string, token: number): Promise<void> {
+  // The deck build timer can fire before the engine reports the new clip's
+  // duration (a multi-GB fragmented MP4 on a slow disk is exactly the native
+  // engine's headline case) — and cutDeckBuilt has already latched, so bailing
+  // here would leave the strip dark for the whole clip (review finding). Wait
+  // for the duration like the web generator waits for its own loadedmetadata,
+  // bounded at 10 s (the generator's safety is 8 s).
+  let duration = 0;
+  for (let waited = 0; waited < 10_000; waited += 250) {
+    if (token !== filmstripToken) return;
+    syncFromVideo();
+    duration = state.duration;
+    if (Number.isFinite(duration) && duration > 0) break;
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+  }
+  if (token !== filmstripToken) return;
+  if (!Number.isFinite(duration) || duration <= 0) return;
+  for (let k = 0; k < FILMSTRIP_CELLS; k++) {
+    if (token !== filmstripToken) return;
+    const b64 = await tauriInvoke<string>("extract_video_still", {
+      path,
+      time: filmstripCellTime(k, FILMSTRIP_CELLS, duration),
+      width: 160,
+      height: 90,
+    }).catch(() => null);
+    if (token !== filmstripToken) return;
+    if (!b64) continue;
+    // Decode the PNG bytes directly (the play-012 image-viewer pattern) — no
+    // data-URL <img> round-trip, so no CSP/URL layer to fail silently.
+    // (b64ToBytes always allocates a plain ArrayBuffer; the annotation narrows
+    // its ArrayBufferLike so the bytes are assignable to BlobPart.)
+    const bitmap = await createImageBitmap(
+      new Blob([b64ToBytes(b64) as Uint8Array<ArrayBuffer>], { type: "image/png" }),
+    ).catch(() => null);
+    if (token !== filmstripToken || !bitmap) continue;
+    // Same 160x90 offscreen-canvas cell shape the generator path stores, so
+    // drawFilmstrip composites both identically.
+    const off = document.createElement("canvas");
+    off.width = 160;
+    off.height = 90;
+    off.getContext("2d")?.drawImage(bitmap, 0, 0, 160, 90);
+    bitmap.close();
+    filmFrames[k] = off;
+    if (ui.cutMode) drawFilmstrip();
+  }
 }
 
 // --- Waveform -------------------------------------------------------------
@@ -1575,6 +1683,31 @@ export function doShuttleReverse(): void {
 export function doShuttleStop(): void {
   shuttle = shuttleStop();
   applyShuttle();
+}
+
+/**
+ * Step exactly one frame (cut view: , / . — native-002). Native engine:
+ * mpv frame-step/frame-back-step, the decoder-exact editorial step (the step
+ * size is a decoder fact — variable-fps content steps correctly); a back step
+ * works from the ended state too (keep-open holds the last frame and the
+ * adapter clears the ended latch, like a web seek-back would). Web engine
+ * (and the native forward-step-at-end edge, where mpv would just re-hit EOF):
+ * pause + a frame-exact seek nudged by 1/fps at the detected/container rate.
+ */
+export function doFrameStep(forward: boolean): void {
+  if (!playerVisible()) return;
+  resetShuttle();
+  if (ui.engineActive === "native" && nativeEngine && !(video.ended && forward)) {
+    video.pause();
+    nativeEngine.frameStep(!forward);
+  } else {
+    video.pause();
+    syncFromVideo();
+    doSeekTo(frameStepTarget(state.currentTime, detectedFps, forward));
+  }
+  syncFromVideo();
+  render();
+  showControls();
 }
 
 /** The big center transport button: plain play/pause at the user's speed. */
@@ -2819,6 +2952,17 @@ function wireKeyboard(): void {
         doShuttleForward();
         return;
       }
+      // Frame stepping (native-002): , / . — one decoder frame back / forward.
+      if (e.key === ",") {
+        e.preventDefault();
+        doFrameStep(false);
+        return;
+      }
+      if (e.key === ".") {
+        e.preventDefault();
+        doFrameStep(true);
+        return;
+      }
     }
 
     // The end-of-video "Up Next" prompt (play-018): Enter confirms (play the next
@@ -3056,12 +3200,15 @@ async function wireSecondInstance(): Promise<void> {
   }
 }
 
-/** The deck canvases are display-sized — repaint them when the window resizes. */
+/** The deck canvases are display-sized — repaint them when the window resizes.
+ *  The native letterbox margins are window-fractions of a fixed-px layout, so
+ *  they are re-measured on every resize too (native-002). */
 function wireResize(): void {
   window.addEventListener("resize", () => {
     if (ui.cutMode) {
       drawFilmstrip();
       drawWaveform();
+      syncCutMargins();
     }
   });
 }

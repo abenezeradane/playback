@@ -660,6 +660,38 @@ fn read_stream_chunk(
 // is O(bars) instead of O(file size) and the WebView never holds decoded audio.
 // ---------------------------------------------------------------------------
 
+/// Run a sidecar to completion and return (exit code, raw stdout, raw stderr).
+///
+/// LOAD-BEARING for binary stdout (found by native-002's filmstrip): the
+/// plugin's own `output()` is line-oriented — it appends a newline after EVERY
+/// stdout event, and even with `set_raw_out(true)` the events are pipe-buffer
+/// CHUNKS, so any binary payload larger than one chunk (~8 KiB) gets 0x0A
+/// bytes injected mid-stream. (Observed: only the one sub-8 KiB PNG cell
+/// decoded; every larger cell was corrupt. The same mangling was quietly
+/// distorting the waveform's f32 PCM.) This collects the raw chunk events
+/// verbatim instead.
+async fn sidecar_raw_output(
+    cmd: tauri_plugin_shell::process::Command,
+) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), String> {
+    use tauri_plugin_shell::process::CommandEvent;
+    let (mut rx, _child) = cmd
+        .set_raw_out(true)
+        .spawn()
+        .map_err(|_| "sidecar failed to start".to_string())?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut code = None;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            CommandEvent::Stdout(chunk) => stdout.extend(chunk),
+            CommandEvent::Stderr(chunk) => stderr.extend(chunk),
+            CommandEvent::Terminated(payload) => code = payload.code,
+            _ => {}
+        }
+    }
+    Ok((code, stdout, stderr))
+}
+
 /// Mono sample rate ffmpeg resamples the audio to before the peak downsample. The
 /// waveform is a coarse ~240-bar loudness envelope, so a low rate keeps the decoded
 /// PCM small (a few MiB for a typical clip, tens of MiB even for a multi-hour movie)
@@ -763,22 +795,156 @@ async fn compute_waveform_peaks(
         .shell()
         .sidecar("ffmpeg")
         .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
-    let output = sidecar
-        .args(args)
-        .output()
+    // sidecar_raw_output (NOT the plugin's line-oriented output()) — the f32
+    // PCM stream was being quietly distorted by injected newline bytes.
+    let (code, stdout, _stderr) = sidecar_raw_output(sidecar.args(args))
         .await
         .map_err(|_| "waveform decode failed to start".to_string())?;
 
-    if !output.status.success() || output.stdout.is_empty() {
+    if code != Some(0) || stdout.is_empty() {
         return Err("no decodable audio".to_string());
     }
 
-    let samples = pcm_f32le_to_samples(&output.stdout);
+    let samples = pcm_f32le_to_samples(&stdout);
     let peaks = downsample_pcm_peaks(&samples, bars);
     if peaks.is_empty() {
         return Err("no audio samples".to_string());
     }
     Ok(peaks)
+}
+
+// ---------------------------------------------------------------------------
+// Cut-view filmstrip stills (native-002)
+//
+// Under the native engine the clip plays UNREMUXED (fragmented MP4, MPEG-TS —
+// exactly what the hidden filmstrip generator <video> cannot decode), so the
+// timeline deck's 12 thumbnails are extracted natively instead: one bounded
+// ffmpeg-sidecar still per cell, seeked with `-ss` before `-i` (a demuxer-index
+// seek — never a scan) and returned as one small base64 PNG. The transfer is
+// O(thumbnail), independent of file size, same discipline as the waveform.
+// ---------------------------------------------------------------------------
+
+/// Thumbnail dimension ceilings (the real caller asks for 160x90). Mirrors
+/// `clamp_bars`' defensive intent: a hostile/buggy caller cannot request a
+/// frame-sized allocation or a giant encode.
+fn clamp_still_dims(width: u32, height: u32) -> (u32, u32) {
+    (width.clamp(16, 480), height.clamp(16, 270))
+}
+
+/// True for the ISO-BMFF extensions whose demuxer accepts `use_mfra_for`
+/// (matches the `player_load` probe gate). The option is a HARD ffmpeg error
+/// ("Option not found") on any other demuxer, so it must be extension-gated.
+fn is_mp4_family(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()),
+        Some(ref e) if ["mp4", "m4v", "mov"].contains(&e.as_str())
+    )
+}
+
+/// ffmpeg arguments for one filmstrip still: seek to `time_s` (input seek =
+/// demuxer index jump + decode-to-target, never a full-file scan), decode one
+/// frame, center-crop-scale it to exactly `width`x`height` (the same cover
+/// crop the web generator's drawCover applies), and emit a PNG on stdout.
+/// With `use_mfra`, `-use_mfra_for pts` makes the mov demuxer read the tail
+/// mfra index of a zero-duration fragmented MP4 — without it the seek
+/// degrades to a sequential every-fragment walk (the play-020 pathology; the
+/// same reason mpv gets demuxer-lavf-o=use_mfra_for=pts). The caller passes
+/// `is_mp4_family` here (and retries once with `false` if ffmpeg rejects the
+/// option — see extract_video_still). Pure + unit-tested.
+fn ffmpeg_still_args(src: &Path, time_s: f64, width: u32, height: u32, use_mfra: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
+    if use_mfra {
+        args.push("-use_mfra_for".into());
+        args.push("pts".into());
+    }
+    args.extend([
+        "-ss".into(),
+        format!("{:.3}", time_s.max(0.0)),
+        "-i".into(),
+        src.to_string_lossy().into_owned(),
+        "-frames:v".into(),
+        "1".into(),
+        "-vf".into(),
+        format!("scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}"),
+        "-f".into(),
+        "image2pipe".into(),
+        "-c:v".into(),
+        "png".into(),
+        "-".into(),
+    ]);
+    args
+}
+
+/// Extract one cut-view filmstrip thumbnail natively (native-002): a single
+/// `width`x`height` PNG of the frame at `time` seconds, base64-encoded (the
+/// same string-over-IPC choice as `read_stream_chunk` — a Vec<u8> crosses
+/// WebView2 as a slow JSON number[]). A time past EOF or an undecodable file
+/// is an error; the frontend keeps that cell as a dark placeholder slot. The
+/// source must already be authorized (`allow_media_dir` ran on open — the
+/// same `ensure_allowed` gate every read command uses).
+#[tauri::command]
+async fn extract_video_still(
+    app: tauri::AppHandle,
+    allow: tauri::State<'_, AllowList>,
+    path: String,
+    time: f64,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
+    let src = ensure_allowed(&allow, &path)?;
+    let (width, height) = clamp_still_dims(width, height);
+
+    // Env-gated observability (the smoke harness's PLAYBACK_TEST_LOG): which
+    // cells were requested and why one failed. Inert in production.
+    let tlog = player::test_log_path();
+    let t0 = std::time::Instant::now();
+
+    let use_mfra = is_mp4_family(&src);
+    let sidecar = app
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+    // sidecar_raw_output (NOT the plugin's line-oriented output()) — a PNG is
+    // binary; injected newline bytes made every multi-chunk cell undecodable.
+    let (mut code, mut stdout, mut stderr) =
+        sidecar_raw_output(sidecar.args(ffmpeg_still_args(&src, time, width, height, use_mfra)))
+            .await
+            .map_err(|_| "still extraction failed to start".to_string())?;
+
+    // A file with an ISO-BMFF extension but different actual bytes (a common
+    // rename artifact — e.g. Matroska named .mp4) makes `-use_mfra_for` a
+    // FATAL "Option not found": ffmpeg picks the demuxer by CONTENT, and an
+    // unconsumed demuxer option aborts the run — while mpv content-probes and
+    // plays such a file fine. Retry once without the option so it still gets
+    // a filmstrip (review finding).
+    if code != Some(0) && use_mfra {
+        let retry = app
+            .shell()
+            .sidecar("ffmpeg")
+            .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+        (code, stdout, stderr) =
+            sidecar_raw_output(retry.args(ffmpeg_still_args(&src, time, width, height, false)))
+                .await
+                .map_err(|_| "still extraction failed to start".to_string())?;
+    }
+
+    if code != Some(0) || stdout.is_empty() {
+        player::test_log(
+            &tlog,
+            t0,
+            &format!(
+                "ev=still-error time={time:.3} code={code:?} stderr={}",
+                String::from_utf8_lossy(&stderr).replace(['\r', '\n'], " ")
+            ),
+        );
+        return Err("no frame at this time".to_string());
+    }
+    player::test_log(
+        &tlog,
+        t0,
+        &format!("ev=still time={time:.3} bytes={}", stdout.len()),
+    );
+    Ok(base64::engine::general_purpose::STANDARD.encode(&stdout))
 }
 
 /// Video container extensions the folder queue enumerates (play-013). Mirrors the
@@ -902,6 +1068,7 @@ pub fn run() {
             stream_status,
             read_stream_chunk,
             compute_waveform_peaks,
+            extract_video_still,
             is_fragmented_mp4,
             remux_ts,
             list_folder_videos,
@@ -919,6 +1086,7 @@ pub fn run() {
             player::player_set_mute,
             player::player_set_loop_file,
             player::player_set_hwdec,
+            player::player_frame_step,
             player::player_set_video_margin_ratio,
             player::player_screenshot,
             player::test_flags
@@ -1053,6 +1221,62 @@ mod tests {
         assert_eq!(clamp_bars(240), 240); // the real caller's request passes through
         assert_eq!(clamp_bars(0), 1); // never zero (would yield no bars)
         assert_eq!(clamp_bars(1_000_000), 4096); // a hostile huge request is capped
+    }
+
+    #[test]
+    fn ffmpeg_still_args_seek_before_input_one_png_frame_on_stdout() {
+        let args = ffmpeg_still_args(Path::new("/clip.mkv"), 27.5, 160, 90, false);
+        // INPUT seek (-ss before -i): a demuxer index jump, never a full scan.
+        let ss = args.iter().position(|a| a == "-ss").expect("-ss present");
+        let input = args.iter().position(|a| a == "-i").expect("-i present");
+        assert!(ss < input, "-ss must precede -i (input seek)");
+        assert_eq!(args[ss + 1], "27.500");
+        assert!(args.windows(2).any(|w| w == ["-i", "/clip.mkv"]));
+        // Exactly one frame, cover-cropped to the requested cell size, PNG on stdout.
+        assert!(args.windows(2).any(|w| w == ["-frames:v", "1"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "-vf"
+                && w[1] == "scale=160:90:force_original_aspect_ratio=increase,crop=160:90"));
+        assert!(args.windows(2).any(|w| w == ["-c:v", "png"]));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
+        // NOT mp4-family: use_mfra_for is a hard ffmpeg error on other demuxers
+        // ("Option not found", verified against the bundled sidecar).
+        assert!(!args.iter().any(|a| a == "-use_mfra_for"));
+    }
+
+    #[test]
+    fn ffmpeg_still_args_mp4_family_reads_the_tail_mfra_index() {
+        // The load-bearing half of native-002's filmstrip: without use_mfra_for
+        // the mov demuxer seeks a zero-duration fragmented MP4 by walking every
+        // fragment sequentially (the play-020 pathology, ~GBs for a Twitch VOD).
+        // The caller gates the flag on is_mp4_family (pinned here) and retries
+        // once without it if ffmpeg rejects it (content-mismatched extension).
+        for name in ["/rec.mp4", "/rec.M4V", "/rec.mov"] {
+            assert!(is_mp4_family(Path::new(name)), "{name} should be mp4-family");
+            let args = ffmpeg_still_args(Path::new(name), 5.0, 160, 90, true);
+            let pos = args
+                .iter()
+                .position(|a| a == "-use_mfra_for")
+                .unwrap_or_else(|| panic!("{name}: -use_mfra_for missing"));
+            assert_eq!(args[pos + 1], "pts");
+            let input = args.iter().position(|a| a == "-i").unwrap();
+            assert!(pos < input, "{name}: demuxer option must precede -i");
+        }
+        assert!(!is_mp4_family(Path::new("/clip.mkv")));
+        assert!(!is_mp4_family(Path::new("/clip.ts")));
+        assert!(!is_mp4_family(Path::new("/noext")));
+        // A negative time (defensive) clamps to 0 rather than an ffmpeg error.
+        let args = ffmpeg_still_args(Path::new("/rec.mp4"), -3.0, 160, 90, true);
+        let ss = args.iter().position(|a| a == "-ss").unwrap();
+        assert_eq!(args[ss + 1], "0.000");
+    }
+
+    #[test]
+    fn clamp_still_dims_bounds_the_thumbnail_allocation() {
+        assert_eq!(clamp_still_dims(160, 90), (160, 90)); // the real caller passes through
+        assert_eq!(clamp_still_dims(0, 0), (16, 16)); // never zero (ffmpeg error)
+        assert_eq!(clamp_still_dims(10_000, 10_000), (480, 270)); // hostile huge request capped
     }
 
     #[test]

@@ -54,6 +54,7 @@
         <ul class="keys">
           <li><span>Toggle timeline view</span><span class="keys__caps"><kbd class="kbd">C</kbd></span></li>
           <li><span>Shuttle reverse / stop / forward</span><span class="keys__caps"><kbd class="kbd">J</kbd><kbd class="kbd">K</kbd><kbd class="kbd">L</kbd></span></li>
+          <li><span>Step one frame back / forward</span><span class="keys__caps"><kbd class="kbd">,</kbd><kbd class="kbd">.</kbd></span></li>
           <li><span>Jump to start / end</span><span class="keys__caps"><kbd class="kbd">Home</kbd><kbd class="kbd">End</kbd></span></li>
         </ul>
         <p class="shortcuts__group">ANIMATED IMAGE (GIF)</p>

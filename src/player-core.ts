@@ -1472,3 +1472,69 @@ export function mpvToVolume(v100: number): number {
   if (!Number.isFinite(v100)) return 1;
   return Math.min(1, Math.max(0, v100 / 100));
 }
+
+// --- Cut-view geometry / filmstrip helpers (native-002) -----------------------
+
+/** Window-fraction margins around the video, in mpv `video-margin-ratio-*`
+ *  order. Zeros = the video fills the window (the standard player). */
+export interface MarginRatios {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+export const ZERO_MARGINS: MarginRatios = { left: 0, right: 0, top: 0, bottom: 0 };
+
+/** mpv requires each opposing margin pair to sum below 1.0; cap the pair at
+ *  this so at least 10% of the window is always left for the video. */
+const MARGIN_PAIR_MAX = 0.9;
+
+/**
+ * Convert the cut-view viewer box (CSS pixels, window coordinates) into mpv
+ * `video-margin-ratio-*` window fractions, so the natively-rendered video is
+ * letterboxed into the same box the web engine's `object-fit: contain` uses.
+ * Degenerate inputs (zero-sized window/box, box outside the window) yield
+ * ZERO_MARGINS rather than margins mpv would reject; an oversized opposing
+ * pair is scaled down proportionally to keep its sum below 1.0.
+ */
+export function marginRatiosForBox(
+  box: { left: number; top: number; right: number; bottom: number },
+  winW: number,
+  winH: number,
+): MarginRatios {
+  if (!(winW > 0) || !(winH > 0)) return ZERO_MARGINS;
+  if (!(box.right > box.left) || !(box.bottom > box.top)) return ZERO_MARGINS;
+  const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
+  let left = clamp01(box.left / winW);
+  let right = clamp01((winW - box.right) / winW);
+  let top = clamp01(box.top / winH);
+  let bottom = clamp01((winH - box.bottom) / winH);
+  const h = left + right;
+  if (h > MARGIN_PAIR_MAX) {
+    left *= MARGIN_PAIR_MAX / h;
+    right *= MARGIN_PAIR_MAX / h;
+  }
+  const v = top + bottom;
+  if (v > MARGIN_PAIR_MAX) {
+    top *= MARGIN_PAIR_MAX / v;
+    bottom *= MARGIN_PAIR_MAX / v;
+  }
+  return { left, right, top, bottom };
+}
+
+/** Midpoint time of filmstrip cell `k` of `cells` — the single definition both
+ *  the web generator scan and the native ffmpeg still extraction sample at, so
+ *  the two engines produce the same strip for the same clip. */
+export function filmstripCellTime(k: number, cells: number, duration: number): number {
+  if (!(cells > 0) || !Number.isFinite(duration) || duration <= 0) return 0;
+  return ((k + 0.5) / cells) * duration;
+}
+
+/** One frame-step's target time for engines without a native frame-step (the
+ *  web `<video>`): the current time nudged by one frame at `fps`, floored at 0. */
+export function frameStepTarget(current: number, fps: number, forward: boolean): number {
+  const rate = Number.isFinite(fps) && fps > 0 ? fps : 30;
+  const dt = 1 / rate;
+  return Math.max(0, (Number.isFinite(current) ? current : 0) + (forward ? dt : -dt));
+}

@@ -98,6 +98,10 @@ import {
   SEEK_WATCHDOG_MS,
   volumeToMpv,
   mpvToVolume,
+  marginRatiosForBox,
+  filmstripCellTime,
+  frameStepTarget,
+  ZERO_MARGINS,
   type EngineSnapshot,
   type NativePlayerEvent,
 } from "./player-core";
@@ -1498,5 +1502,68 @@ describe("native engine — volume mapping (native-001)", () => {
   it("round-trips through both directions", () => {
     expect(mpvToVolume(volumeToMpv(0.3))).toBeCloseTo(0.3, 9);
     expect(volumeToMpv(mpvToVolume(70))).toBeCloseTo(70, 9);
+  });
+});
+
+describe("native engine — cut-view margin ratios (native-002)", () => {
+  it("converts the viewer box to window-fraction margins", () => {
+    // 1600x1000 window, viewer box: 24px gutters, 74px above, 278px below —
+    // the cut view's CSS layout at the smoke's window size.
+    const m = marginRatiosForBox({ left: 24, top: 74, right: 1576, bottom: 722 }, 1600, 1000);
+    expect(m.left).toBeCloseTo(24 / 1600, 9);
+    expect(m.right).toBeCloseTo(24 / 1600, 9);
+    expect(m.top).toBeCloseTo(74 / 1000, 9);
+    expect(m.bottom).toBeCloseTo(278 / 1000, 9);
+  });
+
+  it("returns zero margins for degenerate windows and boxes", () => {
+    expect(marginRatiosForBox({ left: 24, top: 74, right: 1576, bottom: 722 }, 0, 0)).toEqual(
+      ZERO_MARGINS,
+    );
+    // Collapsed box (display:none / not laid out yet).
+    expect(marginRatiosForBox({ left: 0, top: 0, right: 0, bottom: 0 }, 1600, 1000)).toEqual(
+      ZERO_MARGINS,
+    );
+    // Inverted box.
+    expect(marginRatiosForBox({ left: 100, top: 100, right: 50, bottom: 50 }, 1600, 1000)).toEqual(
+      ZERO_MARGINS,
+    );
+  });
+
+  it("keeps each opposing pair below mpv's sum-of-1.0 limit at tiny window sizes", () => {
+    // A 300px-tall window squeezes the viewer to a 6px-tall box: raw margins
+    // would be top 74/300 + bottom 220/300 = 0.98 > 0.9 — mpv rejects opposing
+    // pairs summing to ~1. They must scale down preserving the proportion.
+    const m = marginRatiosForBox({ left: 24, top: 74, right: 376, bottom: 80 }, 400, 300);
+    expect(m.top + m.bottom).toBeLessThanOrEqual(0.9 + 1e-9);
+    expect(m.top / m.bottom).toBeCloseTo(74 / 220, 6);
+    // A box partly outside the window clamps instead of going negative.
+    const off = marginRatiosForBox({ left: -50, top: 10, right: 500, bottom: 290 }, 400, 300);
+    expect(off.left).toBe(0);
+    expect(off.right).toBe(0);
+  });
+});
+
+describe("native engine — filmstrip cell times + frame step (native-002)", () => {
+  it("samples cell midpoints exactly like the web generator scan", () => {
+    // The web path's targetTime(): ((k + 0.5) / cells) * duration.
+    expect(filmstripCellTime(0, 12, 60)).toBeCloseTo(2.5, 9);
+    expect(filmstripCellTime(5, 12, 60)).toBeCloseTo(27.5, 9);
+    expect(filmstripCellTime(11, 12, 60)).toBeCloseTo(57.5, 9);
+  });
+
+  it("yields 0 for unknown/invalid durations (the cell stays a dark slot)", () => {
+    expect(filmstripCellTime(3, 12, 0)).toBe(0);
+    expect(filmstripCellTime(3, 12, NaN)).toBe(0);
+    expect(filmstripCellTime(3, 0, 60)).toBe(0);
+  });
+
+  it("steps one frame at the container rate, flooring at 0", () => {
+    expect(frameStepTarget(10, 30, true)).toBeCloseTo(10 + 1 / 30, 9);
+    expect(frameStepTarget(10, 30, false)).toBeCloseTo(10 - 1 / 30, 9);
+    expect(frameStepTarget(0.01, 30, false)).toBe(0);
+    // Unknown fps falls back to the app default 30.
+    expect(frameStepTarget(10, NaN, true)).toBeCloseTo(10 + 1 / 30, 9);
+    expect(frameStepTarget(10, 0, false)).toBeCloseTo(10 - 1 / 30, 9);
   });
 });

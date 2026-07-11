@@ -39,15 +39,25 @@ IPC as generic strings (detail to stderr via `ipc_error`, sec-005).
 | `player_set_mute` | `{ mute: bool }` | — | `mute` property |
 | `player_set_loop_file` | `{ on: bool }` | — | `loop-file` = `inf`/`no` |
 | `player_set_hwdec` | `{ on: bool }` | — | `hwdec` = `auto-safe`/`no` (runtime) |
-| `player_set_video_margin_ratio` | `{ left, right, top, bottom }` (0–0.9) | — | `video-margin-ratio-*` properties |
+| `player_frame_step` | `{ back: bool }` | — | `frame-step` / `frame-back-step` (cut view, native-002). mpv pauses on completion; the forward step briefly unpauses (see the pause-flip throttle reset under Events), the back step is internally an hr-seek (fires `playbackRestart`) |
+| `player_set_video_margin_ratio` | `{ left, right, top, bottom }` (0–0.9) | — | `video-margin-ratio-*` properties. Called by the cut view (native-002): the frontend measures `#video-surface`'s box and converts it to window fractions (`marginRatiosForBox`, opposing pairs scaled to sum ≤ 0.9); zeros = full-window video. The adapter mirrors the last value and re-pushes it after every `player_load` (the mpv core is created lazily / can be reaped) |
 | `player_screenshot` | `{ mode: "video" \| "window" }` | shot path | `screenshot-to-file <dir>/shot-N.png <mode>`; **errors unless `PLAYBACK_TEST_SHOT_DIR` is set** |
 | `test_flags` | — | `{ shotEnabled: bool }` | env probe; frontend binds F9/Shift+F9 iff true |
 | `get_engine_pref` | — | `"native" \| "web"` | native pref file `engine` (next to `hwaccel`); default `"web"` |
 | `set_engine_pref` | `{ engine: "native" \| "web" }` | — | writes the pref file |
 
-Deliberately absent in native-001: generic `player_set_property`, `player_init`,
-A-B loop commands (A-B stays a JS timeupdate check for engine parity), frame-step
-(native-002).
+Related but OUTSIDE the engine (no mpv core involved): `extract_video_still`
+`{ path, time, width, height }` → base64 PNG — one bounded ffmpeg-sidecar
+still per cut-view filmstrip cell (native-002; the hidden generator `<video>`
+cannot decode the unremuxed fMP4/TS the native engine plays). Input-seeked
+(`-ss` before `-i`), and for MP4-family paths `-use_mfra_for pts` so a
+zero-duration fragmented MP4 seeks via the tail mfra index instead of a
+sequential every-fragment walk (the option is a hard ffmpeg error on other
+demuxers, so it is extension-gated). Errors (e.g. time past EOF) leave the
+cell as a dark placeholder slot.
+
+Deliberately absent: generic `player_set_property`, `player_init`, A-B loop
+commands (A-B stays a JS timeupdate check for engine parity).
 
 ## Events
 
@@ -81,8 +91,13 @@ Frontend mapping rules (implemented as the pure `applyPlayerEvent` reducer in
   `eof` inside mpv — matching how element `loop` suppresses `ended`.
 - `time` is ignored while a seek is in flight (no rubber-banding).
 - `playbackRestart` settles the seek coalescer (at most one `player_seek` in
-  flight; latest target queued; 66 ms floor). The coalescer also releases on
+  flight; latest target queued; 50 ms floor). The coalescer also releases on
   invoke rejection and a 500 ms watchdog so a failed seek can never wedge it.
+- A `pause` flip resets the Rust-side time throttle, so the next `time` emits
+  immediately. This is what makes `player_frame_step` position updates prompt:
+  the forward step unpauses for one frame and re-pauses WITHOUT any seek
+  event, so the post-step `time` would otherwise wait out the 250 ms cadence.
+  (The frontend also sees the echoed `pause` false→true flips during a step.)
 - `endFile` with reason `stop`/`quit`/`redirect` is ignored (fires on every
   replace-load); `error` routes to the same error surface as a remux failure.
 
@@ -127,3 +142,10 @@ the WebView2 child always composites above it and keeps all input.
   geometry/click surface. The attribute is set via **direct `setAttribute`**
   (never a Svelte binding — rAF flush stalls unfocused, see memory) and only
   after the first `playbackRestart` of the current load.
+- Cut view under native (native-002): `.app[data-native-video="true"]
+  [data-mode="cut"] .stage` stays transparent (out-specifying the opaque
+  cut-mode stage rule), and the `#video-surface` box-shadow (huge spread,
+  canvas color) paints everything AROUND the bordered viewer box, so mpv shows
+  through exactly that box. The video is letterboxed INTO the box with
+  `player_set_video_margin_ratio` (measured from `#video-surface`, re-measured
+  on resize, zeroed on leaving the cut view).
