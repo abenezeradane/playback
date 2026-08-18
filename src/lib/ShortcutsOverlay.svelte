@@ -63,6 +63,11 @@
           <li><span>Previous / next frame</span><span class="keys__caps"><kbd class="kbd">,</kbd><kbd class="kbd">.</kbd></span></li>
           <li><span>Speed up / down</span><span class="keys__caps"><kbd class="kbd">+</kbd><kbd class="kbd">&minus;</kbd></span></li>
         </ul>
+        <p class="shortcuts__group">PHOTO &amp; GALLERY</p>
+        <ul class="keys">
+          <li><span>Previous / next photo</span><span class="keys__caps"><kbd class="kbd">&larr;</kbd><kbd class="kbd">&rarr;</kbd></span></li>
+          <li><span>Open gallery grid</span><span class="keys__caps"><kbd class="kbd">G</kbd></span></li>
+        </ul>
         <p class="shortcuts__group">GENERAL</p>
         <ul class="keys">
           <li><span>This help</span><span class="keys__caps"><kbd class="kbd">?</kbd></span></li>

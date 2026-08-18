@@ -41,8 +41,17 @@ export interface QueueItem {
   name: string;
 }
 
+/** One tile in the Gallery grid (gallery-001): a folder image plus its resolved
+ *  asset:// src, precomputed by the controller (once, when the list is built) so
+ *  the template only binds an <img src> — no Tauri glue in the component. */
+export interface GalleryItem {
+  path: string;
+  name: string;
+  thumbSrc: string;
+}
+
 /** The active surface — mirrors the former `#app[data-state]` switch. */
-export type View = "empty" | "playing" | "image" | "live-unavailable";
+export type View = "empty" | "playing" | "image" | "live-unavailable" | "gallery";
 
 export const ui = $state({
   // --- Top-level view ---
@@ -177,6 +186,21 @@ export const ui = $state({
   imgCanvasHidden: true,
   imgElHidden: true,
   imgErrorHidden: true,
+
+  // --- Photo sibling nav + gallery (gallery-001) ---
+  // The other images in the current photo's folder, in natural sort order —
+  // derived fresh on every image open (mirrors the play-013 folder queue, but for
+  // stills: images don't fire an "ended" event, so this is manual Prev/Next only,
+  // never auto-advancing). `photoIndex` is the currently-viewed item (-1 = none).
+  photoQueue: [] as QueueItem[],
+  photoIndex: -1,
+  // The full-screen grid browser: every image in a chosen folder. Populated either
+  // from the image viewer's Grid button (reuses `photoQueue`, no extra IPC) or from
+  // Home's "Open folder" action (a fresh `list_folder_images` call).
+  galleryItems: [] as GalleryItem[],
+  galleryFolder: "",
+  galleryLoading: false,
+  galleryError: "",
 
   // --- Livestream · Unavailable (frame 04b) ---
   liveTitle: "Livestream",

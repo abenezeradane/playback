@@ -2,6 +2,7 @@
   import { ui } from "./state.svelte";
   import {
     openFileDialog,
+    openFolderDialog,
     clearRecents,
     openRecent,
     setSettingsOpen,
@@ -54,6 +55,10 @@
         <button id="btn-settings" class="iconbtn iconbtn--sm" type="button" title="Settings" aria-label="Settings" onclick={() => setSettingsOpen(true)}>
           <svg class="ic" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></svg>
         </button>
+        <button id="btn-open-folder-top" class="home__openfile" type="button" title="Open a folder of photos as a gallery" onclick={() => void openFolderDialog()}>
+          <svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5" /><rect x="13" y="3" width="8" height="8" rx="1.5" /><rect x="3" y="13" width="8" height="8" rx="1.5" /><rect x="13" y="13" width="8" height="8" rx="1.5" /></svg>
+          Gallery
+        </button>
         <button id="btn-open-top" class="home__openfile" type="button" onclick={() => void openFileDialog()}>
           <svg class="ic" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></svg>
           Open file
@@ -69,8 +74,8 @@
           <span class="dropzone__chip" aria-hidden="true">
             <svg class="ic" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M7 3v18" /><path d="M3 7.5h4" /><path d="M3 12h18" /><path d="M3 16.5h4" /><path d="M17 3v18" /><path d="M17 7.5h4" /><path d="M17 16.5h4" /></svg>
           </span>
-          <span class="dropzone__title">Open a video to begin</span>
-          <span class="dropzone__sub">Drag and drop a file anywhere in the window, or browse your computer. MP4, WebM, MKV, MOV, MPEG-TS, animated GIF and more — no account, all local.</span>
+          <span class="dropzone__title">Open a video or photo to begin</span>
+          <span class="dropzone__sub">Drag and drop a file anywhere in the window, or browse your computer. MP4, WebM, MKV, MOV, MPEG-TS, JPEG, PNG, animated GIF and more — no account, all local.</span>
           <div class="home-hero__cta">
             <button id="btn-open" class="pill pill--primary" type="button" onclick={() => void openFileDialog()}>
               <svg class="ic" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></svg>
@@ -79,7 +84,7 @@
             <span class="home-hero__hint"><kbd class="kbd">O</kbd> to open</span>
           </div>
 
-          <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span><span>TS</span><span>GIF</span></span>
+          <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span><span>TS</span><span>JPG</span><span>PNG</span><span>GIF</span></span>
         </div>
       </section>
 

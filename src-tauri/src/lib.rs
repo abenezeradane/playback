@@ -334,12 +334,21 @@ fn allow_media_dir(
     path: String,
 ) -> Result<(), String> {
     let canonical = fs::canonicalize(&path).map_err(|_| "file not found".to_string())?;
-    let dir = canonical
-        .parent()
-        .ok_or_else(|| "invalid path".to_string())?
-        .to_path_buf();
-    let raw_parent = Path::new(&path).parent().map(Path::to_path_buf);
-    authorize_dir(&app, &allow, dir, raw_parent.as_deref());
+    // gallery-001: every existing caller passes a FILE (authorize its PARENT, as
+    // before). The gallery's "Open folder" entry point passes a FOLDER directly —
+    // authorize the folder itself so `list_folder_images` can enumerate it.
+    let (dir, raw_dir) = if canonical.is_dir() {
+        (canonical.clone(), Some(Path::new(&path).to_path_buf()))
+    } else {
+        (
+            canonical
+                .parent()
+                .ok_or_else(|| "invalid path".to_string())?
+                .to_path_buf(),
+            Path::new(&path).parent().map(Path::to_path_buf),
+        )
+    };
+    authorize_dir(&app, &allow, dir, raw_dir.as_deref());
     Ok(())
 }
 
@@ -970,6 +979,54 @@ fn has_queue_video_ext(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Image formats the gallery / photo sibling-nav enumerates (gallery-001):
+/// mirrors the frontend's `IMAGE_EXTENSIONS` — the play-012 animated set
+/// (gif/webp/apng/png) plus the additional static formats a Chromium WebView can
+/// actually decode/display (jpg/jpeg/bmp/avif/ico). TIFF is deliberately excluded
+/// — `<img>` cannot render it, so it would only ever reach the honest error state.
+const GALLERY_IMAGE_EXTENSIONS: &[&str] = &[
+    "gif", "webp", "apng", "png", "jpg", "jpeg", "bmp", "avif", "ico",
+];
+
+/// True when `path`'s extension is one the gallery treats as an image
+/// (case-insensitive). A file with no extension is not an image.
+fn has_gallery_image_ext(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| GALLERY_IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Enumerate the files directly inside `dir` that satisfy `matches` (a predicate
+/// like `has_queue_video_ext` / `has_gallery_image_ext`), returning paths rooted
+/// at `raw_dir` when given — so each round-trips through `convertFileSrc` and the
+/// asset-protocol scope grant (keyed on that raw, non-canonical dir) — or at `dir`
+/// itself otherwise. Subdirectories and non-matching files are skipped. Shared by
+/// `list_folder_videos_impl` (play-013) and `list_folder_images_impl` (gallery-001).
+fn list_dir_entries_matching(
+    dir: &Path,
+    raw_dir: Option<&Path>,
+    matches: impl Fn(&Path) -> bool,
+    context: &str,
+) -> Result<Vec<String>, String> {
+    let entries =
+        fs::read_dir(dir).map_err(|e| ipc_error(context, e, "could not list folder"))?;
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        if !entry_path.is_file() || !matches(&entry_path) {
+            continue;
+        }
+        let name = entry.file_name();
+        let full = match raw_dir {
+            Some(dir) => dir.join(&name),
+            None => entry_path,
+        };
+        out.push(full.to_string_lossy().into_owned());
+    }
+    Ok(out)
+}
+
 /// List the sibling video files in the directory of an opened video so the frontend
 /// can build a folder "queue" that auto-advances (play-013). The opened file must
 /// already be authorized — the frontend calls `allow_media_dir` before this — so we
@@ -1002,22 +1059,51 @@ fn list_folder_videos_impl(allow: &AllowList, path: &str) -> Result<Vec<String>,
         .ok_or_else(|| "invalid path".to_string())?;
     // Build returned paths from the raw parent (matches convertFileSrc / asset scope).
     let raw_dir = Path::new(path).parent();
-    let entries = fs::read_dir(canonical_dir)
-        .map_err(|e| ipc_error("list_folder_videos: read_dir", e, "could not list folder"))?;
-    let mut out: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-        if !entry_path.is_file() || !has_queue_video_ext(&entry_path) {
-            continue;
-        }
-        let name = entry.file_name();
-        let full = match raw_dir {
-            Some(dir) => dir.join(&name),
-            None => entry_path,
-        };
-        out.push(full.to_string_lossy().into_owned());
-    }
-    Ok(out)
+    list_dir_entries_matching(
+        canonical_dir,
+        raw_dir,
+        has_queue_video_ext,
+        "list_folder_videos: read_dir",
+    )
+}
+
+/// List the images belonging to a gallery (gallery-001) — either the sibling images
+/// of an opened photo (single-photo sibling nav) or, when `path` is itself an
+/// authorized FOLDER (the "Open folder" gallery entry point), that folder's images
+/// directly. `allow_media_dir` authorizes both shapes identically (a directory
+/// authorizes itself; a file authorizes its parent), so this only needs to check
+/// which shape `ensure_allowed` resolved to. Same trust model as
+/// `list_folder_videos_impl`: no new filesystem reach beyond what sec-002 already
+/// granted.
+#[tauri::command]
+fn list_folder_images(
+    allow: tauri::State<'_, AllowList>,
+    path: String,
+) -> Result<Vec<String>, String> {
+    list_folder_images_impl(&allow, &path)
+}
+
+/// Core of `list_folder_images`, taking `&AllowList` directly so it is unit-testable
+/// without a `tauri::State`. The command is a thin wrapper over this.
+fn list_folder_images_impl(allow: &AllowList, path: &str) -> Result<Vec<String>, String> {
+    let canonical = ensure_allowed(allow, path)?;
+    let (canonical_dir, raw_dir): (PathBuf, Option<PathBuf>) = if canonical.is_dir() {
+        (canonical.clone(), Some(Path::new(path).to_path_buf()))
+    } else {
+        (
+            canonical
+                .parent()
+                .ok_or_else(|| "invalid path".to_string())?
+                .to_path_buf(),
+            Path::new(path).parent().map(Path::to_path_buf),
+        )
+    };
+    list_dir_entries_matching(
+        &canonical_dir,
+        raw_dir.as_deref(),
+        has_gallery_image_ext,
+        "list_folder_images: read_dir",
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1076,6 +1162,7 @@ pub fn run() {
             is_fragmented_mp4,
             remux_ts,
             list_folder_videos,
+            list_folder_images,
             get_hwaccel,
             set_hwaccel,
             get_engine_pref,
@@ -1516,6 +1603,107 @@ mod tests {
         let allow = AllowList::default();
         assert_eq!(
             list_folder_videos_impl(&allow, clip.to_str().unwrap()),
+            Err("path not allowed".to_string())
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn has_gallery_image_ext_matches_supported_image_containers_only() {
+        for p in [
+            "a.jpg", "B.JPEG", "c.png", "d.gif", "e.webp", "f.apng", "g.bmp", "h.avif", "i.ICO",
+        ] {
+            assert!(has_gallery_image_ext(Path::new(p)), "{p} should be a gallery image");
+        }
+        // Videos, other files, extensionless names, and TIFF (unrenderable by the
+        // WebView's <img>) are NOT part of the gallery.
+        for p in ["a.mp4", "b.mkv", "c.txt", "d.tiff", "e.TIF", "noext", "f."] {
+            assert!(!has_gallery_image_ext(Path::new(p)), "{p} should not be a gallery image");
+        }
+    }
+
+    #[test]
+    fn list_folder_images_returns_sibling_images_from_an_opened_photo() {
+        let base = temp_root("gallery-siblings");
+        let media = base.join("photos");
+        fs::create_dir_all(&media).unwrap();
+        // A mix of images (incl. natural-order-sensitive names), a video, and a
+        // subtitle in the folder, plus a subdirectory.
+        for name in ["b.jpg", "a.png", "c10.jpeg", "c2.jpeg", "clip.mp4", "notes.txt"] {
+            fs::write(media.join(name), b"x").unwrap();
+        }
+        fs::create_dir_all(media.join("subdir")).unwrap();
+
+        // Authorize the media dir (as the extended allow_media_dir would for a FILE).
+        let allow = AllowList::default();
+        allow
+            .0
+            .lock()
+            .unwrap()
+            .insert(fs::canonicalize(&media).unwrap());
+
+        let opened = media.join("a.png");
+        let mut got = list_folder_images_impl(&allow, opened.to_str().unwrap()).unwrap();
+        got.sort(); // read_dir order is platform-defined; sort for a stable assertion
+
+        // Only the four image siblings come back — the video, the .txt, and the
+        // subdirectory are excluded. Paths are rooted at the (raw) opened parent.
+        let names: Vec<String> = got
+            .iter()
+            .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a.png", "b.jpg", "c10.jpeg", "c2.jpeg"]);
+        assert!(got.iter().all(|p| Path::new(p).parent() == Some(media.as_path())));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_folder_images_returns_the_folders_images_when_the_folder_itself_is_opened() {
+        let base = temp_root("gallery-folder");
+        let media = base.join("photos");
+        fs::create_dir_all(&media).unwrap();
+        for name in ["one.jpg", "two.png", "clip.mp4"] {
+            fs::write(media.join(name), b"x").unwrap();
+        }
+
+        // Authorize the FOLDER itself (as the extended allow_media_dir now does for
+        // a directory, the "Open folder" gallery entry point).
+        let allow = AllowList::default();
+        allow
+            .0
+            .lock()
+            .unwrap()
+            .insert(fs::canonicalize(&media).unwrap());
+
+        let mut got = list_folder_images_impl(&allow, media.to_str().unwrap()).unwrap();
+        got.sort();
+        let names: Vec<String> = got
+            .iter()
+            .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["one.jpg", "two.png"]);
+        assert!(got.iter().all(|p| Path::new(p).parent() == Some(media.as_path())));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_folder_images_denies_an_unauthorized_folder() {
+        let base = temp_root("gallery-deny");
+        let media = base.join("photos");
+        fs::create_dir_all(&media).unwrap();
+        let photo = media.join("a.jpg");
+        fs::write(&photo, b"x").unwrap();
+        // Nothing authorized -> deny-by-default, same gate as the read commands.
+        let allow = AllowList::default();
+        assert_eq!(
+            list_folder_images_impl(&allow, photo.to_str().unwrap()),
+            Err("path not allowed".to_string())
+        );
+        // Denied for the bare folder too, not just the file inside it.
+        assert_eq!(
+            list_folder_images_impl(&allow, media.to_str().unwrap()),
             Err("path not allowed".to_string())
         );
         let _ = fs::remove_dir_all(&base);

@@ -1,9 +1,17 @@
 <script lang="ts">
   import { ui, els } from "./state.svelte";
-  import { goHome, toggleGifPlay, stepGifFrame, cycleGifRate } from "./controller";
+  import {
+    goHome,
+    toggleGifPlay,
+    stepGifFrame,
+    cycleGifRate,
+    doPrevPhoto,
+    doNextPhoto,
+    openGalleryFromImage,
+  } from "./controller";
 </script>
 
-<!-- ===================== IMAGE / GIF VIEWER (play-012) ===================== -->
+<!-- ===================== IMAGE / GIF VIEWER (play-012, gallery-001) ===================== -->
 <section id="image-view" class="imgview" data-mode={ui.imgMode} hidden={ui.view !== "image"}>
   <!-- Top overlay: back + title — mirrors the normal player's #stage header. -->
   <header class="overlay-top" data-tauri-drag-region>
@@ -16,6 +24,15 @@
       </div>
       <span id="img-meta" class="title-sub">{ui.imgMeta}</span>
     </div>
+    {#if ui.photoQueue.length > 1}
+      <!-- Sibling photo nav (gallery-001): a folder count + a jump into the grid. -->
+      <div class="imgview__nav-actions">
+        <span id="img-photo-count" class="imgview__count">{ui.photoIndex + 1} / {ui.photoQueue.length}</span>
+        <button id="img-gallery" class="glass-btn" type="button" title="Gallery grid (G)" onclick={() => void openGalleryFromImage()}>
+          <svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5" /><rect x="13" y="3" width="8" height="8" rx="1.5" /><rect x="3" y="13" width="8" height="8" rx="1.5" /><rect x="13" y="13" width="8" height="8" rx="1.5" /></svg>
+        </button>
+      </div>
+    {/if}
   </header>
 
   <div class="imgview__viewer">
@@ -30,6 +47,16 @@
       </span>
       <span class="imgview__error-text">This image could not be opened.</span>
     </div>
+
+    {#if ui.photoQueue.length > 1}
+      <!-- Sibling photo nav (gallery-001): floating prev/next, clamped at the ends. -->
+      <button id="img-prev" class="imgview__navbtn imgview__navbtn--prev" type="button" title="Previous photo (←)" aria-label="Previous photo" disabled={ui.photoIndex <= 0} onclick={doPrevPhoto}>
+        <svg class="ic" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
+      </button>
+      <button id="img-next" class="imgview__navbtn imgview__navbtn--next" type="button" title="Next photo (→)" aria-label="Next photo" disabled={ui.photoIndex >= ui.photoQueue.length - 1} onclick={doNextPhoto}>
+        <svg class="ic" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></svg>
+      </button>
+    {/if}
   </div>
 
   <!-- Transport (shown only for an animated, frame-decoded image). -->

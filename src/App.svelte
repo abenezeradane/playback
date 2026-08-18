@@ -5,6 +5,7 @@
   import Home from "./lib/Home.svelte";
   import Player from "./lib/Player.svelte";
   import ImageView from "./lib/ImageView.svelte";
+  import Gallery from "./lib/Gallery.svelte";
   import LiveUnavailable from "./lib/LiveUnavailable.svelte";
   import ShortcutsOverlay from "./lib/ShortcutsOverlay.svelte";
   import Settings from "./lib/Settings.svelte";
@@ -29,6 +30,7 @@
   <Home />
   <Player />
   <ImageView />
+  <Gallery />
   <LiveUnavailable />
   <ShortcutsOverlay />
   <Settings />

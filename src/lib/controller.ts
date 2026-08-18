@@ -11,7 +11,7 @@
  * GIF timing) stay delegated to the pure, unit-tested functions in player-core.
  */
 import { tick } from "svelte";
-import { ui, els, type RecentFile, type QueueItem } from "./state.svelte";
+import { ui, els, type RecentFile, type QueueItem, type GalleryItem } from "./state.svelte";
 import {
   createInitialState,
   clamp,
@@ -103,11 +103,17 @@ import { NativeEngine, type EngineSurface } from "./engine-native";
 const VIDEO_EXTENSIONS = [
   "mp4", "webm", "ogg", "ogv", "mov", "m4v", "mkv", "avi", "ts", "m2ts", "mts",
 ];
-// Animated / still image formats (play-012). The <video> engine can't decode
-// these, so they route to the dedicated image viewer (openImage). `png` covers
-// both APNG (which conventionally uses the .png extension) and a static PNG;
-// `webp` covers both animated and still WebP.
-const IMAGE_EXTENSIONS = ["gif", "webp", "apng", "png"];
+// Animated / still image formats (play-012, extended by gallery-001). The
+// <video> engine can't decode these, so they route to the dedicated image viewer
+// (openImage). `png` covers both APNG (which conventionally uses the .png
+// extension) and a static PNG; `webp` covers both animated and still WebP.
+// gallery-001 adds the remaining static formats a Chromium WebView can actually
+// decode/display: jpg/jpeg (also WebCodecs-decoded, so they get the frame-decoded
+// transport like any other still), bmp/avif/ico (native <img> fallback only —
+// ImageDecoder doesn't cover them, but the browser renders them fine). TIFF is
+// deliberately excluded: `<img>` can't render it at all, so it would only ever
+// reach the honest error state.
+const IMAGE_EXTENSIONS = ["gif", "webp", "apng", "png", "jpg", "jpeg", "bmp", "avif", "ico"];
 
 /** Lowercased file extension (without the dot), or "" if there is none. */
 function extensionOf(path: string): string {
@@ -123,7 +129,10 @@ export function isVideoPath(path: string): boolean {
 function isMediaPath(path: string): boolean {
   return isImagePath(path) || isVideoPath(path);
 }
-/** MIME type to hand the WebCodecs ImageDecoder, derived from the extension. */
+/** MIME type to hand the WebCodecs ImageDecoder, derived from the extension.
+ *  Formats ImageDecoder doesn't cover (bmp/avif/ico) return "" so they skip
+ *  straight to the native <img> fallback (tryDecodeAnimation bails on an empty
+ *  type) — the WebView still displays them fine, just without frame transport. */
 function imageMimeType(path: string): string {
   switch (extensionOf(path)) {
     case "gif":
@@ -133,6 +142,11 @@ function imageMimeType(path: string): string {
     case "apng":
     case "png":
       return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "avif":
+      return "image/avif";
     default:
       return "";
   }
@@ -901,6 +915,10 @@ export function goHome(): void {
   currentPath = null;
   ui.view = "empty";
   ui.emptyError = "";
+  ui.galleryItems = [];
+  ui.galleryFolder = "";
+  ui.galleryError = "";
+  ui.galleryLoading = false;
   renderRecents();
   document.title = "Playback";
 }
@@ -1929,6 +1947,56 @@ export function openQueueItem(item: QueueItem): void {
   if (i >= 0) playQueueIndex(i);
 }
 
+// ---------------------------------------------------------------------------
+// Photo sibling nav + gallery (gallery-001)
+//
+// The image counterpart of the folder queue above, but for stills/animated
+// images: a still never fires "ended", so there is no auto-advance — only
+// manual Prev/Next (buttons + Left/Right arrows) through the current photo's
+// folder. The SAME sibling list backs the full-screen Gallery grid, so opening
+// the grid from the viewer costs no extra IPC call.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the sibling photo queue for a freshly opened image. Derived fresh from
+ * the folder on every open (mirrors buildFolderQueue). Best-effort: if the
+ * native enumeration is unavailable or empty, falls back to a one-item queue
+ * holding just the opened file, so Prev/Next simply don't show. Guarded by
+ * `currentPath` so a slow enumeration that resolves after a newer open is
+ * discarded.
+ */
+async function buildPhotoQueue(openedPath: string): Promise<void> {
+  let paths = await tauriInvoke<string[]>("list_folder_images", { path: openedPath }).catch(
+    () => null,
+  );
+  if (currentPath !== openedPath) return; // a newer open superseded this one
+  if (!paths || paths.length === 0) paths = [openedPath];
+  const sorted = sortPathsNatural(paths);
+  ui.photoQueue = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
+  ui.photoIndex = resolveQueueIndex(sorted, openedPath);
+}
+
+/** Drop the photo queue (leaving the image viewer). */
+function clearPhotoQueue(): void {
+  ui.photoQueue = [];
+  ui.photoIndex = -1;
+}
+
+/** Prev/Next controls in the image viewer (buttons + Left/Right arrows): step
+ *  through the sibling photo queue. Clamps at the ends (no wrap — there is no
+ *  "repeat all" concept for a photo browse). */
+export function doNextPhoto(): void {
+  const i = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
+  const item = ui.photoQueue[i];
+  if (item) void loadFromPath(item.path);
+}
+
+export function doPrevPhoto(): void {
+  const i = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
+  const item = ui.photoQueue[i];
+  if (item) void loadFromPath(item.path);
+}
+
 /**
  * When the current item ends, move on in the queue (play-013). A per-item loop
  * must NOT auto-skip (play-011 interplay): a whole-clip native `video.loop`
@@ -2489,6 +2557,7 @@ function resetGifState(): void {
 function clearImageView(): void {
   imgToken++;
   resetGifState();
+  clearPhotoQueue();
   imgEl.removeAttribute("src");
   ui.imgElHidden = true;
   ui.imgCanvasHidden = true;
@@ -2521,6 +2590,7 @@ async function openImage(path: string): Promise<void> {
   ui.imgErrorHidden = true;
   ui.imgCanvasHidden = true;
   ui.imgElHidden = true;
+  void buildPhotoQueue(path); // gallery-001: sibling Prev/Next, derived fresh
 
   let src: string;
   try {
@@ -2640,6 +2710,89 @@ function showImageError(): void {
   ui.imgErrorHidden = false;
 }
 
+// ---------------------------------------------------------------------------
+// Gallery grid (gallery-001)
+//
+// A full-screen browser for every image in a folder. Entry points: the image
+// viewer's Grid button (reuses the sibling queue openImage already built — no
+// extra native call) and Home's "Open folder" action (a fresh list_folder_images
+// call against a user-chosen directory). Clicking a tile opens that photo through
+// the normal loadFromPath funnel, so sibling Prev/Next picks up from there too.
+// ---------------------------------------------------------------------------
+
+/** Resolve each item's asset:// src ONCE (not per Svelte render), so
+ *  Gallery.svelte stays purely declarative — no Tauri glue in the template. */
+async function toGalleryItems(items: QueueItem[]): Promise<GalleryItem[]> {
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  return items.map((i) => ({ path: i.path, name: i.name, thumbSrc: convertFileSrc(i.path) }));
+}
+
+/** Open the Gallery grid for the CURRENT photo's folder, reusing the sibling
+ *  queue openImage already built (no extra native call). */
+export async function openGalleryFromImage(): Promise<void> {
+  if (ui.photoQueue.length === 0) return;
+  const folder = ui.imgMeta;
+  const items = ui.photoQueue;
+  ui.galleryFolder = folder;
+  ui.galleryError = "";
+  ui.galleryLoading = false;
+  setShortcutsOpen(false);
+  ui.view = "gallery";
+  document.title = `${folder || "Gallery"} — Playback`;
+  ui.galleryItems = await toGalleryItems(items);
+}
+
+/** Open the Gallery grid for an explicitly chosen folder (Home's "Open folder"). */
+export async function openGalleryForFolder(path: string): Promise<void> {
+  const label = basename(path);
+  ui.galleryItems = [];
+  ui.galleryFolder = label;
+  ui.galleryError = "";
+  ui.galleryLoading = true;
+  ui.emptyError = "";
+  setPanelOpen(false);
+  setShortcutsOpen(false);
+  ui.view = "gallery";
+  document.title = `${label} — Playback`;
+  try {
+    await authorizeMediaDir(path);
+    const paths = await tauriInvoke<string[]>("list_folder_images", { path });
+    const sorted = sortPathsNatural(paths ?? []);
+    const raw = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
+    const items = await toGalleryItems(raw);
+    if (ui.view !== "gallery" || ui.galleryFolder !== label) return; // superseded by a newer open
+    ui.galleryItems = items;
+    if (ui.galleryItems.length === 0) ui.galleryError = "No supported images in this folder.";
+  } catch (err) {
+    if (ui.view === "gallery" && ui.galleryFolder === label) {
+      ui.galleryError = `Could not open this folder: ${String(err)}`;
+    }
+  } finally {
+    if (ui.view === "gallery" && ui.galleryFolder === label) ui.galleryLoading = false;
+  }
+}
+
+/** Open the native folder picker (Tauri) and open the chosen folder as a gallery. */
+export async function openFolderDialog(): Promise<void> {
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({ multiple: false, directory: true });
+    if (typeof selected === "string") await openGalleryForFolder(selected);
+  } catch (err) {
+    showError(`Open folder unavailable: ${String(err)}`);
+  }
+}
+
+/** Click a tile in the Gallery grid: open that photo in the single-image viewer. */
+export function openGalleryItem(item: GalleryItem): void {
+  void loadFromPath(item.path);
+}
+
+/** Back button in the Gallery: return to the home screen. */
+export function closeGallery(): void {
+  goHome();
+}
+
 /** Paint a bitmap to the canvas, sizing the canvas to the frame's pixel size. */
 function drawBitmap(bitmap: ImageBitmap): void {
   if (imgCanvas.width !== bitmap.width || imgCanvas.height !== bitmap.height) {
@@ -2724,6 +2877,35 @@ function updateGifInfo(): void {
 
 /** Image-viewer transport hotkeys; returns true if the key was handled. */
 function handleImageKey(e: KeyboardEvent): boolean {
+  // Sibling photo nav (gallery-001) and the gallery-grid hotkey work for ANY
+  // opened image — animated or a single static frame — so they're checked before
+  // the animated-only bail below.
+  switch (e.key) {
+    case "ArrowRight":
+      if (ui.photoQueue.length > 1) {
+        e.preventDefault();
+        doNextPhoto();
+        return true;
+      }
+      return false;
+    case "ArrowLeft":
+      if (ui.photoQueue.length > 1) {
+        e.preventDefault();
+        doPrevPhoto();
+        return true;
+      }
+      return false;
+    case "g":
+    case "G":
+      if (ui.photoQueue.length > 1) {
+        e.preventDefault();
+        void openGalleryFromImage();
+        return true;
+      }
+      return false;
+    default:
+      break;
+  }
   if (imgFrames.length <= 1) return false;
   switch (e.key) {
     case " ":
@@ -2766,7 +2948,7 @@ export async function openFileDialog(): Promise<void> {
       filters: [
         { name: "Media", extensions: [...VIDEO_EXTENSIONS, ...IMAGE_EXTENSIONS] },
         { name: "Video", extensions: VIDEO_EXTENSIONS },
-        { name: "Animated image", extensions: IMAGE_EXTENSIONS },
+        { name: "Image", extensions: IMAGE_EXTENSIONS },
       ],
     });
     if (typeof selected === "string") {
