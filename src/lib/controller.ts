@@ -117,6 +117,10 @@ const VIDEO_EXTENSIONS = [
 // deliberately excluded: `<img>` can't render it at all, so it would only ever
 // reach the honest error state.
 const IMAGE_EXTENSIONS = ["gif", "webp", "apng", "png", "jpg", "jpeg", "bmp", "avif", "ico"];
+// Archive containers browsed as directories (gallery-004). Listed here so the
+// open dialog, drag-drop and Recent treat them as openable; `loadFromPath` routes
+// them to the gallery rather than the player.
+const ARCHIVE_EXTENSIONS = ["zip", "cbz", "rar", "cbr"];
 
 /** Lowercased file extension (without the dot), or "" if there is none. */
 function extensionOf(path: string): string {
@@ -129,8 +133,11 @@ function isImagePath(path: string): boolean {
 export function isVideoPath(path: string): boolean {
   return VIDEO_EXTENSIONS.includes(extensionOf(path));
 }
+export function isArchivePath(path: string): boolean {
+  return ARCHIVE_EXTENSIONS.includes(extensionOf(path));
+}
 function isMediaPath(path: string): boolean {
-  return isImagePath(path) || isVideoPath(path);
+  return isImagePath(path) || isVideoPath(path) || isArchivePath(path);
 }
 /** MIME type to hand the WebCodecs ImageDecoder, derived from the extension.
  *  Formats ImageDecoder doesn't cover (bmp/avif/ico) return "" so they skip
@@ -2513,16 +2520,36 @@ async function fillRecentThumbs(): Promise<void> {
     // allow_media_dir with the path it is about to read). The WebView still only
     // ever loads the derived JPEG out of the app's own cache, never the original.
     await authorizeMediaDir(r.path);
+    // gallery-004: an archive is not something ffmpeg can read, so a recent
+    // archive resolves to a cover image from INSIDE it first, then goes through
+    // the same media_thumbnail cache as every other card.
+    let source: string | null = r.path;
+    if (isArchivePath(r.path)) {
+      const inner = await tauriInvoke<string | null>("archive_cover_entry", {
+        archive: r.path,
+        inner: "",
+      }).catch(() => null);
+      source = inner
+        ? await tauriInvoke<string>("archive_entry_file", { archive: r.path, inner }).catch(
+            () => null,
+          )
+        : null;
+    }
+    if (!source) continue;
     // The recents list can change under a slow pass (a new open re-renders it);
     // only keep a result the current list still wants.
-    const thumb = await tauriInvoke<string>("media_thumbnail", { path: r.path }).catch(() => null);
+    const thumb = await tauriInvoke<string>("media_thumbnail", { path: source }).catch(() => null);
     if (!thumb) continue;
     if (!ui.recents.some((x) => x.path === r.path)) continue;
     ui.recentThumbs[r.path] = convertFileSrc(thumb);
   }
 }
 
-async function loadFromPath(path: string, fromQueue = false): Promise<void> {
+async function loadFromPath(
+  path: string,
+  fromQueue = false,
+  opts: { noFolderQueue?: boolean } = {},
+): Promise<void> {
   perfMark("open.begin", basename(path)); // perf-004: paired with open.firstframe
   currentPath = path;
   closeNextPrompt(); // any pending "Up Next" prompt is moot once a new clip loads
@@ -2533,6 +2560,15 @@ async function loadFromPath(path: string, fromQueue = false): Promise<void> {
   addRecent(path, basename(path));
   // sec-002: authorize this file's directory before any native read of it.
   await authorizeMediaDir(path);
+  // gallery-004: an archive is a place, not a clip. Routing it here — at the one
+  // funnel every open passes through — covers the file picker, drag-drop, a
+  // Recent card, the launch argument and the single-instance handler at once.
+  if (isArchivePath(path)) {
+    clearQueue();
+    loadTimestampsFor(null);
+    await openArchiveGallery(path, "");
+    return;
+  }
   if (isImagePath(path)) {
     clearQueue(); // images aren't part of the auto-advancing video queue
     loadTimestampsFor(null);
@@ -2579,6 +2615,11 @@ async function loadFromPath(path: string, fromQueue = false): Promise<void> {
       // the highlight to the loaded item (already set optimistically by the caller).
       const idx = ui.queue.findIndex((q) => q.path === path);
       if (idx >= 0) ui.queueIndex = idx;
+    } else if (opts.noFolderQueue) {
+      // gallery-004: a clip opened from inside an archive has no honest folder
+      // queue — its siblings are still compressed, and materializing the next one
+      // could take gigabytes and an unbounded pause. It plays alone.
+      clearQueue();
     } else {
       // Treat the folder's other videos as an auto-advancing queue (play-013). Built
       // from the ORIGINAL path (not the remuxed temp .mp4) so siblings resolve.
@@ -3459,13 +3500,60 @@ export async function openFolderDialog(): Promise<void> {
   }
 }
 
-/** Materialize and open one entry from inside an archive (gallery-004). */
+/**
+ * Open one photo or clip from inside an archive (gallery-004).
+ *
+ * A PHOTO materializes its whole LEVEL first. That is what buys sibling Prev/Next
+ * for free: once the level's images are real files in the mirror directory,
+ * `buildPhotoQueue`'s existing `list_folder_images` call finds them all with no
+ * new navigation code. It also matches the reading path — a user who opens page
+ * one is about to press Right two hundred times. The cost is bounded because
+ * these are images.
+ *
+ * A VIDEO materializes only itself: a level of clips could be many gigabytes, so
+ * it plays alone (no play-013 queue).
+ */
 async function openArchiveEntry(item: GalleryItem): Promise<void> {
-  const real = await tauriInvoke<string>("archive_entry_file", {
-    archive: item.archive,
-    inner: item.path,
+  const archive = item.archive;
+  ui.prepping = true;
+  ui.preppingLabel = "Extracting…";
+  try {
+    const real = await tauriInvoke<string>("archive_entry_file", {
+      archive,
+      inner: item.path,
+    }).catch(() => null);
+    if (!real) {
+      showError("Could not read that file from the archive.");
+      return;
+    }
+    if (item.kind === "image") {
+      await materializeArchiveLevel(archive, item.path);
+      await loadFromPath(real);
+    } else {
+      await loadFromPath(real, false, { noFolderQueue: true });
+    }
+  } finally {
+    ui.prepping = false;
+  }
+}
+
+/** Materialize every IMAGE alongside `inner` in its archive level, so the photo
+ *  viewer's sibling queue (built by `buildPhotoQueue` off the mirror directory)
+ *  sees the whole level rather than only the page that was clicked. Best-effort:
+ *  a page that fails to extract is simply absent from the queue. */
+async function materializeArchiveLevel(archive: string, inner: string): Promise<void> {
+  const cut = inner.lastIndexOf("/");
+  const dir = cut >= 0 ? inner.slice(0, cut) : "";
+  const entries = await tauriInvoke<{ images: string[] }>("list_archive_entries", {
+    archive,
+    inner: dir,
   }).catch(() => null);
-  if (real) await loadFromPath(real);
+  for (const image of entries?.images ?? []) {
+    if (image === inner) continue; // already materialized by the caller
+    await tauriInvoke<string>("archive_entry_file", { archive, inner: image }).catch(
+      () => null,
+    );
+  }
 }
 
 /**
@@ -3670,9 +3758,13 @@ export async function openFileDialog(): Promise<void> {
       multiple: false,
       directory: false,
       filters: [
-        { name: "Media", extensions: [...VIDEO_EXTENSIONS, ...IMAGE_EXTENSIONS] },
+        {
+          name: "Media",
+          extensions: [...VIDEO_EXTENSIONS, ...IMAGE_EXTENSIONS, ...ARCHIVE_EXTENSIONS],
+        },
         { name: "Video", extensions: VIDEO_EXTENSIONS },
         { name: "Image", extensions: IMAGE_EXTENSIONS },
+        { name: "Archive", extensions: ARCHIVE_EXTENSIONS },
       ],
     });
     if (typeof selected === "string") {
