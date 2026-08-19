@@ -64,8 +64,14 @@ pub(crate) fn archive_kind(path: &Path) -> Option<ArchiveKind> {
 /// (the part before the first `.`) is a Windows reserved device name (`CON`,
 /// `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, case-insensitive, with or
 /// without an extension — `nul.jpg` counts) — materializing one of those opens a
-/// device rather than a file. Separators are normalized to `/`, and a trailing
-/// separator (an explicit directory entry) is trimmed. Pure.
+/// device rather than a file. Also rejects any component that STARTS WITH the
+/// `.pb-` prefix — reserved for Playback's own cache bookkeeping inside a
+/// mirror directory (e.g. `RAR_COMPLETE_MARKER`) — so no archive entry can ever
+/// be extracted to the same path as, and thereby forge, one of those files. A
+/// prefix rule rather than a blacklist of the one current filename, because it
+/// stays correct as bookkeeping files are added; it does not touch ordinary
+/// dotfiles (`.hidden.jpg` still survives). Separators are normalized to `/`,
+/// and a trailing separator (an explicit directory entry) is trimmed. Pure.
 pub(crate) fn sanitize_entry_path(raw: &str) -> Option<String> {
     if raw.contains('\0') || raw.contains(':') {
         return None;
@@ -85,7 +91,12 @@ pub(crate) fn sanitize_entry_path(raw: &str) -> Option<String> {
     }
     let mut parts: Vec<&str> = Vec::new();
     for part in body.split('/') {
-        if part.is_empty() || part == "." || part == ".." || is_reserved_device_name(part) {
+        if part.is_empty()
+            || part == "."
+            || part == ".."
+            || is_reserved_device_name(part)
+            || part.starts_with(".pb-")
+        {
             return None;
         }
         parts.push(part);
@@ -450,14 +461,37 @@ fn rar_index(archive: &Path) -> Result<Vec<String>, ArchiveError> {
 /// one at a time is quadratic in the page count. One pass is both simpler and
 /// strictly faster there.
 ///
-/// Entries whose names fail `sanitize_entry_path`, directories, and encrypted
-/// entries are SKIPPED rather than extracted — the unrar library would
-/// otherwise happily honour `..`, and an encrypted entry has no bytes worth
-/// caching. The cap is enforced against bytes ACTUALLY WRITTEN (read back from
-/// disk after `extract_to`), not the header's declared `unpacked_size`, for the
-/// same reason `copy_capped` does the same for zip: an archive header is
-/// attacker-controlled and lies.
+/// The completion marker is the ONLY trustworthy signal that a pass finished —
+/// see `ensure_entry`, which gates a rar cache hit on it rather than on any one
+/// entry file's bare existence. That only holds if a failed pass never leaves
+/// entries behind, so on ANY error this removes the whole partial mirror before
+/// propagating it: `rar_extract_all_pass` below never writes the marker itself
+/// on a failure path, this wrapper is what guarantees nothing else survives one
+/// either. Without this, an aborted pass (most importantly the total-size cap,
+/// which the per-entry cap already self-cleans but a later entry pushing the
+/// running total over `MAX_ARCHIVE_BYTES` would not) would silently keep
+/// serving whichever pages happened to extract before the abort, forever.
 fn rar_extract_all(archive: &Path, mirror: &Path) -> Result<(), ArchiveError> {
+    match rar_extract_all_pass(archive, mirror) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(mirror);
+            Err(e)
+        }
+    }
+}
+
+/// The extraction pass itself. Entries whose names fail `sanitize_entry_path`,
+/// directories, and encrypted entries are SKIPPED rather than extracted — the
+/// unrar library would otherwise happily honour `..`, and an encrypted entry
+/// has no bytes worth caching. The cap is enforced against bytes ACTUALLY
+/// WRITTEN (read back from disk after `extract_to`), not the header's declared
+/// `unpacked_size`, for the same reason `copy_capped` does the same for zip: an
+/// archive header is attacker-controlled and lies. Any error return here — a
+/// bad header, a write failure, either cap — leaves the mirror partially
+/// populated and the marker unwritten by design; `rar_extract_all` above is
+/// the layer that cleans that up.
+fn rar_extract_all_pass(archive: &Path, mirror: &Path) -> Result<(), ArchiveError> {
     let mut open = unrar::Archive::new(archive)
         .open_for_processing()
         .map_err(rar_error)?;
@@ -480,7 +514,6 @@ fn rar_extract_all(archive: &Path, mirror: &Path) -> Result<(), ArchiveError> {
                 open = header.extract_to(&dst).map_err(rar_error)?;
                 let written = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
                 if written > MAX_ENTRY_BYTES {
-                    let _ = std::fs::remove_file(&dst);
                     return Err(ArchiveError::TooLarge);
                 }
                 total = total.saturating_add(written);
@@ -510,10 +543,18 @@ pub(crate) fn archive_index(archive: &Path) -> Result<Vec<String>, ArchiveError>
 ///
 /// This is THE seam: everything above it is format-agnostic, and everything
 /// below it is the per-format strategy — zip random-accesses the one entry, rar
-/// extracts the whole archive once. Idempotent: a repeat call for an
-/// already-materialized entry skips a second decompression entirely, though it
-/// still stats the archive on disk to (re)compute the cache key, so a cache hit
-/// does not survive the archive itself being removed.
+/// extracts the whole archive once. Idempotent, but the two families are NOT
+/// gated the same way: zip extracts exactly one entry per call, so that
+/// entry's own bare existence on disk already means "this call is done" — a
+/// plain stat is a valid cache hit. Rar extracts everything in one pass, so an
+/// entry file existing on its own proves nothing: it could be a survivor of a
+/// pass that was aborted partway (a size cap, a bad header) before the
+/// completion marker was ever written. A rar cache hit is therefore gated on
+/// `RAR_COMPLETE_MARKER`, never on the entry file alone; `rar_extract_all`
+/// pairs with this by deleting its own partial output on any failure, so the
+/// marker's absence and the mirror's incompleteness can never drift apart.
+/// Either way this still stats the archive on disk to (re)compute the cache
+/// key, so a cache hit does not survive the archive itself being removed.
 pub(crate) fn ensure_entry(archive: &Path, inner: &str) -> Result<PathBuf, ArchiveError> {
     let clean = sanitize_entry_path(inner).ok_or(ArchiveError::NotFound)?;
     // Canonicalize for the cache key, but fall back to the raw path when the
@@ -521,11 +562,13 @@ pub(crate) fn ensure_entry(archive: &Path, inner: &str) -> Result<PathBuf, Archi
     let key = std::fs::canonicalize(archive).unwrap_or_else(|_| archive.to_path_buf());
     let mirror = archive_mirror_dir(&key)?;
     let dst = mirror.join(&clean);
-    if std::fs::metadata(&dst).map(|m| m.len() > 0).unwrap_or(false) {
-        return Ok(dst);
-    }
     match archive_kind(archive) {
-        Some(ArchiveKind::Zip) => zip_extract_entry(archive, &clean, &dst)?,
+        Some(ArchiveKind::Zip) => {
+            if std::fs::metadata(&dst).map(|m| m.len() > 0).unwrap_or(false) {
+                return Ok(dst);
+            }
+            zip_extract_entry(archive, &clean, &dst)?;
+        }
         Some(ArchiveKind::Rar) => {
             if !mirror.join(RAR_COMPLETE_MARKER).exists() {
                 rar_extract_all(archive, &mirror)?;
@@ -610,6 +653,19 @@ mod tests {
         assert_eq!(
             sanitize_entry_path("my.notes.2024.jpg"),
             Some("my.notes.2024.jpg".to_string())
+        );
+
+        // Playback's own cache bookkeeping prefix: rejected structurally by
+        // prefix (not by matching the one marker filename), at any depth, so no
+        // archive entry can forge RAR_COMPLETE_MARKER or a future ".pb-*" file.
+        assert_eq!(sanitize_entry_path(".pb-complete"), None);
+        assert_eq!(sanitize_entry_path("a/.pb-complete"), None);
+        assert_eq!(sanitize_entry_path(".pb-anything"), None);
+        // This is a PREFIX ban, not a blanket dotfile ban — an ordinary hidden
+        // file must still survive.
+        assert_eq!(
+            sanitize_entry_path(".hidden.jpg"),
+            Some(".hidden.jpg".to_string())
         );
     }
 
@@ -814,5 +870,49 @@ mod tests {
         let not_archive = zip_path.parent().unwrap().join("photo.jpg");
         std::fs::write(&not_archive, b"not an archive").unwrap();
         assert_eq!(archive_index(&not_archive), Err(ArchiveError::Unsupported));
+    }
+
+    /// Fix round 1, Finding 1: a rar mirror with an entry already on disk but
+    /// NO completion marker is exactly what an aborted `rar_extract_all` used
+    /// to leave behind. `ensure_entry` must not serve that stale file as a
+    /// cache hit on the strength of its bare existence alone — it must
+    /// re-attempt extraction. Driving a real `rar_extract_all` abort is
+    /// impractical without a rar-writing crate, so this proves the gate
+    /// directly: the "archive" here is deliberately not a valid rar, so if the
+    /// stale file WERE served as a hit this returns `Ok`, and if the marker
+    /// gate is honoured this returns `Err` instead (extraction against a
+    /// corrupt archive fails) — which is also, incidentally, live proof of the
+    /// abort-cleanup half of the fix, since that failed attempt removes the
+    /// stale file from the mirror too.
+    #[test]
+    fn ensure_entry_for_rar_ignores_a_partial_mirror_without_the_completion_marker() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "pb-ar-test-partial-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive_path = dir.join("book.cbr");
+        // Deliberately not a valid rar: this test only needs archive_kind to
+        // route it to the rar arm, and needs extraction against it to fail.
+        std::fs::write(&archive_path, b"not actually a valid rar").unwrap();
+
+        let canonical = std::fs::canonicalize(&archive_path).unwrap();
+        let mirror = archive_mirror_dir(&canonical).unwrap();
+        std::fs::create_dir_all(mirror.join("ch1")).unwrap();
+        std::fs::write(mirror.join("ch1/p1.jpg"), b"STALE").unwrap();
+        // Deliberately no RAR_COMPLETE_MARKER written.
+
+        let result = ensure_entry(&archive_path, "ch1/p1.jpg");
+        assert!(
+            result.is_err(),
+            "a partial rar mirror without the completion marker must not be served as a cache hit, got {result:?}"
+        );
+        // The failed re-extraction attempt must also have cleaned up the stale
+        // entry it found on disk, not just failed to add a marker.
+        assert!(!mirror.join("ch1/p1.jpg").exists());
     }
 }
