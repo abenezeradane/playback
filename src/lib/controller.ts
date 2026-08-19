@@ -3514,6 +3514,13 @@ export async function openFolderDialog(): Promise<void> {
  * it plays alone (no play-013 queue).
  */
 async function openArchiveEntry(item: GalleryItem): Promise<void> {
+  // Re-entrancy guard: the .prepping overlay only blocks the POINTER, it does not
+  // blur focus or mark tiles inert, so a still-focused tile can fire a native
+  // Enter/Space click while the overlay is up. Without this, two calls race on
+  // the shared ui.prepping flag — whichever finishes first clears it in its
+  // `finally` while the other is still mid-materialization, reopening the click
+  // surface before the first load has settled.
+  if (ui.prepping) return;
   const archive = item.archive;
   ui.prepping = true;
   ui.preppingLabel = "Extracting…";
