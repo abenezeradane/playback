@@ -382,6 +382,163 @@ pub(crate) fn zip_extract_entry(
     }
 }
 
+/// Map an `unrar` crate error to our vocabulary. Mirrors `zip_error`: a missing
+/// or wrong password is reported as `Encrypted` rather than folded into a
+/// generic failure, because gallery-004 states that case to the user instead of
+/// "unreadable".
+fn rar_error(e: unrar::error::UnrarError) -> ArchiveError {
+    match e.code {
+        unrar::error::Code::MissingPassword | unrar::error::Code::BadPassword => {
+            ArchiveError::Encrypted
+        }
+        _ => ArchiveError::Unreadable,
+    }
+}
+
+/// Written into a mirror once a RAR has been fully extracted, so later calls are
+/// pure cache hits rather than a second whole-archive pass.
+pub(crate) const RAR_COMPLETE_MARKER: &str = ".pb-complete";
+
+/// Every file entry in a rar, as sanitized inner paths. Listing a rar reads its
+/// headers only — the same cheap operation as a zip's central directory.
+///
+/// Two independent encrypted cases exist, and both are handled: a RAR with
+/// encrypted HEADERS fails to read a header at all (`open_for_listing` still
+/// succeeds, but the first `next()` returns `Err(MissingPassword)`), while a RAR
+/// with only encrypted CONTENT lists its names just fine and instead marks the
+/// entry via `FileHeader::is_encrypted`. Either way the entry is dropped rather
+/// than shown, matching zip_index's `entry.encrypted()` check.
+fn rar_index(archive: &Path) -> Result<Vec<String>, ArchiveError> {
+    let list = unrar::Archive::new(archive)
+        .open_for_listing()
+        .map_err(rar_error)?;
+    let mut names = Vec::new();
+    let mut encrypted_seen = false;
+    for header in list {
+        let entry = match header {
+            Ok(e) => e,
+            Err(_) => {
+                // Encrypted headers: the archive cannot be read further either
+                // way, so iteration is effectively over after this.
+                encrypted_seen = true;
+                continue;
+            }
+        };
+        if entry.is_directory() {
+            continue;
+        }
+        if entry.is_encrypted() {
+            encrypted_seen = true;
+            continue;
+        }
+        if let Some(clean) = sanitize_entry_path(&entry.filename.to_string_lossy()) {
+            names.push(clean);
+        }
+    }
+    // An archive whose every entry is encrypted is reported as such rather than
+    // shown as an empty folder — the user can act on the first, not the second.
+    if names.is_empty() && encrypted_seen {
+        return Err(ArchiveError::Encrypted);
+    }
+    Ok(names)
+}
+
+/// Extract a WHOLE rar into `mirror`, then write the completion marker.
+///
+/// Whole-archive rather than per-entry on purpose: solid rar archives (common
+/// for `.cbr`) must decompress entries 1..N to reach N, so materializing pages
+/// one at a time is quadratic in the page count. One pass is both simpler and
+/// strictly faster there.
+///
+/// Entries whose names fail `sanitize_entry_path`, directories, and encrypted
+/// entries are SKIPPED rather than extracted — the unrar library would
+/// otherwise happily honour `..`, and an encrypted entry has no bytes worth
+/// caching. The cap is enforced against bytes ACTUALLY WRITTEN (read back from
+/// disk after `extract_to`), not the header's declared `unpacked_size`, for the
+/// same reason `copy_capped` does the same for zip: an archive header is
+/// attacker-controlled and lies.
+fn rar_extract_all(archive: &Path, mirror: &Path) -> Result<(), ArchiveError> {
+    let mut open = unrar::Archive::new(archive)
+        .open_for_processing()
+        .map_err(rar_error)?;
+    let mut total: u64 = 0;
+    while let Some(header) = open.read_header().map_err(rar_error)? {
+        let name = header.entry().filename.to_string_lossy().into_owned();
+        let is_dir = header.entry().is_directory();
+        let is_encrypted = header.entry().is_encrypted();
+        let clean = if is_dir || is_encrypted {
+            None
+        } else {
+            sanitize_entry_path(&name)
+        };
+        match clean {
+            Some(clean) => {
+                let dst = mirror.join(&clean);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).map_err(|_| ArchiveError::Unreadable)?;
+                }
+                open = header.extract_to(&dst).map_err(rar_error)?;
+                let written = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
+                if written > MAX_ENTRY_BYTES {
+                    let _ = std::fs::remove_file(&dst);
+                    return Err(ArchiveError::TooLarge);
+                }
+                total = total.saturating_add(written);
+                if total > MAX_ARCHIVE_BYTES {
+                    return Err(ArchiveError::TooLarge);
+                }
+            }
+            None => {
+                open = header.skip().map_err(rar_error)?;
+            }
+        }
+    }
+    std::fs::write(mirror.join(RAR_COMPLETE_MARKER), b"1").map_err(|_| ArchiveError::Unreadable)?;
+    Ok(())
+}
+
+/// Every file entry in an archive, whichever family it belongs to.
+pub(crate) fn archive_index(archive: &Path) -> Result<Vec<String>, ArchiveError> {
+    match archive_kind(archive) {
+        Some(ArchiveKind::Zip) => zip_index(archive),
+        Some(ArchiveKind::Rar) => rar_index(archive),
+        None => Err(ArchiveError::Unsupported),
+    }
+}
+
+/// Materialize one entry and return its real path in the mirror directory.
+///
+/// This is THE seam: everything above it is format-agnostic, and everything
+/// below it is the per-format strategy — zip random-accesses the one entry, rar
+/// extracts the whole archive once. Idempotent: a repeat call for an
+/// already-materialized entry skips a second decompression entirely, though it
+/// still stats the archive on disk to (re)compute the cache key, so a cache hit
+/// does not survive the archive itself being removed.
+pub(crate) fn ensure_entry(archive: &Path, inner: &str) -> Result<PathBuf, ArchiveError> {
+    let clean = sanitize_entry_path(inner).ok_or(ArchiveError::NotFound)?;
+    // Canonicalize for the cache key, but fall back to the raw path when the
+    // archive is gone — a cache hit must still resolve.
+    let key = std::fs::canonicalize(archive).unwrap_or_else(|_| archive.to_path_buf());
+    let mirror = archive_mirror_dir(&key)?;
+    let dst = mirror.join(&clean);
+    if std::fs::metadata(&dst).map(|m| m.len() > 0).unwrap_or(false) {
+        return Ok(dst);
+    }
+    match archive_kind(archive) {
+        Some(ArchiveKind::Zip) => zip_extract_entry(archive, &clean, &dst)?,
+        Some(ArchiveKind::Rar) => {
+            if !mirror.join(RAR_COMPLETE_MARKER).exists() {
+                rar_extract_all(archive, &mirror)?;
+            }
+            if !std::fs::metadata(&dst).map(|m| m.len() > 0).unwrap_or(false) {
+                return Err(ArchiveError::NotFound);
+            }
+        }
+        None => return Err(ArchiveError::Unsupported),
+    }
+    Ok(dst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,5 +771,48 @@ mod tests {
             copy_capped(&mut src.as_slice(), &mut small, 1_000),
             Err(ArchiveError::TooLarge)
         );
+    }
+
+    #[test]
+    fn ensure_entry_is_idempotent_and_serves_the_second_call_from_cache() {
+        let zip_path = write_test_zip("ensure", &[("ch1/b.png", b"PNGBYTES")]);
+        let first = ensure_entry(&zip_path, "ch1/b.png").unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"PNGBYTES");
+        // The materialized file keeps its REAL NAME at a REAL PATH — that is what
+        // lets every downstream consumer stay archive-unaware.
+        assert_eq!(first.file_name().unwrap(), "b.png");
+        assert!(first.parent().unwrap().ends_with("ch1"));
+
+        let mtime_after_first = std::fs::metadata(&first).unwrap().modified().unwrap();
+
+        // A second call for the same entry returns the SAME path with the bytes
+        // intact, and is proven to be a cache hit rather than a re-extraction by
+        // the destination file's mtime not moving between the two calls.
+        let second = ensure_entry(&zip_path, "ch1/b.png").unwrap();
+        assert_eq!(second, first);
+        assert_eq!(std::fs::read(&second).unwrap(), b"PNGBYTES");
+        assert_eq!(
+            std::fs::metadata(&second).unwrap().modified().unwrap(),
+            mtime_after_first
+        );
+    }
+
+    #[test]
+    fn ensure_entry_rejects_a_hostile_inner_path_before_writing_anything() {
+        let zip_path = write_test_zip("hostile", &[("a.jpg", b"AAA")]);
+        assert_eq!(ensure_entry(&zip_path, "../escape.jpg"), Err(ArchiveError::NotFound));
+        assert_eq!(ensure_entry(&zip_path, "C:/escape.jpg"), Err(ArchiveError::NotFound));
+        let mirror = archive_mirror_dir(&std::fs::canonicalize(&zip_path).unwrap()).unwrap();
+        // Nothing escaped, and nothing was created next to the mirror either.
+        assert!(!mirror.parent().unwrap().join("escape.jpg").exists());
+    }
+
+    #[test]
+    fn archive_index_routes_by_extension_and_rejects_a_non_archive() {
+        let zip_path = write_test_zip("route", &[("a.jpg", b"AAA")]);
+        assert_eq!(archive_index(&zip_path).unwrap(), vec!["a.jpg".to_string()]);
+        let not_archive = zip_path.parent().unwrap().join("photo.jpg");
+        std::fs::write(&not_archive, b"not an archive").unwrap();
+        assert_eq!(archive_index(&not_archive), Err(ArchiveError::Unsupported));
     }
 }
