@@ -2998,6 +2998,9 @@ async function renderThumb(index: number): Promise<void> {
   const token = galleryToken;
   const item = ui.galleryItems[index];
   if (!item || item.thumbSrc) return;
+  // Observability: which tile indices actually reach a render. Comparing the
+  // count of these against distinct indices is how a duplicate-enqueue is caught.
+  perfMark("thumb.render", String(index));
   thumbActive++;
   try {
     const thumb = await tauriInvoke<string>("media_thumbnail", { path: item.path }).catch(
