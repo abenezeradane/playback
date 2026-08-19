@@ -1033,7 +1033,7 @@ async fn extract_video_still(
 const THUMB_MAX_PX: u32 = 480;
 
 /// Persistent thumbnail cache directory (alongside the shader cache).
-fn thumb_cache_dir() -> Option<PathBuf> {
+pub(crate) fn thumb_cache_dir() -> Option<PathBuf> {
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else {
@@ -1081,14 +1081,25 @@ fn is_prunable_cache_file(name: &str) -> bool {
     name.starts_with("pb-th-") && (name.ends_with(".jpg") || name.ends_with(".dur"))
 }
 
-/// Drop thumbnails not touched in 30 days, so the cache cannot grow without bound.
+/// Drop thumbnails and archive mirrors not touched in 30 days, so the cache
+/// cannot grow without bound.
+///
+/// gallery-004: a mirror is a DIRECTORY, so it is removed recursively. A mirror
+/// still in use is only ever removed after 30 days with no writes to it, and
+/// re-materializes transparently on the next open — a cache miss, not a fault.
 fn prune_thumb_cache(dir: &Path) {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !is_prunable_cache_file(&name) {
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let prunable = if is_dir {
+            archive::is_prunable_cache_dir(&name)
+        } else {
+            is_prunable_cache_file(&name)
+        };
+        if !prunable {
             continue;
         }
         let stale = entry
@@ -1097,7 +1108,11 @@ fn prune_thumb_cache(dir: &Path) {
             .map(|m| m.elapsed().map(|age| age > MAX_AGE).unwrap_or(false))
             .unwrap_or(false);
         if stale {
-            let _ = fs::remove_file(entry.path());
+            if is_dir {
+                let _ = fs::remove_dir_all(entry.path());
+            } else {
+                let _ = fs::remove_file(entry.path());
+            }
         }
     }
 }

@@ -12,7 +12,7 @@
 //! it runs on the LISTING path, not merely the write path, so an entry that
 //! could escape the mirror directory is never even shown.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{has_gallery_image_ext, has_queue_video_ext};
 
@@ -146,6 +146,80 @@ pub(crate) fn archive_level(files: &[String], inner: &str) -> ArchiveEntries {
     out
 }
 
+/// What went wrong, in terms the UI can state honestly. The variants exist so
+/// the command layer can map each to ONE stable public string (sec-005) while
+/// the native side logs the real cause.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum ArchiveError {
+    /// The archive (or the entry) needs a password. gallery-004 does not prompt.
+    Encrypted,
+    /// An entry or the archive exceeded a materialization ceiling.
+    TooLarge,
+    /// Corrupt, truncated, or an unreadable container.
+    Unreadable,
+    /// No such archive, or no such entry inside it.
+    NotFound,
+    /// A container or codec this build does not decode.
+    Unsupported,
+}
+
+impl ArchiveError {
+    pub(crate) fn public_message(&self) -> &'static str {
+        match self {
+            ArchiveError::Encrypted => "This archive is password-protected.",
+            ArchiveError::TooLarge => "This archive is too large to open.",
+            ArchiveError::Unreadable => "This archive could not be read.",
+            ArchiveError::NotFound => "That file is no longer there.",
+            ArchiveError::Unsupported => "This archive format is not supported.",
+        }
+    }
+}
+
+/// Directory name for one archive's mirror, keyed on the archive's canonical
+/// path + size + mtime — so replacing or editing an archive misses the cache
+/// rather than serving pages from the old one.
+///
+/// This deliberately keeps its OWN FNV-1a rather than sharing `thumb_cache_name`'s:
+/// the two keys have different lifetimes and different prefixes, and refactoring
+/// a live on-disk cache key to save six lines would invalidate every user's
+/// existing thumbnails for no behavioural gain. Pure + unit-tested.
+pub(crate) fn archive_mirror_name(canonical_archive: &Path, size: u64, mtime_secs: u64) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    mix(canonical_archive.to_string_lossy().as_bytes());
+    mix(&size.to_le_bytes());
+    mix(&mtime_secs.to_le_bytes());
+    format!("pb-ar-{hash:016x}")
+}
+
+/// True for a cache entry that is an archive mirror DIRECTORY, so the existing
+/// 30-day prune can remove it recursively alongside the `pb-th-*` files.
+pub(crate) fn is_prunable_cache_dir(name: &str) -> bool {
+    name.starts_with("pb-ar-")
+}
+
+/// This archive's mirror directory (created if absent). Mirrors live INSIDE the
+/// thumbnail cache so there is one cache directory, one `authorize_dir` grant,
+/// and one prune.
+pub(crate) fn archive_mirror_dir(canonical_archive: &Path) -> Result<PathBuf, ArchiveError> {
+    let meta = std::fs::metadata(canonical_archive).map_err(|_| ArchiveError::NotFound)?;
+    let mtime_secs = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let base = crate::thumb_cache_dir().ok_or(ArchiveError::Unreadable)?;
+    let dir = base.join(archive_mirror_name(canonical_archive, meta.len(), mtime_secs));
+    std::fs::create_dir_all(&dir).map_err(|_| ArchiveError::Unreadable)?;
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +316,46 @@ mod tests {
         let files = vec!["ch1/a.jpg".to_string(), "ch10/b.jpg".to_string()];
         let ch1 = archive_level(&files, "ch1");
         assert_eq!(ch1.images, vec!["ch1/a.jpg".to_string()]);
+    }
+
+    #[test]
+    fn archive_mirror_name_is_deterministic_and_invalidates_on_change() {
+        let src = Path::new("C:/comics/book.cbz");
+        let base = archive_mirror_name(src, 1024, 999);
+        assert_eq!(base, archive_mirror_name(src, 1024, 999)); // stable
+        assert!(base.starts_with("pb-ar-"));
+        assert_eq!(base.len(), "pb-ar-".len() + 16);
+        // Any identifying input changing yields a different mirror, so a replaced
+        // or edited archive re-extracts rather than serving stale pages.
+        assert_ne!(base, archive_mirror_name(src, 2048, 999));
+        assert_ne!(base, archive_mirror_name(src, 1024, 1000));
+        assert_ne!(base, archive_mirror_name(Path::new("C:/comics/other.cbz"), 1024, 999));
+    }
+
+    #[test]
+    fn is_prunable_cache_dir_matches_only_archive_mirrors() {
+        assert!(is_prunable_cache_dir("pb-ar-0123456789abcdef"));
+        assert!(!is_prunable_cache_dir("pb-th-0123456789abcdef.jpg")); // a thumbnail FILE
+        assert!(!is_prunable_cache_dir("my-documents"));
+        assert!(!is_prunable_cache_dir(""));
+    }
+
+    #[test]
+    fn archive_error_messages_are_generic_and_actionable() {
+        // sec-005: what crosses the IPC boundary carries no path or OS detail.
+        assert_eq!(
+            ArchiveError::Encrypted.public_message(),
+            "This archive is password-protected."
+        );
+        for e in [
+            ArchiveError::TooLarge,
+            ArchiveError::Unreadable,
+            ArchiveError::NotFound,
+            ArchiveError::Unsupported,
+        ] {
+            let msg = e.public_message();
+            assert!(!msg.is_empty());
+            assert!(!msg.contains(':')); // no "context: detail" leakage
+        }
     }
 }
