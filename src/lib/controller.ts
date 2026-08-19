@@ -2961,18 +2961,34 @@ function showImageError(): void {
  * bitmap per tile. The grid now renders instantly with placeholders instead.
  */
 function toGalleryItems(nodes: GalleryNode[]): GalleryItem[] {
-  return nodes.map((n) => ({ path: n.path, name: n.name, kind: n.kind, thumbSrc: "" }));
+  return nodes.map((n) => ({
+    path: n.path,
+    name: n.name,
+    kind: n.kind,
+    thumbSrc: "",
+    durationLabel: "",
+  }));
 }
 
-/** The listing behind every gallery grid (gallery-002): sub-folders and images in
- *  one native call, ordered folders-first by the pure `orderGalleryEntries`. */
+/** The listing behind every gallery grid (gallery-002, gallery-003): sub-folders,
+ *  images and videos in one native call, ordered by the pure `orderGalleryEntries`
+ *  — folders first, then photos and videos interleaved by name. */
 async function readGalleryNodes(path: string): Promise<GalleryNode[]> {
-  const entries = await tauriInvoke<{ folders: string[]; images: string[] }>(
-    "list_folder_entries",
-    { path },
+  const entries = await tauriInvoke<{
+    folders: string[];
+    images: string[];
+    videos: string[];
+  }>("list_folder_entries", { path });
+  const counted =
+    (entries?.images?.length ?? 0) +
+    (entries?.folders?.length ?? 0) +
+    (entries?.videos?.length ?? 0);
+  perfMark("gallery.listed", String(counted)); // perf-005
+  return orderGalleryEntries(
+    entries?.folders ?? [],
+    entries?.images ?? [],
+    entries?.videos ?? [],
   );
-  perfMark("gallery.listed", String((entries?.images?.length ?? 0) + (entries?.folders?.length ?? 0))); // perf-005
-  return orderGalleryEntries(entries?.folders ?? [], entries?.images ?? []);
 }
 
 /** How many thumbnails to render at once. Each is an ffmpeg sidecar process, so
@@ -3080,29 +3096,65 @@ async function renderThumb(index: number): Promise<void> {
   perfMark("thumb.render", String(index));
   thumbActive++;
   try {
-    let source: string | null = item.path;
-    if (item.kind === "folder") {
-      source = await tauriInvoke<string | null>("folder_cover_image", {
-        path: item.path,
-      }).catch(() => null);
-      if (token !== galleryToken) return;
-      if (!source) return; // no cover — the folder glyph stands on its own
-    }
-    const thumb = await tauriInvoke<string>("media_thumbnail", { path: source }).catch(
-      () => null,
-    );
-    if (token !== galleryToken) return;
-    const current = ui.galleryItems[index];
-    if (!current || current.path !== item.path) return; // list changed under us
-    // A folder never falls back to its own path (a directory is not an image).
-    const src = thumb ?? (current.kind === "folder" ? null : item.path);
-    if (!src) return;
-    const { convertFileSrc } = await import("@tauri-apps/api/core");
-    current.thumbSrc = convertFileSrc(src);
+    await renderTilePoster(index, item, token);
+    // gallery-003: the duration badge is a second probe, run inside the SAME
+    // bounded slot rather than alongside the poster — a video tile must not double
+    // the number of concurrent ffmpeg processes. It runs even when the poster
+    // failed, since a tile showing a placeholder can still honestly say "1:34".
+    if (item.kind === "video") await renderTileDuration(index, item, token);
   } finally {
     thumbActive--;
     if (token === galleryToken) pumpThumbs();
   }
+}
+
+/** The picture on one tile: a cached JPEG for an image, a poster frame for a video,
+ *  a cover for a folder. Bails silently when the gallery changed underneath it. */
+async function renderTilePoster(
+  index: number,
+  item: GalleryItem,
+  token: number,
+): Promise<void> {
+  let source: string | null = item.path;
+  if (item.kind === "folder") {
+    source = await tauriInvoke<string | null>("folder_cover_image", {
+      path: item.path,
+    }).catch(() => null);
+    if (token !== galleryToken) return;
+    if (!source) return; // no cover — the folder glyph stands on its own
+  }
+  const thumb = await tauriInvoke<string>("media_thumbnail", { path: source }).catch(
+    () => null,
+  );
+  if (token !== galleryToken) return;
+  const current = ui.galleryItems[index];
+  if (!current || current.path !== item.path) return; // list changed under us
+  // A folder never falls back to its own path (a directory is not an image).
+  const src = thumb ?? (current.kind === "folder" ? null : item.path);
+  if (!src) return;
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  current.thumbSrc = convertFileSrc(src);
+}
+
+/** The running-time badge on one video tile (gallery-003). A container that reports
+ *  no honest duration leaves the label empty, and the tile then shows no badge —
+ *  never a fabricated 0:00. */
+async function renderTileDuration(
+  index: number,
+  item: GalleryItem,
+  token: number,
+): Promise<void> {
+  const seconds = await tauriInvoke<number | null>("video_duration", {
+    path: item.path,
+  }).catch(() => null);
+  if (token !== galleryToken) return;
+  if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return;
+  const current = ui.galleryItems[index];
+  if (!current || current.path !== item.path) return; // list changed under us
+  current.durationLabel = formatTime(seconds);
+  // Observability: the badge is text, which a screenshot oracle cannot read — this
+  // mark is how the gallery-003 smoke asserts a real duration reached a real tile.
+  perfMark("thumb.duration", current.durationLabel);
 }
 
 // --- Grid keyboard navigation (ux-004) -------------------------------------
@@ -3254,7 +3306,9 @@ export async function openFolderDialog(): Promise<void> {
 /**
  * Click (or press Enter on) a tile in the Gallery grid. An image tile opens that
  * photo in the single-image viewer; a sub-folder tile (gallery-002) re-scopes the
- * grid to that folder's contents. Either way the current grid is pushed onto the
+ * grid to that folder's contents; a video tile (gallery-003) falls through the same
+ * `loadFromPath` funnel as any other open, so it lands in the player with the
+ * play-013 folder queue behind it. Either way the current grid is pushed onto the
  * nav stack first, so Back walks the trail back out one level at a time.
  */
 export function openGalleryItem(item: GalleryItem): void {

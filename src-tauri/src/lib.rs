@@ -1063,6 +1063,23 @@ fn thumb_cache_name(canonical_src: &Path, size: u64, mtime_secs: u64, max_px: u3
     format!("pb-th-{hash:016x}.jpg")
 }
 
+/// Where a probed video duration is memoised (gallery-003), keyed exactly like the
+/// thumbnail for the same source so editing the file invalidates both together.
+///
+/// `max_px` is fixed at 0 — no thumbnail is ever requested at that size, so the hash
+/// can never collide with the JPEG's — and the `.dur` extension keeps the two apart
+/// on disk even if it did.
+fn duration_cache_path(dir: &Path, canonical_src: &Path, size: u64, mtime_secs: u64) -> PathBuf {
+    let name = thumb_cache_name(canonical_src, size, mtime_secs, 0);
+    dir.join(name.replace(".jpg", ".dur"))
+}
+
+/// True for a file this app put in the thumbnail cache — the JPEG tiles and the
+/// gallery-003 `.dur` duration memos alike, so the pruner expires both.
+fn is_prunable_cache_file(name: &str) -> bool {
+    name.starts_with("pb-th-") && (name.ends_with(".jpg") || name.ends_with(".dur"))
+}
+
 /// Drop thumbnails not touched in 30 days, so the cache cannot grow without bound.
 fn prune_thumb_cache(dir: &Path) {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
@@ -1070,7 +1087,7 @@ fn prune_thumb_cache(dir: &Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !(name.starts_with("pb-th-") && name.ends_with(".jpg")) {
+        if !is_prunable_cache_file(&name) {
             continue;
         }
         let stale = entry
@@ -1217,6 +1234,88 @@ fn prepare_thumb_cache(app: tauri::AppHandle, allow: tauri::State<'_, AllowList>
     prune_thumb_cache(&dir);
     let canonical = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
     authorize_dir(&app, &allow, canonical, Some(dir.as_path()));
+}
+
+/// Parse the running time out of what `ffmpeg -i <file>` writes to stderr.
+///
+/// Given no output file, ffmpeg prints the input's header block and exits non-zero;
+/// the line wanted here reads `Duration: 00:01:34.56, start: ..., bitrate: ...`.
+///
+/// A recording whose container carries no honest duration (a zero-duration
+/// fragmented MP4 — the play-020 shape) prints `Duration: N/A`, and anything
+/// unparseable is treated the same way: `None`, so the tile shows NO badge rather
+/// than a fabricated `0:00`. Pure + unit-tested.
+fn parse_ffmpeg_duration(stderr: &str) -> Option<f64> {
+    let field = stderr.split("Duration: ").nth(1)?.split(',').next()?.trim();
+    let mut parts = field.split(':');
+    let hours: f64 = parts.next()?.trim().parse().ok()?;
+    let minutes: f64 = parts.next()?.parse().ok()?;
+    let seconds: f64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None; // more fields than h:m:s — not a shape this understands
+    }
+    let total = hours * 3600.0 + minutes * 60.0 + seconds;
+    (total.is_finite() && total > 0.0).then_some(total)
+}
+
+/// The running time of one video, for the gallery tile's duration badge
+/// (gallery-003). `None` means "no badge" — an unreadable or duration-less file is
+/// shown without one rather than with a made-up number.
+///
+/// This is a HEADER read, not a decode: ffmpeg is given no output file, so it prints
+/// the input block and stops. The answer is then memoised next to the thumbnail
+/// cache under the same source+size+mtime key, so scrolling back over a folder — or
+/// reopening it in a later session — re-probes nothing. A negative result is cached
+/// too, so a file that has no duration is not re-probed on every visit.
+#[tauri::command]
+async fn video_duration(
+    app: tauri::AppHandle,
+    allow: tauri::State<'_, AllowList>,
+    path: String,
+) -> Result<Option<f64>, String> {
+    let src = ensure_allowed(&allow, &path)?;
+    if !has_queue_video_ext(&src) {
+        return Ok(None); // an image tile never asks, but never trust the caller
+    }
+    let meta = fs::metadata(&src).map_err(|_| "file not found".to_string())?;
+    let size = meta.len();
+    let mtime_secs = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cache = thumb_cache_dir().map(|dir| duration_cache_path(&dir, &src, size, mtime_secs));
+
+    if let Some(memo) = cache.as_ref().and_then(|p| fs::read_to_string(p).ok()) {
+        // "none" (or any unparseable content) round-trips back to None.
+        return Ok(memo.trim().parse::<f64>().ok());
+    }
+
+    let sidecar = app
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+    let output = sidecar
+        .args([
+            "-hide_banner".to_string(),
+            "-i".to_string(),
+            src.to_string_lossy().into_owned(),
+        ])
+        .output()
+        .await
+        .map_err(|_| "duration probe failed to start".to_string())?;
+    // ffmpeg always exits non-zero here (no output file was given), so the status is
+    // not the signal — the header it printed on the way out is.
+    let seconds = parse_ffmpeg_duration(&String::from_utf8_lossy(&output.stderr));
+
+    if let Some(path) = cache.as_ref() {
+        let _ = fs::write(
+            path,
+            seconds.map(|s| s.to_string()).unwrap_or_else(|| "none".to_string()),
+        );
+    }
+    Ok(seconds)
 }
 
 /// Video container extensions the folder queue enumerates (play-013). Mirrors the
@@ -1381,12 +1480,17 @@ fn resolve_listing_dir(
     }
 }
 
-/// A gallery folder's browsable contents, split by kind (gallery-002). Serialized
-/// to the WebView as `{ folders, images }`.
+/// A gallery folder's browsable contents, split by kind (gallery-002, gallery-003).
+/// Serialized to the WebView as `{ folders, images, videos }`.
+///
+/// Videos stay a separate list from images rather than one merged "media" vec: the
+/// frontend re-interleaves them for display, but the two kinds open different
+/// viewers, and keeping them apart here means no caller can conflate them.
 #[derive(Debug, PartialEq, serde::Serialize)]
 struct FolderEntries {
     folders: Vec<String>,
     images: Vec<String>,
+    videos: Vec<String>,
 }
 
 /// List a gallery folder's SUBFOLDERS as well as its images (gallery-002), so the
@@ -1419,6 +1523,7 @@ fn list_folder_entries_impl(allow: &AllowList, path: &str) -> Result<FolderEntri
         .map_err(|e| ipc_error("list_folder_entries: read_dir", e, "could not list folder"))?;
     let mut folders: Vec<String> = Vec::new();
     let mut images: Vec<String> = Vec::new();
+    let mut videos: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         // Dot-prefixed entries are tool/cache dirs (.git, .thumbnails), not albums.
@@ -1432,11 +1537,21 @@ fn list_folder_entries_impl(allow: &AllowList, path: &str) -> Result<FolderEntri
         };
         if entry_path.is_dir() {
             folders.push(full.to_string_lossy().into_owned());
-        } else if entry_path.is_file() && has_gallery_image_ext(&entry_path) {
-            images.push(full.to_string_lossy().into_owned());
+        } else if entry_path.is_file() {
+            // gallery-003: the same predicate the folder queue uses, so the grid and
+            // auto-advance agree on what counts as a video.
+            if has_gallery_image_ext(&entry_path) {
+                images.push(full.to_string_lossy().into_owned());
+            } else if has_queue_video_ext(&entry_path) {
+                videos.push(full.to_string_lossy().into_owned());
+            }
         }
     }
-    Ok(FolderEntries { folders, images })
+    Ok(FolderEntries {
+        folders,
+        images,
+        videos,
+    })
 }
 
 /// The image a folder TILE should show as its cover (gallery-002): the first image
@@ -1467,7 +1582,10 @@ fn folder_cover_image_impl(allow: &AllowList, path: &str) -> Result<Option<Strin
     let raw_dir = Path::new(path);
     // Track the smallest key seen rather than collecting + sorting the whole folder:
     // a cover only ever needs one entry, and this runs per folder tile on screen.
-    let mut best: Option<(String, String)> = None;
+    // gallery-003 keeps two candidates so an image can outrank a video that sorts
+    // earlier, without a second pass over the directory.
+    let mut best_image: Option<(String, String)> = None;
+    let mut best_video: Option<(String, String)> = None;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy().into_owned();
@@ -1475,15 +1593,25 @@ fn folder_cover_image_impl(allow: &AllowList, path: &str) -> Result<Option<Strin
             continue;
         }
         let entry_path = entry.path();
-        if !entry_path.is_file() || !has_gallery_image_ext(&entry_path) {
+        if !entry_path.is_file() {
             continue;
         }
+        let best = if has_gallery_image_ext(&entry_path) {
+            &mut best_image
+        } else if has_queue_video_ext(&entry_path) {
+            &mut best_video
+        } else {
+            continue;
+        };
         let key = name_str.to_lowercase();
         if best.as_ref().map(|(k, _)| key < *k).unwrap_or(true) {
-            best = Some((key, raw_dir.join(&name).to_string_lossy().into_owned()));
+            *best = Some((key, raw_dir.join(&name).to_string_lossy().into_owned()));
         }
     }
-    Ok(best.map(|(_, full)| full))
+    // An image wins outright when there is one: `media_thumbnail` renders it with a
+    // single decode, where a video costs a demux + seek. The video is the fallback
+    // that keeps an all-clips folder from showing a bare glyph.
+    Ok(best_image.or(best_video).map(|(_, full)| full))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1546,6 +1674,7 @@ pub fn run() {
             list_folder_entries,
             folder_cover_image,
             media_thumbnail,
+            video_duration,
             prepare_thumb_cache,
             get_hwaccel,
             set_hwaccel,
@@ -2305,6 +2434,157 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_folder_entries_returns_videos_in_their_own_list() {
+        // gallery-003: the grid shows videos too, but they stay a SEPARATE list from
+        // the images — `list_folder_images` (the photo viewer's Prev/Next queue) must
+        // remain photos-only, so the two kinds can never be conflated in one vec.
+        let base = temp_root("gallery-videos");
+        let media = base.join("mixed");
+        fs::create_dir_all(&media).unwrap();
+        for name in ["b.jpg", "clip.MP4", "movie.mkv", "notes.txt", "audio.mp3"] {
+            fs::write(media.join(name), b"x").unwrap();
+        }
+        fs::create_dir_all(media.join("Sub-One")).unwrap();
+
+        let allow = AllowList::default();
+        allow
+            .0
+            .lock()
+            .unwrap()
+            .insert(fs::canonicalize(&media).unwrap());
+
+        let mut got = list_folder_entries_impl(&allow, media.to_str().unwrap()).unwrap();
+        got.folders.sort();
+        got.images.sort();
+        got.videos.sort();
+
+        let names = |v: &Vec<String>| -> Vec<String> {
+            v.iter()
+                .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(names(&got.folders), vec!["Sub-One"]);
+        assert_eq!(names(&got.images), vec!["b.jpg"]);
+        // An uppercase extension counts (the match is case-insensitive), while a
+        // .txt and an audio-only .mp3 are neither image nor video.
+        assert_eq!(names(&got.videos), vec!["clip.MP4", "movie.mkv"]);
+        // Videos are rooted at the RAW opened dir like the other two lists, so a
+        // tile's thumbnail path round-trips through the asset-protocol scope grant.
+        assert!(got
+            .videos
+            .iter()
+            .all(|p| Path::new(p).parent() == Some(media.as_path())));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn folder_cover_image_falls_back_to_a_video_when_there_is_no_image() {
+        // gallery-003: a folder holding only clips used to show a bare glyph. It now
+        // covers with a video frame — but an image still wins when both are present,
+        // because rendering an image thumbnail costs no ffmpeg seek.
+        let base = temp_root("gallery-cover-video");
+        let videos_only = base.join("clips");
+        let mixed = base.join("mixed");
+        fs::create_dir_all(&videos_only).unwrap();
+        fs::create_dir_all(&mixed).unwrap();
+        for name in ["zebra.mp4", "apple.mkv", "notes.txt"] {
+            fs::write(videos_only.join(name), b"x").unwrap();
+        }
+        // The video sorts FIRST by name here, so picking it would be the natural
+        // mistake — the image must still win.
+        for name in ["aaa.mp4", "zzz.png"] {
+            fs::write(mixed.join(name), b"x").unwrap();
+        }
+
+        let allow = AllowList::default();
+        let mut roots = allow.0.lock().unwrap();
+        roots.insert(fs::canonicalize(&videos_only).unwrap());
+        roots.insert(fs::canonicalize(&mixed).unwrap());
+        drop(roots);
+
+        let leaf = |c: Option<String>| -> String {
+            Path::new(c.as_deref().unwrap())
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(
+            leaf(folder_cover_image_impl(&allow, videos_only.to_str().unwrap()).unwrap()),
+            "apple.mkv"
+        );
+        assert_eq!(
+            leaf(folder_cover_image_impl(&allow, mixed.to_str().unwrap()).unwrap()),
+            "zzz.png"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn duration_cache_path_is_keyed_like_a_thumbnail_but_never_collides_with_one() {
+        let dir = Path::new("/cache");
+        let a = Path::new("/videos/a.mp4");
+        // Same source, size and mtime -> same file, so a revisited folder re-probes
+        // nothing.
+        assert_eq!(
+            duration_cache_path(dir, a, 1000, 42),
+            duration_cache_path(dir, a, 1000, 42)
+        );
+        // Editing the file invalidates the cached duration rather than serving the
+        // old one against new bytes.
+        assert_ne!(
+            duration_cache_path(dir, a, 1000, 42),
+            duration_cache_path(dir, a, 1000, 43)
+        );
+        assert_ne!(
+            duration_cache_path(dir, a, 1000, 42),
+            duration_cache_path(dir, a, 2000, 42)
+        );
+        assert_ne!(
+            duration_cache_path(dir, a, 1000, 42),
+            duration_cache_path(dir, Path::new("/videos/b.mp4"), 1000, 42)
+        );
+        // It must NOT land on the thumbnail JPEG for the same source, or one would
+        // overwrite the other.
+        let name = duration_cache_path(dir, a, 1000, 42);
+        let name = name.file_name().unwrap().to_string_lossy();
+        assert!(name.ends_with(".dur"), "got {name}");
+        assert_ne!(name, thumb_cache_name(a, 1000, 42, THUMB_MAX_PX));
+        // Shares the prefix the pruner recognises, so these expire with the rest of
+        // the cache instead of accumulating forever.
+        assert!(name.starts_with("pb-th-"), "got {name}");
+        assert!(is_prunable_cache_file(&name));
+    }
+
+    #[test]
+    fn parse_ffmpeg_duration_reads_the_input_header() {
+        // What `ffmpeg -i <file>` prints to stderr before bailing out for want of an
+        // output file. This is the whole contract of the duration probe.
+        let stderr = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'clip.mp4':\n  \
+             Metadata:\n    encoder         : Lavf58\n  \
+             Duration: 00:01:34.56, start: 0.000000, bitrate: 1103 kb/s\n";
+        assert_eq!(parse_ffmpeg_duration(stderr), Some(94.56));
+        // Past an hour.
+        assert_eq!(
+            parse_ffmpeg_duration("  Duration: 01:02:03.00, start: 0.000000\n"),
+            Some(3723.0)
+        );
+    }
+
+    #[test]
+    fn parse_ffmpeg_duration_returns_none_when_there_is_no_honest_duration() {
+        // A zero-duration fragmented recording (play-020's shape) reports N/A. The
+        // tile must then show NO badge rather than a fabricated 0:00.
+        assert_eq!(parse_ffmpeg_duration("  Duration: N/A, bitrate: N/A\n"), None);
+        assert_eq!(parse_ffmpeg_duration("clip.mp4: No such file or directory\n"), None);
+        assert_eq!(parse_ffmpeg_duration(""), None);
+        // Malformed fields are not silently read as zero.
+        assert_eq!(parse_ffmpeg_duration("Duration: ab:cd:ef.gh,\n"), None);
     }
 
     #[test]

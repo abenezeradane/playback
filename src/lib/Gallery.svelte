@@ -1,29 +1,34 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
   import { goBack, openGalleryItem, galleryTile } from "./controller";
+  import { galleryMeta } from "../player-core";
+  import type { GalleryItem } from "./state.svelte";
 
-  // Folders are always the leading block of the list (orderGalleryEntries), so a
-  // count is all the header needs to split "N folders" from "N photos".
+  // The header counts each kind rather than assuming block boundaries: gallery-003
+  // interleaves photos and videos by name, so only folders are still a contiguous
+  // leading block. `galleryMeta` (player-core, unit-tested) turns these into the
+  // "2 folders · 12 photos · 3 videos" line.
   const folderCount = $derived(ui.galleryItems.filter((i) => i.kind === "folder").length);
-</script>
+  const videoCount = $derived(ui.galleryItems.filter((i) => i.kind === "video").length);
+  const photoCount = $derived(ui.galleryItems.length - folderCount - videoCount);
 
-<script module lang="ts">
-  /** "2 folders · 12 photos" — omitting whichever half is zero, so a plain photo
-   *  folder still reads exactly as it did before gallery-002. */
-  function galleryMeta(folders: number, photos: number): string {
-    const parts: string[] = [];
-    if (folders > 0) parts.push(folders === 1 ? "1 folder" : `${folders} folders`);
-    if (photos > 0 || folders === 0) parts.push(photos === 1 ? "1 photo" : `${photos} photos`);
-    return parts.join(" · ");
+  /** A tile's accessible name. Folders and videos say so, because the picture alone
+   *  cannot: a folder cover and a video poster are both just stills. */
+  function tileLabel(kind: GalleryItem["kind"], name: string): string {
+    if (kind === "folder") return `Folder: ${name}`;
+    if (kind === "video") return `Video: ${name}`;
+    return name;
   }
 </script>
 
-<!-- ============== GALLERY GRID (gallery-001, gallery-002) ============== -->
+<!-- ========= GALLERY GRID (gallery-001, gallery-002, gallery-003) ========= -->
 <!-- A full-screen browser for a folder's contents — reached from the image
      viewer's grid button, from Home's "Open folder" action, or by clicking a
      sub-folder tile inside another gallery. An image tile opens that photo
      full-screen, where sibling Prev/Next (ImageView.svelte) picks up from there;
-     a folder tile re-scopes this grid to that folder. -->
+     a folder tile re-scopes this grid to that folder; and a video tile opens in
+     the player, where the play-013 folder queue picks up from there. Each viewer
+     walks its own kind — Prev/Next never crosses from a photo into a clip. -->
 <section id="gallery-view" class="gallery" hidden={ui.view !== "gallery"}>
   <header class="overlay-top gallery__head" data-tauri-drag-region>
     <button id="gallery-back" class="glass-btn" type="button" title="Back" onclick={goBack}>
@@ -44,7 +49,7 @@
             <span id="gallery-crumbs" class="gallery__crumbs">{ui.galleryCrumbs.join(" / ")}</span>
             <span aria-hidden="true"> · </span>
           {/if}
-          {galleryMeta(folderCount, ui.galleryItems.length - folderCount)}
+          {galleryMeta(folderCount, photoCount, videoCount)}
         {/if}
       </span>
     </div>
@@ -74,8 +79,9 @@
             type="button"
             class="gallery-tile"
             class:gallery-tile--folder={item.kind === "folder"}
-            title={item.kind === "folder" ? `Folder: ${item.name}` : item.name}
-            aria-label={item.kind === "folder" ? `Folder: ${item.name}` : item.name}
+            class:gallery-tile--video={item.kind === "video"}
+            title={tileLabel(item.kind, item.name)}
+            aria-label={tileLabel(item.kind, item.name)}
             tabindex={i === (ui.galleryIndex < 0 ? 0 : ui.galleryIndex) ? 0 : -1}
             use:galleryTile={i}
             onclick={() => openGalleryItem(item)}
@@ -97,13 +103,26 @@
               <span class="gallery-tile__placeholder" aria-hidden="true"></span>
             {/if}
             <!-- The badge marks a folder even when a cover picture fills the tile,
-                 so a folder is never mistaken for one of the photos inside it. -->
+                 so a folder is never mistaken for one of the photos inside it.
+                 gallery-003: a video gets the same treatment with a play mark — its
+                 poster frame is a still, and without this a tile of a paused scene
+                 is indistinguishable from a photograph. -->
             {#if item.kind === "folder"}
               <span class="gallery-tile__badge" aria-hidden="true">
                 <svg class="ic" viewBox="0 0 24 24">
                   <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
                 </svg>
               </span>
+            {:else if item.kind === "video"}
+              <span class="gallery-tile__badge gallery-tile__badge--video" aria-hidden="true">
+                <svg class="ic" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5Z" /></svg>
+              </span>
+              <!-- Empty until the probe answers, and permanently empty for a file
+                   whose container reports no duration — the badge is omitted rather
+                   than showing an invented 0:00. -->
+              {#if item.durationLabel}
+                <span class="gallery-tile__duration">{item.durationLabel}</span>
+              {/if}
             {/if}
             <span class="gallery-tile__name">{item.name}</span>
           </button>

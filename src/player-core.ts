@@ -997,11 +997,14 @@ export function sortPathsNatural(paths: string[]): string[] {
 }
 
 /** One node in the Gallery grid (gallery-002): a sub-folder to descend into, or an
- *  image to open. `kind` is what a tile's click, icon, and thumbnail all branch on. */
+ *  image to open. `kind` is what a tile's click, icon, and thumbnail all branch on.
+ *
+ *  gallery-003 adds `video` — a tile that opens in the player rather than the photo
+ *  viewer, and that carries a play badge and a duration. */
 export interface GalleryNode {
   path: string;
   name: string;
-  kind: "folder" | "image";
+  kind: "folder" | "image" | "video";
 }
 
 /** Trailing path segment of `path`, for either separator. */
@@ -1012,16 +1015,47 @@ function pathLeaf(path: string): string {
 
 /**
  * Order a gallery folder's contents for display (gallery-002): sub-folders first
- * as a block, then images, each block independently natural-sorted. Folders-first
- * is the convention every file browser uses — it keeps the way *deeper* from being
- * scattered through a long run of pictures.
+ * as a block, then the media, each block independently natural-sorted.
+ * Folders-first is the convention every file browser uses — it keeps the way
+ * *deeper* from being scattered through a long run of pictures.
  *
- * Pure; neither input array is mutated.
+ * gallery-003: images and videos share ONE media block rather than getting a block
+ * each. A camera roll interleaves the two by name (IMG_001.jpg, IMG_002.mp4), and
+ * sorting by kind first would tear that sequence apart.
+ *
+ * Pure; no input array is mutated. `videos` is optional so the gallery-002 call
+ * shape still means "no videos".
  */
-export function orderGalleryEntries(folders: string[], images: string[]): GalleryNode[] {
+export function orderGalleryEntries(
+  folders: string[],
+  images: string[],
+  videos: string[] = [],
+): GalleryNode[] {
   const nodes = (paths: string[], kind: GalleryNode["kind"]): GalleryNode[] =>
-    sortPathsNatural(paths).map((path) => ({ path, name: pathLeaf(path), kind }));
-  return [...nodes(folders, "folder"), ...nodes(images, "image")];
+    paths.map((path) => ({ path, name: pathLeaf(path), kind }));
+  const sorted = (list: GalleryNode[]): GalleryNode[] =>
+    [...list].sort((a, b) => compareNatural(a.path, b.path));
+  return [
+    ...sorted(nodes(folders, "folder")),
+    ...sorted([...nodes(images, "image"), ...nodes(videos, "video")]),
+  ];
+}
+
+/**
+ * The Gallery header's one-line summary of what a folder holds — "2 folders ·
+ * 12 photos · 3 videos" — omitting whichever kinds are absent, so a plain photo
+ * folder still reads exactly as it did before gallery-002/003 added the others.
+ *
+ * An entirely empty folder falls back to "0 photos" rather than an empty string,
+ * so the header never renders as a bare separator. Pure.
+ */
+export function galleryMeta(folders: number, photos: number, videos: number): string {
+  const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const parts: string[] = [];
+  if (folders > 0) parts.push(plural(folders, "folder"));
+  if (photos > 0) parts.push(plural(photos, "photo"));
+  if (videos > 0) parts.push(plural(videos, "video"));
+  return parts.length > 0 ? parts.join(" · ") : "0 photos";
 }
 
 /** Index of `path` in `queue` (exact match), or -1 when it is not present. */

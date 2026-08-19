@@ -65,6 +65,7 @@ import {
   compareNatural,
   sortPathsNatural,
   orderGalleryEntries,
+  galleryMeta,
   currentIndexOf,
   nextIndex,
   prevIndex,
@@ -953,6 +954,34 @@ describe("folder queue / playlist (play-013)", () => {
         { path: "C:/P/pic10.jpg", name: "pic10.jpg", kind: "image" },
       ]);
     });
+    it("interleaves videos with photos in one media block (gallery-003)", () => {
+      const nodes = orderGalleryEntries(
+        ["C:/P/Album"],
+        ["C:/P/IMG_001.jpg", "C:/P/IMG_003.png"],
+        ["C:/P/IMG_002.mp4", "C:/P/IMG_010.mov"],
+      );
+      // Folders still lead. Photos and videos then share ONE naturally-sorted
+      // block rather than getting a block each: a shoot that produced
+      // IMG_001.jpg and IMG_002.mp4 must show them side by side, which splitting
+      // by kind would break.
+      expect(nodes).toEqual([
+        { path: "C:/P/Album", name: "Album", kind: "folder" },
+        { path: "C:/P/IMG_001.jpg", name: "IMG_001.jpg", kind: "image" },
+        { path: "C:/P/IMG_002.mp4", name: "IMG_002.mp4", kind: "video" },
+        { path: "C:/P/IMG_003.png", name: "IMG_003.png", kind: "image" },
+        { path: "C:/P/IMG_010.mov", name: "IMG_010.mov", kind: "video" },
+      ]);
+    });
+    it("handles a folder of videos only, and omitted videos (gallery-003)", () => {
+      expect(orderGalleryEntries([], [], ["C:/P/b.mp4", "C:/P/a.mkv"])).toEqual([
+        { path: "C:/P/a.mkv", name: "a.mkv", kind: "video" },
+        { path: "C:/P/b.mp4", name: "b.mp4", kind: "video" },
+      ]);
+      // Omitting the argument entirely is the gallery-002 call shape, unchanged.
+      expect(orderGalleryEntries([], ["C:/P/a.png"])).toEqual([
+        { path: "C:/P/a.png", name: "a.png", kind: "image" },
+      ]);
+    });
     it("handles either gallery block being empty, and backslash paths", () => {
       // A folder holding only sub-folders is a legitimate gallery, not an error.
       expect(orderGalleryEntries(["C:\\P\\Only"], [])).toEqual([
@@ -967,9 +996,23 @@ describe("folder queue / playlist (play-013)", () => {
     it("does not mutate its inputs", () => {
       const folders = ["C:/P/b", "C:/P/a"];
       const images = ["C:/P/b.png", "C:/P/a.png"];
-      orderGalleryEntries(folders, images);
+      const videos = ["C:/P/b.mp4", "C:/P/a.mp4"];
+      orderGalleryEntries(folders, images, videos);
       expect(folders).toEqual(["C:/P/b", "C:/P/a"]);
       expect(images).toEqual(["C:/P/b.png", "C:/P/a.png"]);
+      expect(videos).toEqual(["C:/P/b.mp4", "C:/P/a.mp4"]);
+    });
+    it("summarises a gallery's contents, omitting empty kinds (gallery-003)", () => {
+      expect(galleryMeta(2, 12, 3)).toBe("2 folders · 12 photos · 3 videos");
+      // Singulars, and each kind dropping out when it is zero.
+      expect(galleryMeta(1, 0, 1)).toBe("1 folder · 1 video");
+      expect(galleryMeta(0, 0, 4)).toBe("4 videos");
+      // gallery-001/002 shapes read exactly as they did before videos existed —
+      // the two gallery smokes assert on this exact string.
+      expect(galleryMeta(0, 3, 0)).toBe("3 photos");
+      expect(galleryMeta(2, 5, 0)).toBe("2 folders · 5 photos");
+      // An empty folder still says something rather than rendering blank.
+      expect(galleryMeta(0, 0, 0)).toBe("0 photos");
     });
     it("sorts full sibling paths by their (shared-prefix) tail", () => {
       const sorted = sortPathsNatural([

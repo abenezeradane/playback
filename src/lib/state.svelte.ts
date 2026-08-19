@@ -47,12 +47,19 @@ export interface QueueItem {
  *
  *  gallery-002: a tile is now either an `image` to open or a `folder` to descend
  *  into. A folder's `thumbSrc` is a cover picture taken from the first image inside
- *  it, and stays empty when it has none — the tile then shows a folder glyph. */
+ *  it, and stays empty when it has none — the tile then shows a folder glyph.
+ *
+ *  gallery-003: a `video` tile opens in the player rather than the photo viewer.
+ *  Its `thumbSrc` is a poster frame (the same `media_thumbnail` pipeline, which
+ *  already seeks a few seconds in for video), and `durationLabel` is its running
+ *  time — empty until probed, and STAYING empty for a file whose container reports
+ *  no honest duration, so the badge is never a fabricated 0:00. */
 export interface GalleryItem {
   path: string;
   name: string;
   thumbSrc: string;
-  kind: "folder" | "image";
+  kind: "folder" | "image" | "video";
+  durationLabel: string;
 }
 
 /** The active surface — mirrors the former `#app[data-state]` switch. */

@@ -2576,6 +2576,57 @@ body {
   stroke-width: 1.8;
 }
 
+/* gallery-003: a video's poster frame is just a still, so the tile carries a play
+   mark. Centred rather than tucked in the corner like the folder badge — this is
+   the universally-read "playable" sign, and both corners are already spoken for
+   (the duration at the top, the filename gradient at the bottom). */
+.gallery-tile__badge--video {
+  top: 50%;
+  left: 50%;
+  width: 38px;
+  height: 38px;
+  transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.5);
+  transition:
+    background 120ms ease,
+    transform 120ms ease;
+}
+
+.gallery-tile__badge--video .ic {
+  width: 20px;
+  height: 20px;
+  /* Solid, not stroked: at 20px a 1.8px outline triangle reads as a smudge. The
+     nudge right is optical centring — a triangle's visual mass sits left of its
+     bounding box's centre. */
+  fill: currentColor;
+  stroke: none;
+  margin-left: 2px;
+}
+
+.gallery-tile:hover .gallery-tile__badge--video,
+.gallery-tile:focus-visible .gallery-tile__badge--video {
+  background: rgba(0, 0, 0, 0.72);
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
+/* Always visible, unlike the filename that fades in on hover: the running time is
+   the thing you actually scan a grid of clips for. Top-right keeps it clear of the
+   name's gradient, which owns the bottom edge. */
+.gallery-tile__duration {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.68);
+  color: var(--on-dark);
+  font-size: 10px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
 .gallery-tile--folder .gallery-tile__name {
   opacity: 1;
 }
@@ -2699,8 +2750,15 @@ body {
      who asked the OS for less motion gets instant state changes, not slower ones. */
   .recent-card,
   .ts-list__item,
-  .gallery-tile {
+  .gallery-tile,
+  .gallery-tile__badge--video {
     transition: none;
+  }
+  /* The play badge still darkens on hover — only the scale is dropped, since that
+     is the part that moves. */
+  .gallery-tile:hover .gallery-tile__badge--video,
+  .gallery-tile:focus-visible .gallery-tile__badge--video {
+    transform: translate(-50%, -50%);
   }
 }
 
