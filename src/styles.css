@@ -103,6 +103,42 @@ body {
   display: none !important;
 }
 
+/* ===================== VIEW MOTION (ux-002) =====================
+   The five top-level views are overlapping absolute siblings toggled by
+   `hidden` -> display:none, so they can never both be on screen: a true
+   cross-fade is not available without keeping a dead view in the layout. What
+   IS available, and reads as continuity, is an ENTER animation on whichever
+   view just became visible — Chromium restarts CSS animations when an element
+   goes display:none -> shown, so this replays on every switch with no JS.
+
+   Deliberately opacity/transform only, so each is a compositor-only animation
+   that cannot trigger layout or paint of the content beneath it (the whole
+   point of perf-004/005 was removing main-thread stalls — motion must not add
+   them back).
+
+   The player's `.stage` is NOT animated: under the native engine the video is
+   mpv's own child HWND painting UNDER a transparent WebView, so CSS cannot
+   fade it. Animating the stage would fade the chrome while the video stayed
+   solid — worse than no transition. The player's chrome has its own existing
+   transitions instead. */
+@keyframes view-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.home,
+.gallery,
+.imgview,
+.liveoff {
+  animation: view-in 180ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
 html,
 body {
   margin: 0;
@@ -2499,8 +2535,19 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .gallery-tile__img,
-  .gallery-tile__placeholder {
+  .gallery-tile__placeholder,
+  .home,
+  .gallery,
+  .imgview,
+  .liveoff {
     animation: none;
+  }
+  /* ux-002: motion is opt-out everywhere, not just for the view swap — a user
+     who asked the OS for less motion gets instant state changes, not slower ones. */
+  .recent-card,
+  .ts-list__item,
+  .gallery-tile {
+    transition: none;
   }
 }
 
