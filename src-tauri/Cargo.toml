@@ -22,6 +22,15 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# gallery-004: archives browsed as directories. `zip` is pure Rust. Default
+# features are OFF deliberately — they pull in bzip2/zstd/lzma codecs that comic
+# and photo archives never use, and this profile is opt-level = "s". An archive
+# using an excluded codec fails with an honest error rather than silently.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# RAR/CBR. Builds the UnRAR C source with `cc`. Its licence permits use for
+# DECOMPRESSION and forbids reusing the source to build a RAR compressor; this
+# crate only ever decompresses.
+unrar = "0.5"
 # native-001: the embedded-libmpv playback engine. libmpv-2.dll is loaded at
 # RUNTIME (never linked) so a missing DLL degrades to the WebView engine instead
 # of failing process start.
