@@ -258,6 +258,130 @@ pub(crate) fn archive_mirror_dir(canonical_archive: &Path) -> Result<PathBuf, Ar
     Ok(dir)
 }
 
+/// Largest single entry this will ever materialize. A page is kilobytes; a video
+/// inside an archive is the case that makes this non-trivial.
+const MAX_ENTRY_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
+/// Largest total this will materialize out of ONE archive, so a zip bomb (a
+/// megabyte that expands to terabytes) cannot fill the disk.
+pub(crate) const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
+/// Streaming copy buffer.
+const COPY_CHUNK: usize = 64 * 1024;
+
+/// Copy `reader` into `writer`, aborting once more than `cap` bytes have been
+/// written. The check is on bytes ACTUALLY WRITTEN rather than on a declared
+/// uncompressed size, because an archive header is attacker-controlled and lies.
+fn copy_capped(
+    reader: &mut impl std::io::Read,
+    writer: &mut impl std::io::Write,
+    cap: u64,
+) -> Result<u64, ArchiveError> {
+    let mut buf = vec![0u8; COPY_CHUNK];
+    let mut total: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf).map_err(|_| ArchiveError::Unreadable)?;
+        if n == 0 {
+            return Ok(total);
+        }
+        total += n as u64;
+        if total > cap {
+            return Err(ArchiveError::TooLarge);
+        }
+        writer
+            .write_all(&buf[..n])
+            .map_err(|_| ArchiveError::Unreadable)?;
+    }
+}
+
+/// Map a `zip` crate error to our vocabulary. An encrypted entry is the case
+/// worth distinguishing: the UI states it rather than showing "unreadable".
+fn zip_error(e: zip::result::ZipError) -> ArchiveError {
+    match e {
+        zip::result::ZipError::FileNotFound => ArchiveError::NotFound,
+        zip::result::ZipError::UnsupportedArchive(msg)
+            if msg.to_ascii_lowercase().contains("password")
+                || msg.to_ascii_lowercase().contains("encrypt") =>
+        {
+            ArchiveError::Encrypted
+        }
+        zip::result::ZipError::UnsupportedArchive(_) => ArchiveError::Unsupported,
+        _ => ArchiveError::Unreadable,
+    }
+}
+
+/// Every FILE entry in a zip, as sanitized inner paths.
+///
+/// This reads only the central directory — no entry is decompressed — so listing
+/// a 900-page comic is effectively instant. Directory entries are dropped
+/// (`archive_level` derives folders from file names); entries whose names fail
+/// `sanitize_entry_path` are dropped, so a hostile name is never even shown.
+pub(crate) fn zip_index(archive: &Path) -> Result<Vec<String>, ArchiveError> {
+    let file = std::fs::File::open(archive).map_err(|_| ArchiveError::NotFound)?;
+    let mut zip = zip::ZipArchive::new(file).map_err(zip_error)?;
+    let mut names = Vec::with_capacity(zip.len());
+    let mut encrypted_seen = false;
+    for i in 0..zip.len() {
+        let entry = match zip.by_index_raw(i) {
+            Ok(e) => e,
+            Err(e) => {
+                if zip_error(e) == ArchiveError::Encrypted {
+                    encrypted_seen = true;
+                }
+                continue;
+            }
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        if entry.encrypted() {
+            encrypted_seen = true;
+            continue;
+        }
+        if let Some(clean) = sanitize_entry_path(entry.name()) {
+            names.push(clean);
+        }
+    }
+    // An archive whose every entry is encrypted is reported as such rather than
+    // shown as an empty folder — the user can act on the first, not the second.
+    if names.is_empty() && encrypted_seen {
+        return Err(ArchiveError::Encrypted);
+    }
+    Ok(names)
+}
+
+/// Materialize ONE zip entry to `dst`, creating parent directories.
+///
+/// Random access through the central directory, which is what makes per-entry
+/// laziness affordable for zip (rar cannot do this — see `rar_extract_all`).
+/// A partially written file is removed on failure so a later run cannot cache-hit
+/// a truncated page.
+pub(crate) fn zip_extract_entry(
+    archive: &Path,
+    inner: &str,
+    dst: &Path,
+) -> Result<(), ArchiveError> {
+    // Re-sanitize at the write boundary. The listing already dropped hostile
+    // names, but this function is reachable from IPC with an arbitrary string.
+    let clean = sanitize_entry_path(inner).ok_or(ArchiveError::NotFound)?;
+    let file = std::fs::File::open(archive).map_err(|_| ArchiveError::NotFound)?;
+    let mut zip = zip::ZipArchive::new(file).map_err(zip_error)?;
+    let mut entry = zip.by_name(&clean).map_err(zip_error)?;
+    if entry.is_dir() {
+        return Err(ArchiveError::NotFound);
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| ArchiveError::Unreadable)?;
+    }
+    let mut out = std::fs::File::create(dst).map_err(|_| ArchiveError::Unreadable)?;
+    match copy_capped(&mut entry, &mut out, MAX_ENTRY_BYTES) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            drop(out);
+            let _ = std::fs::remove_file(dst);
+            Err(e)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +536,83 @@ mod tests {
             assert!(!msg.is_empty());
             assert!(!msg.contains(':')); // no "context: detail" leakage
         }
+    }
+
+    use std::io::Write as _;
+
+    /// Build a throwaway zip on disk and return its path. Uses the `zip` crate's
+    /// writer so the fixture is a REAL archive, not a hand-rolled approximation.
+    fn write_test_zip(tag: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("pb-ar-test-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fixture.cbz");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zw = zip::ZipWriter::new(file);
+        let opts: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (name, body) in entries {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(body).unwrap();
+        }
+        zw.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn zip_index_lists_sanitized_file_entries_only() {
+        let zip_path = write_test_zip(
+            "index",
+            &[
+                ("a.jpg", b"AAA"),
+                ("ch1/b.png", b"BBB"),
+                ("ch1/", b""), // explicit directory entry
+                ("notes.txt", b"hello"),
+            ],
+        );
+        let mut names = zip_index(&zip_path).unwrap();
+        names.sort();
+        // Directory entries are dropped (folders are DERIVED by archive_level);
+        // non-media names are kept here — filtering by kind is archive_level's job.
+        assert_eq!(
+            names,
+            vec!["a.jpg".to_string(), "ch1/b.png".to_string(), "notes.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn zip_extract_entry_writes_the_real_bytes_and_refuses_a_hostile_name() {
+        let zip_path = write_test_zip("extract", &[("ch1/b.png", b"PNGBYTES")]);
+        let out_dir = zip_path.parent().unwrap().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let dst = out_dir.join("b.png");
+        zip_extract_entry(&zip_path, "ch1/b.png", &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"PNGBYTES");
+
+        // An entry that is not in the archive is NotFound, not a panic.
+        assert_eq!(
+            zip_extract_entry(&zip_path, "ch1/missing.png", &out_dir.join("x.png")),
+            Err(ArchiveError::NotFound)
+        );
+        // A traversal name is refused before any file is opened.
+        assert_eq!(
+            zip_extract_entry(&zip_path, "../evil.exe", &out_dir.join("evil.exe")),
+            Err(ArchiveError::NotFound)
+        );
+    }
+
+    #[test]
+    fn copy_capped_aborts_once_the_ceiling_is_passed() {
+        // The ceiling is enforced against bytes ACTUALLY WRITTEN, because a
+        // malicious header's declared size cannot be trusted.
+        let src = vec![7u8; 5000];
+        let mut sink: Vec<u8> = Vec::new();
+        assert_eq!(copy_capped(&mut src.as_slice(), &mut sink, 10_000), Ok(5000));
+        let mut small: Vec<u8> = Vec::new();
+        assert_eq!(
+            copy_capped(&mut src.as_slice(), &mut small, 1_000),
+            Err(ArchiveError::TooLarge)
+        );
     }
 }
