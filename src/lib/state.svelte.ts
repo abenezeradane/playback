@@ -213,6 +213,12 @@ export const ui = $state({
 
   // --- Home / recents (ui-001) ---
   recents: [] as RecentFile[],
+  // ui-006: real poster frames for the recent cards, keyed by file path and
+  // resolved in the background from the native thumbnail cache. Kept OUT of
+  // `recents` itself because that list is persisted to localStorage and these
+  // are disposable cache paths. A path with no entry falls back to the
+  // deterministic colour gradient the cards used before.
+  recentThumbs: {} as Record<string, string>,
 });
 
 /** Real DOM handles the imperative plumbing needs; set via bind:this on mount. */

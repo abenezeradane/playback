@@ -2436,6 +2436,43 @@ export function clearRecents(): void {
 /** Refresh the reactive recents list from storage. */
 function renderRecents(): void {
   ui.recents = loadRecents();
+  void fillRecentThumbs();
+}
+
+/**
+ * Resolve a real poster frame for each recent card (ui-006).
+ *
+ * The cards used to show a colour gradient derived from the filename — the first
+ * thing the app shows on launch, and the one surface still using a placeholder
+ * instead of the picture. These reuse the perf-005 native thumbnail cache, so a
+ * file already thumbnailed by the gallery costs nothing here, and a video gets a
+ * poster frame a few seconds in (see media_thumbnail).
+ *
+ * Bounded at RECENTS_MAX (8) entries, sequential, and cheap after the first pass;
+ * a failure simply leaves the gradient in place.
+ */
+async function fillRecentThumbs(): Promise<void> {
+  const wanted = ui.recents.filter((r) => !ui.recentThumbs[r.path]);
+  if (wanted.length === 0) return;
+  await tauriInvoke("prepare_thumb_cache", {}).catch(() => {
+    /* no cache dir — the cards keep their gradients */
+  });
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  for (const r of wanted) {
+    // sec-002: on a cold launch nothing is authorized yet, so the thumbnail
+    // command's scope gate would reject every recent. Authorize each recent's
+    // directory first — these are paths the user demonstrably opened before, and
+    // this grants nothing the frontend could not already do (every open calls
+    // allow_media_dir with the path it is about to read). The WebView still only
+    // ever loads the derived JPEG out of the app's own cache, never the original.
+    await authorizeMediaDir(r.path);
+    // The recents list can change under a slow pass (a new open re-renders it);
+    // only keep a result the current list still wants.
+    const thumb = await tauriInvoke<string>("media_thumbnail", { path: r.path }).catch(() => null);
+    if (!thumb) continue;
+    if (!ui.recents.some((x) => x.path === r.path)) continue;
+    ui.recentThumbs[r.path] = convertFileSrc(thumb);
+  }
 }
 
 async function loadFromPath(path: string, fromQueue = false): Promise<void> {
@@ -2963,7 +3000,7 @@ async function renderThumb(index: number): Promise<void> {
   if (!item || item.thumbSrc) return;
   thumbActive++;
   try {
-    const thumb = await tauriInvoke<string>("image_thumbnail", { path: item.path }).catch(
+    const thumb = await tauriInvoke<string>("media_thumbnail", { path: item.path }).catch(
       () => null,
     );
     if (token !== galleryToken) return;

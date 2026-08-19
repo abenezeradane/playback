@@ -578,6 +578,17 @@ body {
   overflow: hidden;
 }
 
+/* ui-006: the real poster frame, laid over the gradient fallback. Fades in so a
+   card does not pop as its thumbnail resolves. */
+.recent-card__img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  animation: gallery-tile-in 220ms ease both;
+}
+
 .recent-card__play {
   width: 26px;
   height: 26px;
@@ -2622,6 +2633,7 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .gallery-tile__img,
+  .recent-card__img,
   .gallery-tile__placeholder,
   .home,
   .gallery,

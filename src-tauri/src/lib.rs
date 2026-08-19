@@ -1084,17 +1084,43 @@ fn prune_thumb_cache(dir: &Path) {
     }
 }
 
+/// Where in a VIDEO to grab the poster frame. A few seconds in avoids the black or
+/// title frame most recordings open on, while staying inside even short clips
+/// (a source shorter than this falls back to a seek of 0 — see `media_thumbnail`).
+const THUMB_VIDEO_SEEK_S: f64 = 3.0;
+
 /// ffmpeg args rendering ONE downscaled JPEG thumbnail to `dst`. Pure + unit-tested.
 ///
 /// `-frames:v 1` takes only the first frame, so an animated GIF/WebP yields a still
 /// poster rather than a re-encoded animation. The scale expression fits the image
 /// INSIDE the box and never upscales a source already smaller than it.
-fn ffmpeg_thumb_args(src: &Path, dst: &Path, max_px: u32) -> Vec<String> {
-    vec![
+///
+/// `seek` (videos only) is placed BEFORE `-i` so it is a demuxer index jump rather
+/// than a decode-and-discard scan, and `use_mfra` mirrors the native-002 still
+/// extractor: libavformat only reads a fragmented MP4's tail index with it, without
+/// which seeking a zero-duration recording walks every fragment.
+fn ffmpeg_thumb_args(
+    src: &Path,
+    dst: &Path,
+    max_px: u32,
+    seek: Option<f64>,
+    use_mfra: bool,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
         "error".into(),
         "-y".into(),
+    ];
+    if use_mfra {
+        args.push("-use_mfra_for".into());
+        args.push("pts".into());
+    }
+    if let Some(s) = seek {
+        args.push("-ss".into());
+        args.push(format!("{:.3}", s.max(0.0)));
+    }
+    args.extend([
         "-i".into(),
         src.to_string_lossy().into_owned(),
         "-frames:v".into(),
@@ -1106,14 +1132,21 @@ fn ffmpeg_thumb_args(src: &Path, dst: &Path, max_px: u32) -> Vec<String> {
         "-q:v".into(),
         "4".into(),
         dst.to_string_lossy().into_owned(),
-    ]
+    ]);
+    args
 }
 
-/// Render (or serve from cache) a small thumbnail for one image, returning the
-/// cached file's path. The frontend feeds that path to `convertFileSrc`, so the
-/// grid loads a ~50 KB JPEG per tile instead of the multi-megabyte original.
+/// Render (or serve from cache) a small thumbnail for one image OR video,
+/// returning the cached file's path. The frontend feeds that path to
+/// `convertFileSrc`, so a tile loads a ~50 KB JPEG instead of the original.
+///
+/// Videos get a poster frame a few seconds in; if that fails (a clip shorter than
+/// the seek, or an extension whose real container rejects `-use_mfra_for`, the
+/// same rename artifact `extract_video_still` guards against) it retries with the
+/// option dropped and then from the very start, so a short or odd file still gets
+/// a picture rather than falling back to a gradient.
 #[tauri::command]
-async fn image_thumbnail(
+async fn media_thumbnail(
     app: tauri::AppHandle,
     allow: tauri::State<'_, AllowList>,
     path: String,
@@ -1141,21 +1174,39 @@ async fn image_thumbnail(
         return Ok(out.to_string_lossy().into_owned());
     }
 
-    let sidecar = app
-        .shell()
-        .sidecar("ffmpeg")
-        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
-    let output = sidecar
-        .args(ffmpeg_thumb_args(&src, &out, THUMB_MAX_PX))
-        .output()
-        .await
-        .map_err(|_| "thumbnail failed to start".to_string())?;
+    let is_video = has_queue_video_ext(&src);
+    // Attempts, best first. Images need only one; a video degrades seek -> no-mfra
+    // -> start-of-file rather than giving up.
+    let attempts: Vec<(Option<f64>, bool)> = if is_video {
+        if is_mp4_family(&src) {
+            vec![
+                (Some(THUMB_VIDEO_SEEK_S), true),
+                (Some(THUMB_VIDEO_SEEK_S), false),
+                (Some(0.0), false),
+            ]
+        } else {
+            vec![(Some(THUMB_VIDEO_SEEK_S), false), (Some(0.0), false)]
+        }
+    } else {
+        vec![(None, false)]
+    };
 
-    if !output.status.success() || !fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
+    for (seek, use_mfra) in attempts {
+        let sidecar = app
+            .shell()
+            .sidecar("ffmpeg")
+            .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+        let output = sidecar
+            .args(ffmpeg_thumb_args(&src, &out, THUMB_MAX_PX, seek, use_mfra))
+            .output()
+            .await
+            .map_err(|_| "thumbnail failed to start".to_string())?;
+        if output.status.success() && fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
+            return Ok(out.to_string_lossy().into_owned());
+        }
         let _ = fs::remove_file(&out); // never leave a 0-byte file to be cache-hit
-        return Err("could not render a thumbnail".to_string());
     }
-    Ok(out.to_string_lossy().into_owned())
+    Err("could not render a thumbnail".to_string())
 }
 
 /// Prepare the thumbnail cache for a gallery open: create + authorize the directory
@@ -1371,7 +1422,7 @@ pub fn run() {
             remux_ts,
             list_folder_videos,
             list_folder_images,
-            image_thumbnail,
+            media_thumbnail,
             prepare_thumb_cache,
             get_hwaccel,
             set_hwaccel,
@@ -1577,7 +1628,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_thumb_args_render_one_downscaled_frame_to_a_file() {
-        let args = ffmpeg_thumb_args(Path::new("/photo.jpg"), Path::new("/cache/t.jpg"), 480);
+        let args = ffmpeg_thumb_args(Path::new("/photo.jpg"), Path::new("/cache/t.jpg"), 480, None, false);
         assert!(args.windows(2).any(|w| w == ["-i", "/photo.jpg"]));
         // Exactly one frame: an animated GIF/WebP yields a still poster, never a
         // re-encoded animation.
@@ -1588,6 +1639,46 @@ mod tests {
         // Overwrite, and the destination is the final argument.
         assert!(args.iter().any(|a| a == "-y"));
         assert_eq!(args.last().map(String::as_str), Some("/cache/t.jpg"));
+    }
+
+    #[test]
+    fn ffmpeg_thumb_args_seek_before_input_for_a_video_poster() {
+        // A video poster seeks a few seconds in to skip the black/title frame most
+        // recordings open on, and the seek must precede -i so it is a demuxer index
+        // jump rather than a decode-and-discard scan.
+        let args = ffmpeg_thumb_args(
+            Path::new("/clip.mp4"),
+            Path::new("/cache/t.jpg"),
+            480,
+            Some(THUMB_VIDEO_SEEK_S),
+            true,
+        );
+        let ss = args.iter().position(|a| a == "-ss").expect("-ss present");
+        let input = args.iter().position(|a| a == "-i").expect("-i present");
+        assert!(ss < input, "-ss must precede -i (input seek)");
+        assert_eq!(args[ss + 1], "3.000");
+        // use_mfra_for is also a demuxer option, so it too must precede -i.
+        let mfra = args.iter().position(|a| a == "-use_mfra_for").expect("mfra present");
+        assert!(mfra < input);
+        assert_eq!(args[mfra + 1], "pts");
+
+        // Without the flag it must not appear at all: it is a HARD ffmpeg error on
+        // a demuxer that does not accept it (the extract_video_still lesson).
+        let plain = ffmpeg_thumb_args(
+            Path::new("/clip.mkv"),
+            Path::new("/cache/t.jpg"),
+            480,
+            Some(0.0),
+            false,
+        );
+        assert!(!plain.iter().any(|a| a == "-use_mfra_for"));
+        // A negative seek (defensive) clamps to 0 rather than an ffmpeg error.
+        let neg = ffmpeg_thumb_args(Path::new("/c.mp4"), Path::new("/t.jpg"), 480, Some(-5.0), false);
+        let ss = neg.iter().position(|a| a == "-ss").unwrap();
+        assert_eq!(neg[ss + 1], "0.000");
+        // An IMAGE passes no seek at all.
+        let img = ffmpeg_thumb_args(Path::new("/a.jpg"), Path::new("/t.jpg"), 480, None, false);
+        assert!(!img.iter().any(|a| a == "-ss"));
     }
 
     #[test]

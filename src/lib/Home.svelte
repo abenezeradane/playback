@@ -145,7 +145,13 @@
         <div id="recent-cards" class="recent__cards" hidden={ui.recents.length === 0}>
           {#each ui.recents as r (r.path)}
             <button type="button" class="recent-card" title={r.path} onclick={() => openRecent(r)}>
+              <!-- ui-006: a real poster frame once the native thumbnail cache has
+                   one; the deterministic gradient stays as the fallback (and as
+                   what shows for the moment before it resolves). -->
               <span class="recent-card__thumb" style:background={thumbGradient(r.name)}>
+                {#if ui.recentThumbs[r.path]}
+                  <img class="recent-card__img" src={ui.recentThumbs[r.path]} alt="" />
+                {/if}
                 <span class="recent-card__play">
                   <svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="8 5 19 12 8 19 8 5" /></svg>
                 </span>
