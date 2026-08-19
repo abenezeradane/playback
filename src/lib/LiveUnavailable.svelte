@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
-  import { goHome, openFileDialog } from "./controller";
+  import { goBack, goHome, openFileDialog } from "./controller";
 </script>
 
 <!-- ===================== LIVESTREAM · UNAVAILABLE (frame 04b) ===================== -->
@@ -9,7 +9,7 @@
 <section id="live-unavailable" class="liveoff" hidden={ui.view !== "live-unavailable"}>
   <!-- Top overlay: back + title — mirrors the normal player's #stage header. -->
   <header class="overlay-top" data-tauri-drag-region>
-    <button id="liveoff-back" class="glass-btn" type="button" title="Back to library" onclick={goHome}>
+    <button id="liveoff-back" class="glass-btn" type="button" title="Back" onclick={goBack}>
       <svg class="ic" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
     </button>
     <div class="overlay-top__title">

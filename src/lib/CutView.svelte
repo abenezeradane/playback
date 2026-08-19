@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ui, els } from "./state.svelte";
   import {
-    goHome,
+    goBack,
     setCutMode,
     toggleShortcuts,
     doToggleFullscreen,
@@ -30,7 +30,7 @@
        controller's measurement — see measureControlsOverflow, ui-005) -->
   <!-- App bar -->
   <header class="cut__appbar" data-tauri-drag-region>
-    <button id="cut-back" class="glass-btn" type="button" title="Back to library" onclick={goHome}>
+    <button id="cut-back" class="glass-btn" type="button" title="Back" onclick={goBack}>
       <svg class="ic" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
     </button>
     <div class="cut__appbar-title">

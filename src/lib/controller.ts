@@ -912,8 +912,87 @@ export function togglePanel(): void {
   setPanelOpen(!ui.panelOpen);
 }
 
+// ---------------------------------------------------------------------------
+// Back-stack navigation (ux-001)
+//
+// Every view's Back button used to call goHome(), so Gallery -> tile -> photo ->
+// Back dropped the user at Home instead of the gallery they came from, losing
+// their place. `navStack` records how to get BACK to where a forward navigation
+// started; Back and Esc pop it, and only an empty stack means Home.
+//
+// Entries carry a restore closure rather than a plain view id because returning
+// to the gallery has to put its items AND scroll position back, which re-deriving
+// from the view id alone cannot do.
+// ---------------------------------------------------------------------------
+
+interface NavEntry {
+  /** Label used by tests/traces to assert where Back actually went. */
+  label: string;
+  restore: () => void | Promise<void>;
+}
+
+let navStack: NavEntry[] = [];
+
+/**
+ * A user opening a file from outside the current journey (the Open dialog, a
+ * drop, a Recent tile, a launch argument, the single-instance handler) starts a
+ * NEW journey — the old trail is no longer where "back" should lead. In-app
+ * forward moves (a gallery tile, the G hotkey) push instead, so they keep theirs.
+ */
+function resetNav(): void {
+  navStack = [];
+}
+
+/** Record where the CURRENT view should return to, before navigating forward. */
+function pushNav(entry: NavEntry): void {
+  // Bound the stack: a user ping-ponging gallery<->photo for an hour must not
+  // grow it without limit. The oldest entries are the least likely to be wanted.
+  navStack.push(entry);
+  if (navStack.length > 20) navStack.shift();
+}
+
+/** Snapshot the gallery so Back can restore it exactly, with no re-read of disk. */
+function galleryNavEntry(): NavEntry {
+  const items = ui.galleryItems;
+  const folder = ui.galleryFolder;
+  const scrollTop = document.querySelector(".gallery__body")?.scrollTop ?? 0;
+  return {
+    label: `gallery:${folder}`,
+    restore: () => {
+      ui.galleryItems = items; // already-rendered tiles, thumbnails included
+      ui.galleryFolder = folder;
+      ui.galleryError = "";
+      ui.galleryLoading = false;
+      clearImageView();
+      ui.view = "gallery";
+      document.title = `${folder || "Gallery"} — Playback`;
+      // The list only has a layout box once the view is shown, so the scroll
+      // restore has to wait for that render.
+      void tick().then(() => {
+        const body = document.querySelector(".gallery__body");
+        if (body) body.scrollTop = scrollTop;
+      });
+    },
+  };
+}
+
+/**
+ * Go back one level: to wherever the current view was entered FROM, or Home when
+ * that is the bottom of the stack. This is what every Back button and Esc calls.
+ */
+export function goBack(): void {
+  const entry = navStack.pop();
+  perfMark("nav.back", entry?.label ?? "home"); // ux-001
+  if (!entry) {
+    goHome();
+    return;
+  }
+  void entry.restore();
+}
+
 /** Back button: tear down the current video and return to the home screen. */
 export function goHome(): void {
+  navStack = []; // Home is the root — nothing above it to return to
   const endClose = perfSpan("close.total"); // perf-004: synchronous teardown cost
   syncVideoHole(false); // close the native hole before the view swaps
   video.pause();
@@ -2326,6 +2405,7 @@ function addRecent(path: string, name: string): void {
 
 /** Re-open a recent local file. */
 export function openRecent(r: RecentFile): void {
+  resetNav(); // ux-001: a Recent tile starts a fresh journey
   void loadFromPath(r.path);
 }
 
@@ -2824,6 +2904,11 @@ async function fillGalleryThumbs(token: number): Promise<void> {
 export async function openGalleryFromImage(): Promise<void> {
   if (ui.photoQueue.length === 0) return;
   perfMark("gallery.begin", ui.imgMeta || "siblings"); // perf-005
+  // ux-001: G opened the grid FROM this photo, so Back returns to this photo.
+  const from = currentPath;
+  if (from) {
+    pushNav({ label: `image:${basename(from)}`, restore: () => loadFromPath(from) });
+  }
   const folder = ui.imgMeta;
   const items = ui.photoQueue;
   ui.galleryFolder = folder;
@@ -2886,6 +2971,9 @@ export async function openFolderDialog(): Promise<void> {
 
 /** Click a tile in the Gallery grid: open that photo in the single-image viewer. */
 export function openGalleryItem(item: GalleryItem): void {
+  // ux-001: remember the grid (items + scroll) so Back returns to it in place
+  // rather than dumping the user on the home screen.
+  pushNav(galleryNavEntry());
   void loadFromPath(item.path);
 }
 
@@ -3053,6 +3141,7 @@ export async function openFileDialog(): Promise<void> {
       ],
     });
     if (typeof selected === "string") {
+      resetNav(); // ux-001: the Open dialog starts a fresh journey
       await loadFromPath(selected);
     }
   } catch (err) {
@@ -3233,6 +3322,16 @@ function wireKeyboard(): void {
 
     if (imageViewActive() && !e.ctrlKey && !e.altKey && !e.metaKey) {
       if (handleImageKey(e)) return;
+    }
+
+    // ux-001: Esc backs out one level from the still-image and gallery views,
+    // which previously swallowed it entirely (the only way out was the mouse).
+    // The player's own Esc cascade below is untouched — it has layers (panels,
+    // the Up Next prompt, fullscreen) that must be dismissed first.
+    if ((imageViewActive() || ui.view === "gallery") && e.key === "Escape") {
+      e.preventDefault();
+      goBack();
+      return;
     }
 
     if (ui.cutMode && playerVisible() && !e.ctrlKey && !e.altKey && !e.metaKey) {
@@ -3458,7 +3557,7 @@ async function registerDragAndDrop(): Promise<void> {
           return;
         }
         const mediaPath = paths.find((p) => isMediaPath(p));
-        if (mediaPath) void loadFromPath(mediaPath);
+        if (mediaPath) { resetNav(); void loadFromPath(mediaPath); } // ux-001: a drop starts a fresh journey
       } else {
         ui.dragover = false;
       }

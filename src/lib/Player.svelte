@@ -5,7 +5,7 @@
   import NextPrompt from "./NextPrompt.svelte";
   import CutView from "./CutView.svelte";
   import {
-    goHome,
+    goBack,
     onVideoClick,
     onLoadedMetadata,
     onTimeUpdate,
@@ -97,7 +97,7 @@
 
   <!-- Top overlay: back + title -->
   <div class="overlay-top" data-tauri-drag-region>
-    <button id="btn-back" class="glass-btn" type="button" title="Back to library" onclick={goHome}>
+    <button id="btn-back" class="glass-btn" type="button" title="Back" onclick={goBack}>
       <svg class="ic" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
     </button>
     <div class="overlay-top__title">

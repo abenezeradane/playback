@@ -1,7 +1,7 @@
 <script lang="ts">
   import { ui, els } from "./state.svelte";
   import {
-    goHome,
+    goBack,
     toggleGifPlay,
     stepGifFrame,
     cycleGifRate,
@@ -15,7 +15,7 @@
 <section id="image-view" class="imgview" data-mode={ui.imgMode} hidden={ui.view !== "image"}>
   <!-- Top overlay: back + title — mirrors the normal player's #stage header. -->
   <header class="overlay-top" data-tauri-drag-region>
-    <button id="img-back" class="glass-btn" type="button" title="Back to library" onclick={goHome}>
+    <button id="img-back" class="glass-btn" type="button" title="Back" onclick={goBack}>
       <svg class="ic" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
     </button>
     <div class="overlay-top__title">

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
-  import { goHome, openGalleryItem } from "./controller";
+  import { goBack, openGalleryItem } from "./controller";
 </script>
 
 <!-- ===================== GALLERY GRID (gallery-001) ===================== -->
@@ -10,7 +10,7 @@
      sibling Prev/Next (ImageView.svelte) picks up from there. -->
 <section id="gallery-view" class="gallery" hidden={ui.view !== "gallery"}>
   <header class="overlay-top gallery__head" data-tauri-drag-region>
-    <button id="gallery-back" class="glass-btn" type="button" title="Back to library" onclick={goHome}>
+    <button id="gallery-back" class="glass-btn" type="button" title="Back" onclick={goBack}>
       <svg class="ic" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6" /></svg>
     </button>
     <div class="overlay-top__title">
