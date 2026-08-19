@@ -222,6 +222,8 @@ let imgFrames: GifFrame[] = [];
 let imgDurations: number[] = [];
 let imgTotal = 0;
 let imgClock = 0;
+/** When the natively-animated <img> was first painted (perf-007 handover). */
+let imgNativeShownAt = 0;
 let imgPlaying = false;
 let imgRate = 1;
 let imgFrameIndex = 0;
@@ -1655,8 +1657,24 @@ async function captureFilmstripNative(path: string, token: number): Promise<void
   }
 }
 
-// --- Waveform -------------------------------------------------------------
-/** Read the whole file as bytes (base64 chunks over the Rust command). */
+// --- Whole-file read (animated image decode) ------------------------------
+
+/**
+ * Read a whole file as bytes, for the animated-image decoder (its only caller).
+ *
+ * This costs ~100 ms for a 3.6 MB GIF (base64 inflation + the per-character
+ * `b64ToBytes` loop) and TWO faster transports were measured and rejected:
+ *   * fetching the asset URL — `asset.localhost` is a different origin, so
+ *     `fetch(...).arrayBuffer()` needs CORS headers the asset protocol does not
+ *     send. It fails with a bare "TypeError: Failed to fetch". (An `<img src>` is
+ *     unaffected; images are not subject to that restriction.)
+ *   * a `tauri::ipc::Response` raw-bytes command — measured THREE TIMES SLOWER
+ *     (324 ms vs 102 ms) because the body did not arrive as an ArrayBuffer on this
+ *     setup and fell back to a slow element-wise transfer.
+ *
+ * So the read stays as-is; perf-007 instead removes it from the user-visible path
+ * entirely by showing the natively-animated `<img>` first (see `openImage`).
+ */
 async function readWholeFile(path: string, size: number): Promise<Uint8Array> {
   const parts: Uint8Array[] = [];
   let off = 0;
@@ -2764,9 +2782,18 @@ async function openImage(path: string): Promise<void> {
   }
   if (token !== imgToken) return;
 
-  const decoded = await tryDecodeAnimation(path, token);
+  // perf-007: show the browser-rendered <img> FIRST. Chromium streams and animates
+  // a GIF/WebP/APNG itself, so the picture is up in ~40 ms — the same as a still.
+  // The frame-accurate decode (whole-file read + every frame to an ImageBitmap,
+  // ~276 ms on a 3.6 MB 200-frame GIF) then runs in the background and swaps the
+  // canvas in when it is ready. Before this the viewer waited on that decode with
+  // nothing on screen, which is what made opening a GIF feel slow.
+  await showNativeImage(src, token);
   if (token !== imgToken) return;
-  if (!decoded) showNativeImage(src, token);
+  // Let the paint land before the decode takes the main thread.
+  await new Promise<void>((r) => requestAnimationFrame(() => r()));
+  if (token !== imgToken) return;
+  await tryDecodeAnimation(path, token);
 }
 
 /** Try to frame-decode the image with WebCodecs ImageDecoder. */
@@ -2786,6 +2813,7 @@ async function tryDecodeAnimation(path: string, token: number): Promise<boolean>
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
     if (!status || status.size <= 0 || status.size > IMAGE_MAX_BYTES) return false;
     const data = await readWholeFile(path, status.size);
+    perfMark("image.read", String(status.size)); // whole-file IPC read
     if (token !== imgToken) return false;
     if (data.length === 0) return false;
 
@@ -2812,11 +2840,6 @@ async function tryDecodeAnimation(path: string, token: number): Promise<boolean>
       const bitmap = await createImageBitmap(frame);
       frame.close();
       frames.push({ bitmap, duration: durationS });
-      if (i === 0) {
-        perfMark("image.shown", `decoder ${bitmap.width}x${bitmap.height}`); // perf-005
-        ui.imgCanvasHidden = false;
-        drawBitmap(bitmap);
-      }
       if (token !== imgToken) {
         for (const f of frames) f.bitmap.close();
         decoder.close();
@@ -2824,19 +2847,23 @@ async function tryDecodeAnimation(path: string, token: number): Promise<boolean>
       }
     }
     decoder.close();
+    perfMark("image.decoded", String(frames.length)); // all frames decoded
     if (frames.length === 0) return false;
 
     imgFrames = frames;
     imgDurations = normalizeFrameDurations(frames.map((f) => f.duration));
     imgTotal = animationDuration(imgDurations);
-    imgClock = 0;
-    imgFrameIndex = 0;
+    // perf-007: the browser-rendered <img> has been animating this whole time, so
+    // pick the canvas up where it has got to rather than snapping back to frame 0.
+    const elapsedS = (performance.now() - imgNativeShownAt) / 1000;
+    imgClock = imgTotal > 0 ? loopedTime(elapsedS, imgTotal) : 0;
+    imgFrameIndex = imgDurations.length > 0 ? frameIndexAtTime(imgDurations, imgClock) : 0;
     imgRate = 1;
     ui.imgRateLabel = "1×";
     ui.imgCanvasHidden = false;
     ui.imgElHidden = true;
     ui.imgErrorHidden = true;
-    drawGifFrame(0);
+    drawGifFrame(imgFrameIndex);
 
     if (frames.length > 1 && imgTotal > 0) {
       ui.imgMode = "animated";
@@ -2852,24 +2879,34 @@ async function tryDecodeAnimation(path: string, token: number): Promise<boolean>
 }
 
 /** Native fallback: let the WebView animate + loop the image itself (no transport). */
-function showNativeImage(src: string, token: number): void {
+function showNativeImage(src: string, token: number): Promise<void> {
   ui.imgCanvasHidden = true;
   ui.imgMode = "native";
-  imgEl.onload = () => {
-    if (token !== imgToken) return;
-    if (imgEl.naturalWidth === 0) {
-      showImageError();
-      return;
-    }
-    perfMark("image.shown", `native ${imgEl.naturalWidth}x${imgEl.naturalHeight}`); // perf-005
+  // perf-007: resolves once the picture is actually up (or has failed), so the
+  // caller can hold the heavy frame decode back until then. The decode reads the
+  // whole file and base64-decodes it on the main thread, which otherwise delays
+  // this very paint -- measured at 108 ms for a 3.6 MB GIF, versus 40 ms when the
+  // decode waits its turn.
+  return new Promise<void>((resolve) => {
+    imgEl.onload = () => {
+      if (token !== imgToken) return resolve();
+      if (imgEl.naturalWidth === 0) {
+        showImageError();
+        return resolve();
+      }
+      perfMark("image.shown", `native ${imgEl.naturalWidth}x${imgEl.naturalHeight}`); // perf-005
+      imgNativeShownAt = performance.now(); // perf-007: handover reference point
+      ui.imgElHidden = false;
+      ui.imgErrorHidden = true;
+      resolve();
+    };
+    imgEl.onerror = () => {
+      if (token === imgToken) showImageError();
+      resolve();
+    };
     ui.imgElHidden = false;
-    ui.imgErrorHidden = true;
-  };
-  imgEl.onerror = () => {
-    if (token === imgToken) showImageError();
-  };
-  ui.imgElHidden = false;
-  imgEl.src = src;
+    imgEl.src = src;
+  });
 }
 
 /** Clear, honest error state for a corrupt / unsupported image. */
