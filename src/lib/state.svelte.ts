@@ -53,13 +53,19 @@ export interface QueueItem {
  *  Its `thumbSrc` is a poster frame (the same `media_thumbnail` pipeline, which
  *  already seeks a few seconds in for video), and `durationLabel` is its running
  *  time — empty until probed, and STAYING empty for a file whose container reports
- *  no honest duration, so the badge is never a fabricated 0:00. */
+ *  no honest duration, so the badge is never a fabricated 0:00.
+ *
+ *  gallery-004: an `archive` tile (.zip/.cbz/.rar/.cbr) is browsed like a folder.
+ *  An item that came from INSIDE an archive carries that archive's real path in
+ *  `archive`, and its `path` is an INNER path (`ch1/page01.jpg`) — not a file on
+ *  disk until it is materialized. `archive` is "" for everything else. */
 export interface GalleryItem {
   path: string;
   name: string;
   thumbSrc: string;
-  kind: "folder" | "image" | "video";
+  kind: "folder" | "image" | "video" | "archive";
   durationLabel: string;
+  archive: string;
 }
 
 /** The active surface — mirrors the former `#app[data-state]` switch. */
@@ -218,6 +224,11 @@ export const ui = $state({
   // header's breadcrumb, so a nested sub-gallery says where it sits.
   galleryPath: "",
   galleryCrumbs: [] as string[],
+  // gallery-004: when the grid is showing the inside of an archive, the archive's
+  // real path and the level within it ("" is its root). Both are "" for a real
+  // folder, which is what every other gallery path checks.
+  galleryArchive: "",
+  galleryInner: "",
   // ux-004: the grid's keyboard cursor. Arrow keys move it, Enter opens it, and
   // it drives a roving tabindex so Tab enters/leaves the grid as ONE stop
   // instead of walking through every tile (a folder of thousands would otherwise

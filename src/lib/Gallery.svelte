@@ -10,13 +10,17 @@
   // "2 folders · 12 photos · 3 videos" line.
   const folderCount = $derived(ui.galleryItems.filter((i) => i.kind === "folder").length);
   const videoCount = $derived(ui.galleryItems.filter((i) => i.kind === "video").length);
-  const photoCount = $derived(ui.galleryItems.length - folderCount - videoCount);
+  const archiveCount = $derived(ui.galleryItems.filter((i) => i.kind === "archive").length);
+  const photoCount = $derived(
+    ui.galleryItems.length - folderCount - videoCount - archiveCount,
+  );
 
   /** A tile's accessible name. Folders and videos say so, because the picture alone
    *  cannot: a folder cover and a video poster are both just stills. */
   function tileLabel(kind: GalleryItem["kind"], name: string): string {
     if (kind === "folder") return `Folder: ${name}`;
     if (kind === "video") return `Video: ${name}`;
+    if (kind === "archive") return `Archive: ${name}`;
     return name;
   }
 </script>
@@ -49,7 +53,7 @@
             <span id="gallery-crumbs" class="gallery__crumbs">{ui.galleryCrumbs.join(" / ")}</span>
             <span aria-hidden="true"> · </span>
           {/if}
-          {galleryMeta(folderCount, photoCount, videoCount)}
+          {galleryMeta(folderCount, photoCount, videoCount, archiveCount)}
         {/if}
       </span>
     </div>
@@ -80,6 +84,7 @@
             class="gallery-tile"
             class:gallery-tile--folder={item.kind === "folder"}
             class:gallery-tile--video={item.kind === "video"}
+            class:gallery-tile--archive={item.kind === "archive"}
             title={tileLabel(item.kind, item.name)}
             aria-label={tileLabel(item.kind, item.name)}
             tabindex={i === (ui.galleryIndex < 0 ? 0 : ui.galleryIndex) ? 0 : -1}
@@ -93,11 +98,15 @@
                  image inside; a folder with none keeps the glyph below instead. -->
             {#if item.thumbSrc}
               <img class="gallery-tile__img" src={item.thumbSrc} alt="" loading="lazy" />
-            {:else if item.kind === "folder"}
+            {:else if item.kind === "folder" || item.kind === "archive"}
               <span class="gallery-tile__glyph" aria-hidden="true">
-                <svg class="ic" viewBox="0 0 24 24">
-                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
-                </svg>
+                {#if item.kind === "archive"}
+                  <svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1" /><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9" /><path d="M10 13h4" /></svg>
+                {:else}
+                  <svg class="ic" viewBox="0 0 24 24">
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+                  </svg>
+                {/if}
               </span>
             {:else}
               <span class="gallery-tile__placeholder" aria-hidden="true"></span>
@@ -112,6 +121,13 @@
                 <svg class="ic" viewBox="0 0 24 24">
                   <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
                 </svg>
+              </span>
+            {:else if item.kind === "archive"}
+              <!-- gallery-004: a cover picture comes from INSIDE the archive, so
+                   without this badge an archive is indistinguishable from a
+                   folder whose cover happens to be the same picture. -->
+              <span class="gallery-tile__badge" aria-hidden="true">
+                <svg class="ic" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5" rx="1" /><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9" /><path d="M10 13h4" /></svg>
               </span>
             {:else if item.kind === "video"}
               <span class="gallery-tile__badge gallery-tile__badge--video" aria-hidden="true">

@@ -964,6 +964,10 @@ function galleryNavEntry(): NavEntry {
   // the wrong heading, and leave `galleryPath` pointing at the folder you left.
   const path = ui.galleryPath;
   const crumbs = ui.galleryCrumbs;
+  // gallery-004: which archive (and which level inside it) this grid was showing,
+  // so Back into an archive restores the level rather than the parent folder.
+  const archive = ui.galleryArchive;
+  const inner = ui.galleryInner;
   const scrollTop = document.querySelector(".gallery__body")?.scrollTop ?? 0;
   const cursor = ui.galleryIndex; // ux-004: come back to the tile you opened
   return {
@@ -979,6 +983,8 @@ function galleryNavEntry(): NavEntry {
       ui.galleryItems = items; // already-rendered tiles, thumbnails included
       ui.galleryFolder = folder;
       ui.galleryPath = path;
+      ui.galleryArchive = archive;
+      ui.galleryInner = inner;
       ui.galleryCrumbs = crumbs;
       ui.galleryError = "";
       ui.galleryLoading = false;
@@ -2960,13 +2966,14 @@ function showImageError(): void {
  * 2.6 s of main-thread stalls (worst single block 1130 ms) and hundreds of MB of
  * bitmap per tile. The grid now renders instantly with placeholders instead.
  */
-function toGalleryItems(nodes: GalleryNode[]): GalleryItem[] {
+function toGalleryItems(nodes: GalleryNode[], archive = ""): GalleryItem[] {
   return nodes.map((n) => ({
     path: n.path,
     name: n.name,
     kind: n.kind,
     thumbSrc: "",
     durationLabel: "",
+    archive,
   }));
 }
 
@@ -2978,12 +2985,38 @@ async function readGalleryNodes(path: string): Promise<GalleryNode[]> {
     folders: string[];
     images: string[];
     videos: string[];
+    archives: string[];
   }>("list_folder_entries", { path });
   const counted =
     (entries?.images?.length ?? 0) +
     (entries?.folders?.length ?? 0) +
-    (entries?.videos?.length ?? 0);
+    (entries?.videos?.length ?? 0) +
+    (entries?.archives?.length ?? 0);
   perfMark("gallery.listed", String(counted)); // perf-005
+  return orderGalleryEntries(
+    entries?.folders ?? [],
+    entries?.images ?? [],
+    entries?.videos ?? [],
+    entries?.archives ?? [],
+  );
+}
+
+/** The listing behind an archive's grid (gallery-004). Reads the archive INDEX —
+ *  no entry is decompressed — and returns inner paths, which only
+ *  `archive_entry_file` can turn into real files. A nested archive inside an
+ *  archive is deliberately not listed: browsing it would mean extracting an
+ *  archive to read an archive. */
+async function readArchiveNodes(archive: string, inner: string): Promise<GalleryNode[]> {
+  const entries = await tauriInvoke<{
+    folders: string[];
+    images: string[];
+    videos: string[];
+  }>("list_archive_entries", { archive, inner });
+  const counted =
+    (entries?.images?.length ?? 0) +
+    (entries?.folders?.length ?? 0) +
+    (entries?.videos?.length ?? 0);
+  perfMark("gallery.listed", String(counted));
   return orderGalleryEntries(
     entries?.folders ?? [],
     entries?.images ?? [],
@@ -3253,6 +3286,8 @@ export async function openGalleryForFolder(
   ui.galleryItems = [];
   ui.galleryFolder = label;
   ui.galleryPath = path;
+  ui.galleryArchive = ""; // gallery-004: a real folder is not inside an archive
+  ui.galleryInner = "";
   ui.galleryCrumbs = opts.crumbs ?? [label];
   ui.galleryError = "";
   ui.galleryLoading = true;
@@ -3289,6 +3324,67 @@ export async function openGalleryForFolder(
   }
 }
 
+/**
+ * Open the Gallery grid for the inside of an archive (gallery-004) — an archive
+ * tile, a folder tile within one, drag-drop, the file picker, or a Recent card
+ * all land here.
+ *
+ * The shape mirrors `openGalleryForFolder` exactly, because to everything below
+ * the listing an archive level IS a folder: same token guard, same thumbnail
+ * pipeline reset, same empty-state message. The only differences are which
+ * command lists it and that `ui.galleryArchive` is set, which is how the tile
+ * handlers know their `path` is an inner path rather than a file.
+ */
+export async function openArchiveGallery(
+  archive: string,
+  inner: string,
+  opts: { crumbs?: string[] } = {},
+): Promise<void> {
+  const label = inner === "" ? basename(archive) : pathLeafOf(inner);
+  perfMark("gallery.begin", label);
+  const token = ++galleryToken;
+  ui.galleryItems = [];
+  ui.galleryFolder = label;
+  ui.galleryPath = archive;
+  ui.galleryArchive = archive;
+  ui.galleryInner = inner;
+  ui.galleryCrumbs = opts.crumbs ?? [basename(archive)];
+  ui.galleryError = "";
+  ui.galleryLoading = true;
+  ui.emptyError = "";
+  setPanelOpen(false);
+  setShortcutsOpen(false);
+  ui.view = "gallery";
+  document.title = `${label} — Playback`;
+  try {
+    // The ARCHIVE FILE's directory is what needs authorizing; the native side
+    // gates on the archive and materializes only into its own cache.
+    await authorizeMediaDir(archive);
+    const nodes = await readArchiveNodes(archive, inner);
+    const items = toGalleryItems(nodes, archive);
+    if (ui.view !== "gallery" || ui.galleryArchive !== archive || ui.galleryInner !== inner) {
+      return; // superseded by a newer open
+    }
+    ui.galleryIndex = -1;
+    startGalleryThumbs(token);
+    ui.galleryItems = items;
+    perfMark("gallery.items", String(items.length));
+    if (items.length === 0) ui.galleryError = "Nothing to show in this archive.";
+  } catch (err) {
+    if (ui.view === "gallery" && ui.galleryArchive === archive) {
+      ui.galleryError = `Could not open this archive: ${String(err)}`;
+    }
+  } finally {
+    if (ui.view === "gallery" && ui.galleryArchive === archive) ui.galleryLoading = false;
+  }
+}
+
+/** Trailing segment of an archive INNER path (always '/'-separated). */
+function pathLeafOf(inner: string): string {
+  const cut = inner.lastIndexOf("/");
+  return cut >= 0 ? inner.slice(cut + 1) : inner;
+}
+
 /** Open the native folder picker (Tauri) and open the chosen folder as a gallery. */
 export async function openFolderDialog(): Promise<void> {
   try {
@@ -3301,6 +3397,15 @@ export async function openFolderDialog(): Promise<void> {
   } catch (err) {
     showError(`Open folder unavailable: ${String(err)}`);
   }
+}
+
+/** Materialize and open one entry from inside an archive (gallery-004). */
+async function openArchiveEntry(item: GalleryItem): Promise<void> {
+  const real = await tauriInvoke<string>("archive_entry_file", {
+    archive: item.archive,
+    inner: item.path,
+  }).catch(() => null);
+  if (real) await loadFromPath(real);
 }
 
 /**
@@ -3318,8 +3423,27 @@ export function openGalleryItem(item: GalleryItem): void {
   // ux-001: remember the grid (items + scroll + cursor) so Back returns to it in
   // place rather than dumping the user on the home screen.
   pushNav(galleryNavEntry());
+  // gallery-004: an ARCHIVE tile browses like a folder.
+  if (item.kind === "archive") {
+    void openArchiveGallery(item.path, "", { crumbs: [...ui.galleryCrumbs, item.name] });
+    return;
+  }
+  // A folder INSIDE an archive descends within that archive; `item.path` is an
+  // inner path, so it must not be handed to the real-folder listing.
+  if (item.archive && item.kind === "folder") {
+    void openArchiveGallery(item.archive, item.path, {
+      crumbs: [...ui.galleryCrumbs, item.name],
+    });
+    return;
+  }
   if (item.kind === "folder") {
     void openGalleryForFolder(item.path, { crumbs: [...ui.galleryCrumbs, item.name] });
+    return;
+  }
+  // gallery-004: a photo or clip inside an archive must be materialized before
+  // any consumer can touch it (Task 9 supplies openArchiveEntry).
+  if (item.archive) {
+    void openArchiveEntry(item);
     return;
   }
   void loadFromPath(item.path);
