@@ -32,6 +32,7 @@ use std::time::UNIX_EPOCH;
 use tauri::{Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
 
+mod archive;
 mod mp4probe;
 mod mpv;
 mod player;
@@ -1330,7 +1331,7 @@ const QUEUE_VIDEO_EXTENSIONS: &[&str] = &[
 
 /// True when `path`'s extension is one the folder queue treats as a video
 /// (case-insensitive). A file with no extension is not a video.
-fn has_queue_video_ext(path: &Path) -> bool {
+pub(crate) fn has_queue_video_ext(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| QUEUE_VIDEO_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
@@ -1348,7 +1349,7 @@ const GALLERY_IMAGE_EXTENSIONS: &[&str] = &[
 
 /// True when `path`'s extension is one the gallery treats as an image
 /// (case-insensitive). A file with no extension is not an image.
-fn has_gallery_image_ext(path: &Path) -> bool {
+pub(crate) fn has_gallery_image_ext(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| GALLERY_IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
