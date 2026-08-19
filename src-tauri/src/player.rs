@@ -567,7 +567,7 @@ pub fn player_set_pause(state: tauri::State<'_, PlayerState>, paused: bool) -> R
 pub fn player_set_speed(state: tauri::State<'_, PlayerState>, speed: f64) -> Result<(), String> {
     with_player(&state, |p| {
         p.mpv
-            .set_prop_f64("speed", speed.clamp(0.01, 100.0))
+            .set_prop_f64_async("speed", speed.clamp(0.01, 100.0))
             .map_err(|e| mpv_err("player_set_speed", e))
     })
 }
@@ -577,7 +577,7 @@ pub fn player_set_speed(state: tauri::State<'_, PlayerState>, speed: f64) -> Res
 pub fn player_set_volume(state: tauri::State<'_, PlayerState>, volume: f64) -> Result<(), String> {
     with_player(&state, |p| {
         p.mpv
-            .set_prop_f64("volume", volume.clamp(0.0, 100.0))
+            .set_prop_f64_async("volume", volume.clamp(0.0, 100.0))
             .map_err(|e| mpv_err("player_set_volume", e))
     })
 }
@@ -585,7 +585,7 @@ pub fn player_set_volume(state: tauri::State<'_, PlayerState>, volume: f64) -> R
 #[tauri::command]
 pub fn player_set_mute(state: tauri::State<'_, PlayerState>, mute: bool) -> Result<(), String> {
     with_player(&state, |p| {
-        p.mpv.set_prop_flag("mute", mute).map_err(|e| mpv_err("player_set_mute", e))
+        p.mpv.set_prop_flag_async("mute", mute).map_err(|e| mpv_err("player_set_mute", e))
     })
 }
 
@@ -595,7 +595,7 @@ pub fn player_set_mute(state: tauri::State<'_, PlayerState>, mute: bool) -> Resu
 pub fn player_set_loop_file(state: tauri::State<'_, PlayerState>, on: bool) -> Result<(), String> {
     with_player(&state, |p| {
         p.mpv
-            .set_prop_str("loop-file", if on { "inf" } else { "no" })
+            .set_prop_str_async("loop-file", if on { "inf" } else { "no" })
             .map_err(|e| mpv_err("player_set_loop_file", e))
     })
 }
@@ -642,7 +642,7 @@ pub fn player_set_video_margin_ratio(
             ("video-margin-ratio-bottom", bottom),
         ] {
             p.mpv
-                .set_prop_f64(name, v.clamp(0.0, 0.9))
+                .set_prop_f64_async(name, v.clamp(0.0, 0.9))
                 .map_err(|e| mpv_err("player_set_video_margin_ratio", e))?;
         }
         Ok(())

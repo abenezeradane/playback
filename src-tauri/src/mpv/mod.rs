@@ -139,6 +139,62 @@ impl Mpv {
         self.check(unsafe { (self.lib.command)(self.h.as_ptr(), ptrs.as_mut_ptr()) })
     }
 
+    // --- Fire-and-forget property writes (perf-006) ---------------------------
+    //
+    // The synchronous `mpv_set_property` blocks until the core processes the
+    // write. The app's property writes are fire-and-forget (the frontend never
+    // awaits them; real state arrives via observed properties), but they were
+    // still made synchronously while holding the player mutex — so when the core
+    // was busy loading a file they blocked for up to 340 ms (measured), pinning a
+    // Tauri worker thread and serializing every command queued behind them.
+    //
+    // The async variants queue the write and return immediately. The resulting
+    // MPV_EVENT_SET_PROPERTY_REPLY is ignored (reply id 0) because a failed
+    // volume/speed write has no recovery beyond what the observed properties
+    // already report.
+
+    pub fn set_prop_flag_async(&self, name: &str, value: bool) -> Result<(), MpvError> {
+        let n = Self::cstr(name)?;
+        let mut v: c_int = if value { 1 } else { 0 };
+        self.check(unsafe {
+            (self.lib.set_property_async)(
+                self.h.as_ptr(),
+                0,
+                n.as_ptr(),
+                ffi::MPV_FORMAT_FLAG,
+                &mut v as *mut c_int as *mut c_void,
+            )
+        })
+    }
+
+    pub fn set_prop_f64_async(&self, name: &str, mut value: f64) -> Result<(), MpvError> {
+        let n = Self::cstr(name)?;
+        self.check(unsafe {
+            (self.lib.set_property_async)(
+                self.h.as_ptr(),
+                0,
+                n.as_ptr(),
+                ffi::MPV_FORMAT_DOUBLE,
+                &mut value as *mut f64 as *mut c_void,
+            )
+        })
+    }
+
+    pub fn set_prop_str_async(&self, name: &str, value: &str) -> Result<(), MpvError> {
+        let n = Self::cstr(name)?;
+        let v = Self::cstr(value)?;
+        let mut p = v.as_ptr();
+        self.check(unsafe {
+            (self.lib.set_property_async)(
+                self.h.as_ptr(),
+                0,
+                n.as_ptr(),
+                ffi::MPV_FORMAT_STRING,
+                &mut p as *mut *const std::os::raw::c_char as *mut c_void,
+            )
+        })
+    }
+
     pub fn set_prop_flag(&self, name: &str, value: bool) -> Result<(), MpvError> {
         let n = Self::cstr(name)?;
         let mut v: c_int = if value { 1 } else { 0 };

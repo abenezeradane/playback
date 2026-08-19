@@ -93,6 +93,17 @@ pub struct LibMpv {
     pub command: unsafe extern "C" fn(*mut mpv_handle, *mut *const c_char) -> c_int,
     pub set_property:
         unsafe extern "C" fn(*mut mpv_handle, *const c_char, c_int, *mut c_void) -> c_int,
+    /// perf-006: queues the write and returns immediately, instead of blocking
+    /// until the core processes it. `reply_userdata` tags the resulting
+    /// MPV_EVENT_SET_PROPERTY_REPLY, which this app ignores (the writes are
+    /// fire-and-forget; real state comes back through observed properties).
+    pub set_property_async: unsafe extern "C" fn(
+        *mut mpv_handle,
+        u64,
+        *const c_char,
+        c_int,
+        *mut c_void,
+    ) -> c_int,
     pub get_property:
         unsafe extern "C" fn(*mut mpv_handle, *const c_char, c_int, *mut c_void) -> c_int,
     pub observe_property:
@@ -161,6 +172,7 @@ unsafe fn load_libmpv() -> Result<&'static LibMpv, String> {
         set_option: sym!(b"mpv_set_option\0"),
         command: sym!(b"mpv_command\0"),
         set_property: sym!(b"mpv_set_property\0"),
+        set_property_async: sym!(b"mpv_set_property_async\0"),
         get_property: sym!(b"mpv_get_property\0"),
         observe_property: sym!(b"mpv_observe_property\0"),
         wait_event: sym!(b"mpv_wait_event\0"),

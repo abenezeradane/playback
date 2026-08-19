@@ -96,6 +96,14 @@ export class NativeEngine implements EngineSurface {
   private loop0 = false;
   private margins0: MarginRatios = ZERO_MARGINS;
   private seekExact = true;
+  /** What the CURRENT mpv core has actually been told (perf-006 de-duplication). */
+  private sent: {
+    volume?: number;
+    muted?: boolean;
+    rate?: number;
+    loop?: boolean;
+    margins?: string;
+  } = {};
   /** Events that arrived while player_load was still awaiting its loadSeq. */
   private preloadQueue: NativePlayerEvent[] = [];
   private awaitingLoad = false;
@@ -187,6 +195,11 @@ export class NativeEngine implements EngineSurface {
     this.presentedThisLoad = false;
     this.awaitingLoad = true;
     this.preloadQueue = [];
+    // perf-006: a load may land on a freshly created core, so forget what the
+    // previous one was told. Everything below (the controller's own push during
+    // loadNative, then applyAudioState once the load resolves) then writes each
+    // property exactly once instead of twice.
+    this.resetSentState();
     try {
       const seq = (await this.mustInvoke("player_load", { path })) as number;
       this.snap = { ...this.snap, loadSeq: seq };
@@ -210,14 +223,62 @@ export class NativeEngine implements EngineSurface {
   }
 
   private applyAudioState(): void {
-    void this.tryInvoke("player_set_volume", { volume: volumeToMpv(this.volume0) });
-    void this.tryInvoke("player_set_mute", { mute: this.muted0 });
-    void this.tryInvoke("player_set_speed", { speed: this.rate0 });
-    void this.tryInvoke("player_set_loop_file", { on: this.loop0 });
+    this.pushVolume();
+    this.pushMuted();
+    this.pushRate();
+    this.pushLoop();
     // Margins are properties of the mpv core, not the load — but the core is
     // created lazily and can be reaped/re-created, so re-push the mirror after
     // every load exactly like the audio state (keeps the cut-view letterbox
     // if a load happens while the timeline view is open).
+    this.pushMargins();
+  }
+
+  // --- Property writes, de-duplicated (perf-006) ----------------------------
+  //
+  // Both the controller (loadNative: applyAudioToVideo + resetShuttle +
+  // applyLoopState) and this adapter (applyAudioState, after the load resolves)
+  // push the same state on every open, so each load used to issue the whole set
+  // TWICE plus an extra speed write -- measured as 5 player_set_speed calls for a
+  // single load. Each of those took the player mutex and a Tauri worker.
+  //
+  // `sent` records what the CURRENT core has actually been told. A write whose
+  // value is unchanged is skipped; `resetSentState` clears it on every load so a
+  // fresh (or re-created) core is always fully re-pushed exactly once.
+
+  private resetSentState(): void {
+    this.sent = {};
+  }
+
+  private pushVolume(): void {
+    const volume = volumeToMpv(this.volume0);
+    if (this.sent.volume === volume) return;
+    this.sent.volume = volume;
+    void this.tryInvoke("player_set_volume", { volume });
+  }
+
+  private pushMuted(): void {
+    if (this.sent.muted === this.muted0) return;
+    this.sent.muted = this.muted0;
+    void this.tryInvoke("player_set_mute", { mute: this.muted0 });
+  }
+
+  private pushRate(): void {
+    if (this.sent.rate === this.rate0) return;
+    this.sent.rate = this.rate0;
+    void this.tryInvoke("player_set_speed", { speed: this.rate0 });
+  }
+
+  private pushLoop(): void {
+    if (this.sent.loop === this.loop0) return;
+    this.sent.loop = this.loop0;
+    void this.tryInvoke("player_set_loop_file", { on: this.loop0 });
+  }
+
+  private pushMargins(): void {
+    const key = `${this.margins0.left},${this.margins0.right},${this.margins0.top},${this.margins0.bottom}`;
+    if (this.sent.margins === key) return;
+    this.sent.margins = key;
     void this.tryInvoke("player_set_video_margin_ratio", { ...this.margins0 });
   }
 
@@ -249,7 +310,7 @@ export class NativeEngine implements EngineSurface {
    */
   setVideoMarginRatio(margins: MarginRatios): void {
     this.margins0 = margins;
-    void this.tryInvoke("player_set_video_margin_ratio", { ...margins });
+    this.pushMargins();
   }
 
   /**
@@ -307,7 +368,7 @@ export class NativeEngine implements EngineSurface {
 
   set volume(v: number) {
     this.volume0 = Math.min(1, Math.max(0, v));
-    void this.tryInvoke("player_set_volume", { volume: volumeToMpv(this.volume0) });
+    this.pushVolume();
   }
 
   get muted(): boolean {
@@ -316,7 +377,7 @@ export class NativeEngine implements EngineSurface {
 
   set muted(m: boolean) {
     this.muted0 = m;
-    void this.tryInvoke("player_set_mute", { mute: m });
+    this.pushMuted();
   }
 
   get playbackRate(): number {
@@ -325,7 +386,7 @@ export class NativeEngine implements EngineSurface {
 
   set playbackRate(r: number) {
     this.rate0 = r;
-    void this.tryInvoke("player_set_speed", { speed: r });
+    this.pushRate();
   }
 
   get loop(): boolean {
@@ -334,7 +395,7 @@ export class NativeEngine implements EngineSurface {
 
   set loop(on: boolean) {
     this.loop0 = on;
-    void this.tryInvoke("player_set_loop_file", { on });
+    this.pushLoop();
   }
 
   get buffered(): TimeRangesLike {
