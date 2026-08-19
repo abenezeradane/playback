@@ -3094,9 +3094,13 @@ export async function openGalleryFromImage(): Promise<void> {
   document.title = `${folder || "Gallery"} — Playback`;
   const token = ++galleryToken;
   ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
+  // Reset the thumbnail pipeline BEFORE the items land. startGalleryThumbs
+  // disconnects the previous IntersectionObserver, so doing it afterwards can
+  // throw away observations for tiles that already mounted — those tiles then
+  // never request a thumbnail and shimmer forever.
+  startGalleryThumbs(token);
   ui.galleryItems = toGalleryItems(items);
   perfMark("gallery.items", String(ui.galleryItems.length)); // perf-005
-  startGalleryThumbs(token);
 }
 
 /** Open the Gallery grid for an explicitly chosen folder (Home's "Open folder"). */
@@ -3121,10 +3125,10 @@ export async function openGalleryForFolder(path: string): Promise<void> {
     const raw = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
     const items = toGalleryItems(raw);
     if (ui.view !== "gallery" || ui.galleryFolder !== label) return; // superseded by a newer open
-    ui.galleryItems = items;
     ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
+    startGalleryThumbs(token); // before the items land — see openGalleryFromImage
+    ui.galleryItems = items;
     perfMark("gallery.items", String(items.length)); // perf-005
-    startGalleryThumbs(token);
     if (ui.galleryItems.length === 0) ui.galleryError = "No supported images in this folder.";
   } catch (err) {
     if (ui.view === "gallery" && ui.galleryFolder === label) {
