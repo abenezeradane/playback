@@ -2526,6 +2526,60 @@ body {
   animation: gallery-tile-shimmer 1.4s ease-in-out infinite;
 }
 
+/* gallery-002: a sub-folder tile. It keeps the image tile's shape and size so the
+   grid stays one rhythm, and is distinguished by a tinted ground, a corner badge,
+   and an always-visible name (you need to read a folder's name to decide whether
+   to go in; a photo's filename is incidental, so that one still shows on hover). */
+.gallery-tile--folder {
+  background: color-mix(in srgb, var(--accent-blue) 8%, var(--surface-card));
+}
+
+.gallery-tile--folder:hover {
+  border-color: color-mix(in srgb, var(--accent-blue) 45%, var(--hairline-strong));
+}
+
+/* Shown only when the folder has no image inside to use as a cover. */
+.gallery-tile__glyph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--accent-blue) 55%, var(--mute));
+}
+
+.gallery-tile__glyph .ic {
+  width: 44px;
+  height: 44px;
+  stroke-width: 1.4;
+}
+
+/* Sits over a cover picture, so it needs its own contrast rather than inheriting
+   the tile's — hence the scrim disc behind the glyph. */
+.gallery-tile__badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--on-dark);
+}
+
+.gallery-tile__badge .ic {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.8;
+}
+
+.gallery-tile--folder .gallery-tile__name {
+  opacity: 1;
+}
+
 @keyframes gallery-tile-in {
   from {
     opacity: 0;

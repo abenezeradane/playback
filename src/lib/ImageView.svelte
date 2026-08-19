@@ -25,10 +25,15 @@
       </div>
       <span id="img-meta" class="title-sub">{ui.imgMeta}</span>
     </div>
-    {#if ui.photoQueue.length > 1}
+    {#if ui.photoQueue.length > 0}
       <!-- Sibling photo nav (gallery-001): a folder count + a jump into the grid. -->
       <div class="imgview__nav-actions">
-        <span id="img-photo-count" class="imgview__count">{ui.photoIndex + 1} / {ui.photoQueue.length}</span>
+        <!-- The "2 / 7" counter only means something with siblings to count, but the
+             grid button does not: gallery-002 made the grid show SUB-FOLDERS too, so
+             a lone photo in a folder of albums still has somewhere to go. -->
+        {#if ui.photoQueue.length > 1}
+          <span id="img-photo-count" class="imgview__count">{ui.photoIndex + 1} / {ui.photoQueue.length}</span>
+        {/if}
         <button id="img-gallery" class="glass-btn" type="button" title="Gallery grid (G)" onclick={() => void openGalleryFromImage()}>
           <svg class="ic" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5" /><rect x="13" y="3" width="8" height="8" rx="1.5" /><rect x="3" y="13" width="8" height="8" rx="1.5" /><rect x="13" y="13" width="8" height="8" rx="1.5" /></svg>
         </button>

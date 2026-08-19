@@ -996,6 +996,34 @@ export function sortPathsNatural(paths: string[]): string[] {
   return [...paths].sort(compareNatural);
 }
 
+/** One node in the Gallery grid (gallery-002): a sub-folder to descend into, or an
+ *  image to open. `kind` is what a tile's click, icon, and thumbnail all branch on. */
+export interface GalleryNode {
+  path: string;
+  name: string;
+  kind: "folder" | "image";
+}
+
+/** Trailing path segment of `path`, for either separator. */
+function pathLeaf(path: string): string {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return cut >= 0 ? path.slice(cut + 1) : path;
+}
+
+/**
+ * Order a gallery folder's contents for display (gallery-002): sub-folders first
+ * as a block, then images, each block independently natural-sorted. Folders-first
+ * is the convention every file browser uses — it keeps the way *deeper* from being
+ * scattered through a long run of pictures.
+ *
+ * Pure; neither input array is mutated.
+ */
+export function orderGalleryEntries(folders: string[], images: string[]): GalleryNode[] {
+  const nodes = (paths: string[], kind: GalleryNode["kind"]): GalleryNode[] =>
+    sortPathsNatural(paths).map((path) => ({ path, name: pathLeaf(path), kind }));
+  return [...nodes(folders, "folder"), ...nodes(images, "image")];
+}
+
 /** Index of `path` in `queue` (exact match), or -1 when it is not present. */
 export function currentIndexOf(queue: string[], path: string): number {
   return queue.indexOf(path);

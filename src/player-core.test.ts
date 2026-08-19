@@ -64,6 +64,7 @@ import {
   isTransportStreamPath,
   compareNatural,
   sortPathsNatural,
+  orderGalleryEntries,
   currentIndexOf,
   nextIndex,
   prevIndex,
@@ -936,6 +937,39 @@ describe("folder queue / playlist (play-013)", () => {
         -Math.sign(compareNatural("ALPHA", "alpha")),
       );
       expect(compareNatural("same", "same")).toBe(0);
+    });
+    it("orders gallery entries folders-first, each naturally sorted (gallery-002)", () => {
+      const nodes = orderGalleryEntries(
+        ["C:/P/Sub 10", "C:/P/Sub 2", "C:/P/Album"],
+        ["C:/P/pic10.jpg", "C:/P/pic2.jpg"],
+      );
+      // Folders come first as a block (a file browser's convention), and each
+      // block is naturally sorted independently — 2 before 10 in both.
+      expect(nodes).toEqual([
+        { path: "C:/P/Album", name: "Album", kind: "folder" },
+        { path: "C:/P/Sub 2", name: "Sub 2", kind: "folder" },
+        { path: "C:/P/Sub 10", name: "Sub 10", kind: "folder" },
+        { path: "C:/P/pic2.jpg", name: "pic2.jpg", kind: "image" },
+        { path: "C:/P/pic10.jpg", name: "pic10.jpg", kind: "image" },
+      ]);
+    });
+    it("handles either gallery block being empty, and backslash paths", () => {
+      // A folder holding only sub-folders is a legitimate gallery, not an error.
+      expect(orderGalleryEntries(["C:\\P\\Only"], [])).toEqual([
+        { path: "C:\\P\\Only", name: "Only", kind: "folder" },
+      ]);
+      // ...as is the gallery-001 shape, with no sub-folders at all.
+      expect(orderGalleryEntries([], ["C:\\P\\a.png"])).toEqual([
+        { path: "C:\\P\\a.png", name: "a.png", kind: "image" },
+      ]);
+      expect(orderGalleryEntries([], [])).toEqual([]);
+    });
+    it("does not mutate its inputs", () => {
+      const folders = ["C:/P/b", "C:/P/a"];
+      const images = ["C:/P/b.png", "C:/P/a.png"];
+      orderGalleryEntries(folders, images);
+      expect(folders).toEqual(["C:/P/b", "C:/P/a"]);
+      expect(images).toEqual(["C:/P/b.png", "C:/P/a.png"]);
     });
     it("sorts full sibling paths by their (shared-prefix) tail", () => {
       const sorted = sortPathsNatural([

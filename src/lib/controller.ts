@@ -72,6 +72,8 @@ import {
   stepFrame,
   isTransportStreamPath,
   sortPathsNatural,
+  orderGalleryEntries,
+  type GalleryNode,
   currentIndexOf,
   nextIndex,
   prevIndex,
@@ -957,13 +959,27 @@ function pushNav(entry: NavEntry): void {
 function galleryNavEntry(): NavEntry {
   const items = ui.galleryItems;
   const folder = ui.galleryFolder;
+  // gallery-002: the path and breadcrumb trail are part of "where you were" too —
+  // restoring a nested sub-gallery without them would show the right tiles under
+  // the wrong heading, and leave `galleryPath` pointing at the folder you left.
+  const path = ui.galleryPath;
+  const crumbs = ui.galleryCrumbs;
   const scrollTop = document.querySelector(".gallery__body")?.scrollTop ?? 0;
   const cursor = ui.galleryIndex; // ux-004: come back to the tile you opened
   return {
     label: `gallery:${folder}`,
     restore: () => {
+      // Backing out of a DEEPER gallery leaves that gallery's thumbnail work in
+      // flight against a pipeline whose observer is about to be replaced. Bump the
+      // token so those results are discarded, and reset the pipeline BEFORE the
+      // items land (same ordering constraint as openGalleryForFolder) so tiles
+      // that never got a thumbnail can request one again instead of shimmering.
+      galleryToken++;
+      resetThumbPipeline();
       ui.galleryItems = items; // already-rendered tiles, thumbnails included
       ui.galleryFolder = folder;
+      ui.galleryPath = path;
+      ui.galleryCrumbs = crumbs;
       ui.galleryError = "";
       ui.galleryLoading = false;
       ui.galleryIndex = cursor;
@@ -2386,6 +2402,13 @@ function basename(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
+/** The containing directory's full PATH (gallery-002 needs the path to list, where
+ *  `parentDir` gives only the display name). Empty when there is no separator. */
+function dirnameOf(path: string): string {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return cut > 0 ? path.slice(0, cut) : "";
+}
+
 /** The immediate parent folder name, shown as the player subtitle. */
 function parentDir(path: string): string {
   const parts = path.split(/[\\/]/).filter(Boolean);
@@ -2937,8 +2960,19 @@ function showImageError(): void {
  * 2.6 s of main-thread stalls (worst single block 1130 ms) and hundreds of MB of
  * bitmap per tile. The grid now renders instantly with placeholders instead.
  */
-function toGalleryItems(items: QueueItem[]): GalleryItem[] {
-  return items.map((i) => ({ path: i.path, name: i.name, thumbSrc: "" }));
+function toGalleryItems(nodes: GalleryNode[]): GalleryItem[] {
+  return nodes.map((n) => ({ path: n.path, name: n.name, kind: n.kind, thumbSrc: "" }));
+}
+
+/** The listing behind every gallery grid (gallery-002): sub-folders and images in
+ *  one native call, ordered folders-first by the pure `orderGalleryEntries`. */
+async function readGalleryNodes(path: string): Promise<GalleryNode[]> {
+  const entries = await tauriInvoke<{ folders: string[]; images: string[] }>(
+    "list_folder_entries",
+    { path },
+  );
+  perfMark("gallery.listed", String((entries?.images?.length ?? 0) + (entries?.folders?.length ?? 0))); // perf-005
+  return orderGalleryEntries(entries?.folders ?? [], entries?.images ?? []);
 }
 
 /** How many thumbnails to render at once. Each is an ffmpeg sidecar process, so
@@ -3030,6 +3064,12 @@ function pumpThumbs(): void {
  * Render one tile's thumbnail natively and swap it in. A failure falls back to
  * the original file — the behavior the grid had for everything before perf-005:
  * degraded (a big decode for that one tile), never broken.
+ *
+ * gallery-002: a FOLDER tile first asks which image inside it should be the cover,
+ * then renders that through the same `media_thumbnail` command (one cache, one
+ * render pipeline). A folder holding no images has no cover — `thumbSrc` stays
+ * empty and the tile keeps its folder glyph, which is the correct picture for it
+ * rather than a fallback.
  */
 async function renderThumb(index: number): Promise<void> {
   const token = galleryToken;
@@ -3040,14 +3080,25 @@ async function renderThumb(index: number): Promise<void> {
   perfMark("thumb.render", String(index));
   thumbActive++;
   try {
-    const thumb = await tauriInvoke<string>("media_thumbnail", { path: item.path }).catch(
+    let source: string | null = item.path;
+    if (item.kind === "folder") {
+      source = await tauriInvoke<string | null>("folder_cover_image", {
+        path: item.path,
+      }).catch(() => null);
+      if (token !== galleryToken) return;
+      if (!source) return; // no cover — the folder glyph stands on its own
+    }
+    const thumb = await tauriInvoke<string>("media_thumbnail", { path: source }).catch(
       () => null,
     );
     if (token !== galleryToken) return;
     const current = ui.galleryItems[index];
     if (!current || current.path !== item.path) return; // list changed under us
+    // A folder never falls back to its own path (a directory is not an image).
+    const src = thumb ?? (current.kind === "folder" ? null : item.path);
+    if (!src) return;
     const { convertFileSrc } = await import("@tauri-apps/api/core");
-    current.thumbSrc = convertFileSrc(thumb ?? item.path);
+    current.thumbSrc = convertFileSrc(src);
   } finally {
     thumbActive--;
     if (token === galleryToken) pumpThumbs();
@@ -3114,42 +3165,43 @@ function handleGalleryKey(e: KeyboardEvent): boolean {
   }
 }
 
-/** Open the Gallery grid for the CURRENT photo's folder, reusing the sibling
- *  queue openImage already built (no extra native call). */
+/** Open the Gallery grid for the folder the CURRENT photo lives in (the viewer's
+ *  grid button and the G key). */
 export async function openGalleryFromImage(): Promise<void> {
   if (ui.photoQueue.length === 0) return;
-  perfMark("gallery.begin", ui.imgMeta || "siblings"); // perf-005
   // ux-001: G opened the grid FROM this photo, so Back returns to this photo.
   const from = currentPath;
   if (from) {
     pushNav({ label: `image:${basename(from)}`, restore: () => loadFromPath(from) });
   }
-  const folder = ui.imgMeta;
-  const items = ui.photoQueue;
-  ui.galleryFolder = folder;
-  ui.galleryError = "";
-  ui.galleryLoading = false;
-  setShortcutsOpen(false);
-  ui.view = "gallery";
-  document.title = `${folder || "Gallery"} — Playback`;
-  const token = ++galleryToken;
-  ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
-  // Reset the thumbnail pipeline BEFORE the items land. startGalleryThumbs
-  // disconnects the previous IntersectionObserver, so doing it afterwards can
-  // throw away observations for tiles that already mounted — those tiles then
-  // never request a thumbnail and shimmer forever.
-  startGalleryThumbs(token);
-  ui.galleryItems = toGalleryItems(items);
-  perfMark("gallery.items", String(ui.galleryItems.length)); // perf-005
+  // gallery-002: this used to reuse `photoQueue` with no IPC at all, but that queue
+  // is images-only by design (sibling Prev/Next must never land on a directory), so
+  // the grid would have hidden sub-folders depending on how it was reached. It now
+  // takes the same listing path as "Open folder" — one read_dir — so the same folder
+  // always shows the same tiles.
+  const folder = dirnameOf(ui.photoQueue[Math.max(0, ui.photoIndex)]?.path ?? from ?? "");
+  await openGalleryForFolder(folder);
 }
 
-/** Open the Gallery grid for an explicitly chosen folder (Home's "Open folder"). */
-export async function openGalleryForFolder(path: string): Promise<void> {
+/**
+ * Open the Gallery grid for a folder: Home's "Open folder", the image viewer's G,
+ * and (gallery-002) clicking a sub-folder tile all land here.
+ *
+ * `crumbs` is the breadcrumb trail to display; a caller descending into a
+ * sub-folder passes the parent's trail plus the new leaf, and everything else
+ * lets it default to just this folder.
+ */
+export async function openGalleryForFolder(
+  path: string,
+  opts: { crumbs?: string[] } = {},
+): Promise<void> {
   perfMark("gallery.begin", basename(path)); // perf-005
   const token = ++galleryToken;
   const label = basename(path);
   ui.galleryItems = [];
   ui.galleryFolder = label;
+  ui.galleryPath = path;
+  ui.galleryCrumbs = opts.crumbs ?? [label];
   ui.galleryError = "";
   ui.galleryLoading = true;
   ui.emptyError = "";
@@ -3158,24 +3210,30 @@ export async function openGalleryForFolder(path: string): Promise<void> {
   ui.view = "gallery";
   document.title = `${label} — Playback`;
   try {
+    // Authorizing the folder is what extends the (non-recursive) asset-protocol
+    // scope to it. The IPC read gate is a prefix check, so descending into a
+    // sub-folder of an already-open gallery grants no new filesystem reach.
     await authorizeMediaDir(path);
-    const paths = await tauriInvoke<string[]>("list_folder_images", { path });
-    perfMark("gallery.listed", String(paths?.length ?? 0)); // perf-005
-    const sorted = sortPathsNatural(paths ?? []);
-    const raw = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
-    const items = toGalleryItems(raw);
-    if (ui.view !== "gallery" || ui.galleryFolder !== label) return; // superseded by a newer open
+    const nodes = await readGalleryNodes(path);
+    const items = toGalleryItems(nodes);
+    if (ui.view !== "gallery" || ui.galleryPath !== path) return; // superseded by a newer open
     ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
-    startGalleryThumbs(token); // before the items land — see openGalleryFromImage
+    // Reset the thumbnail pipeline BEFORE the items land. startGalleryThumbs
+    // disconnects the previous IntersectionObserver, so doing it afterwards can
+    // throw away observations for tiles that already mounted — those tiles then
+    // never request a thumbnail and shimmer forever.
+    startGalleryThumbs(token);
     ui.galleryItems = items;
     perfMark("gallery.items", String(items.length)); // perf-005
-    if (ui.galleryItems.length === 0) ui.galleryError = "No supported images in this folder.";
+    // gallery-002: a folder holding only SUB-folders is a perfectly good gallery,
+    // so this is only an error when there is nothing of either kind to show.
+    if (items.length === 0) ui.galleryError = "Nothing to show in this folder.";
   } catch (err) {
-    if (ui.view === "gallery" && ui.galleryFolder === label) {
+    if (ui.view === "gallery" && ui.galleryPath === path) {
       ui.galleryError = `Could not open this folder: ${String(err)}`;
     }
   } finally {
-    if (ui.view === "gallery" && ui.galleryFolder === label) ui.galleryLoading = false;
+    if (ui.view === "gallery" && ui.galleryPath === path) ui.galleryLoading = false;
   }
 }
 
@@ -3184,13 +3242,21 @@ export async function openFolderDialog(): Promise<void> {
   try {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({ multiple: false, directory: true });
-    if (typeof selected === "string") await openGalleryForFolder(selected);
+    if (typeof selected === "string") {
+      resetNav(); // ux-001: picking a folder starts a fresh journey
+      await openGalleryForFolder(selected);
+    }
   } catch (err) {
     showError(`Open folder unavailable: ${String(err)}`);
   }
 }
 
-/** Click a tile in the Gallery grid: open that photo in the single-image viewer. */
+/**
+ * Click (or press Enter on) a tile in the Gallery grid. An image tile opens that
+ * photo in the single-image viewer; a sub-folder tile (gallery-002) re-scopes the
+ * grid to that folder's contents. Either way the current grid is pushed onto the
+ * nav stack first, so Back walks the trail back out one level at a time.
+ */
 export function openGalleryItem(item: GalleryItem): void {
   // ux-004: record which tile this was, so Back restores the cursor onto it.
   const index = ui.galleryItems.indexOf(item);
@@ -3198,6 +3264,10 @@ export function openGalleryItem(item: GalleryItem): void {
   // ux-001: remember the grid (items + scroll + cursor) so Back returns to it in
   // place rather than dumping the user on the home screen.
   pushNav(galleryNavEntry());
+  if (item.kind === "folder") {
+    void openGalleryForFolder(item.path, { crumbs: [...ui.galleryCrumbs, item.name] });
+    return;
+  }
   void loadFromPath(item.path);
 }
 
@@ -3310,7 +3380,10 @@ function handleImageKey(e: KeyboardEvent): boolean {
       return false;
     case "g":
     case "G":
-      if (ui.photoQueue.length > 1) {
+      // gallery-002: no longer gated on having SIBLINGS. The grid now also shows
+      // sub-folders, so a folder holding one photo and several albums is exactly
+      // the case where you most want to get to the grid.
+      if (ui.photoQueue.length > 0) {
         e.preventDefault();
         void openGalleryFromImage();
         return true;

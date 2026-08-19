@@ -43,11 +43,16 @@ export interface QueueItem {
 
 /** One tile in the Gallery grid (gallery-001): a folder image plus its resolved
  *  asset:// src, precomputed by the controller (once, when the list is built) so
- *  the template only binds an <img src> — no Tauri glue in the component. */
+ *  the template only binds an <img src> — no Tauri glue in the component.
+ *
+ *  gallery-002: a tile is now either an `image` to open or a `folder` to descend
+ *  into. A folder's `thumbSrc` is a cover picture taken from the first image inside
+ *  it, and stays empty when it has none — the tile then shows a folder glyph. */
 export interface GalleryItem {
   path: string;
   name: string;
   thumbSrc: string;
+  kind: "folder" | "image";
 }
 
 /** The active surface — mirrors the former `#app[data-state]` switch. */
@@ -201,6 +206,11 @@ export const ui = $state({
   galleryFolder: "",
   galleryLoading: false,
   galleryError: "",
+  // gallery-002: the folder path the grid is currently showing, and the trail of
+  // folder names from wherever this gallery journey started down to it — the
+  // header's breadcrumb, so a nested sub-gallery says where it sits.
+  galleryPath: "",
+  galleryCrumbs: [] as string[],
   // ux-004: the grid's keyboard cursor. Arrow keys move it, Enter opens it, and
   // it drives a roving tabindex so Tab enters/leaves the grid as ONE stop
   // instead of walking through every tile (a folder of thousands would otherwise

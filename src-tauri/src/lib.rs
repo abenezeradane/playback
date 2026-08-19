@@ -1346,23 +1346,144 @@ fn list_folder_images(
 /// without a `tauri::State`. The command is a thin wrapper over this.
 fn list_folder_images_impl(allow: &AllowList, path: &str) -> Result<Vec<String>, String> {
     let canonical = ensure_allowed(allow, path)?;
-    let (canonical_dir, raw_dir): (PathBuf, Option<PathBuf>) = if canonical.is_dir() {
-        (canonical.clone(), Some(Path::new(path).to_path_buf()))
-    } else {
-        (
-            canonical
-                .parent()
-                .ok_or_else(|| "invalid path".to_string())?
-                .to_path_buf(),
-            Path::new(path).parent().map(Path::to_path_buf),
-        )
-    };
+    let (canonical_dir, raw_dir) = resolve_listing_dir(&canonical, path)?;
     list_dir_entries_matching(
         &canonical_dir,
         raw_dir.as_deref(),
         has_gallery_image_ext,
         "list_folder_images: read_dir",
     )
+}
+
+/// Resolve a listing target to the directory to actually READ (canonical, so the
+/// real trusted folder is enumerated) and the directory returned paths are ROOTED
+/// at (raw, so each round-trips through `convertFileSrc` and the asset-protocol
+/// scope grant — on Windows the canonical form carries a `\\?\` verbatim prefix
+/// that would not match the glob).
+///
+/// A FOLDER lists itself; a FILE lists its parent. Both listing commands accept
+/// either shape, and `allow_media_dir` authorizes them identically, so this is the
+/// one place that mapping lives.
+fn resolve_listing_dir(
+    canonical: &Path,
+    raw: &str,
+) -> Result<(PathBuf, Option<PathBuf>), String> {
+    if canonical.is_dir() {
+        Ok((canonical.to_path_buf(), Some(Path::new(raw).to_path_buf())))
+    } else {
+        Ok((
+            canonical
+                .parent()
+                .ok_or_else(|| "invalid path".to_string())?
+                .to_path_buf(),
+            Path::new(raw).parent().map(Path::to_path_buf),
+        ))
+    }
+}
+
+/// A gallery folder's browsable contents, split by kind (gallery-002). Serialized
+/// to the WebView as `{ folders, images }`.
+#[derive(Debug, PartialEq, serde::Serialize)]
+struct FolderEntries {
+    folders: Vec<String>,
+    images: Vec<String>,
+}
+
+/// List a gallery folder's SUBFOLDERS as well as its images (gallery-002), so the
+/// grid can show a folder as a tile you click to descend into.
+///
+/// `list_folder_images` deliberately stays images-only: it also feeds the photo
+/// viewer's sibling Prev/Next queue, which must never land on a directory. This
+/// command is the grid's listing instead, and it does the whole job in ONE
+/// `read_dir` rather than walking the folder twice.
+///
+/// Trust model is unchanged from gallery-001. `ensure_allowed` is a prefix check
+/// (`path_within_roots`), so an authorized gallery folder already covers its whole
+/// subtree — descending into a subfolder grants no new filesystem reach; the
+/// frontend's existing `allow_media_dir` call only extends the (non-recursive)
+/// asset-protocol scope to the folder the user clicked into.
+#[tauri::command]
+fn list_folder_entries(
+    allow: tauri::State<'_, AllowList>,
+    path: String,
+) -> Result<FolderEntries, String> {
+    list_folder_entries_impl(&allow, &path)
+}
+
+/// Core of `list_folder_entries`, taking `&AllowList` directly so it is
+/// unit-testable without a `tauri::State`.
+fn list_folder_entries_impl(allow: &AllowList, path: &str) -> Result<FolderEntries, String> {
+    let canonical = ensure_allowed(allow, path)?;
+    let (canonical_dir, raw_dir) = resolve_listing_dir(&canonical, path)?;
+    let entries = fs::read_dir(&canonical_dir)
+        .map_err(|e| ipc_error("list_folder_entries: read_dir", e, "could not list folder"))?;
+    let mut folders: Vec<String> = Vec::new();
+    let mut images: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        // Dot-prefixed entries are tool/cache dirs (.git, .thumbnails), not albums.
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let entry_path = entry.path();
+        let full = match raw_dir.as_deref() {
+            Some(dir) => dir.join(&name),
+            None => entry_path.clone(),
+        };
+        if entry_path.is_dir() {
+            folders.push(full.to_string_lossy().into_owned());
+        } else if entry_path.is_file() && has_gallery_image_ext(&entry_path) {
+            images.push(full.to_string_lossy().into_owned());
+        }
+    }
+    Ok(FolderEntries { folders, images })
+}
+
+/// The image a folder TILE should show as its cover (gallery-002): the first image
+/// directly inside `path`, by case-insensitive name, or `None` when the folder holds
+/// none (the tile then keeps a plain folder glyph rather than a broken picture).
+///
+/// This deliberately returns a PATH rather than a rendered thumbnail, so the tile
+/// goes through the existing `media_thumbnail` command — one cache, one render
+/// pipeline, no duplicated ffmpeg plumbing. It does not recurse: a cover is a cheap
+/// hint, not a search.
+#[tauri::command]
+fn folder_cover_image(
+    allow: tauri::State<'_, AllowList>,
+    path: String,
+) -> Result<Option<String>, String> {
+    folder_cover_image_impl(&allow, &path)
+}
+
+/// Core of `folder_cover_image`, taking `&AllowList` directly so it is
+/// unit-testable without a `tauri::State`.
+fn folder_cover_image_impl(allow: &AllowList, path: &str) -> Result<Option<String>, String> {
+    let canonical = ensure_allowed(allow, path)?;
+    if !canonical.is_dir() {
+        return Ok(None);
+    }
+    let entries = fs::read_dir(&canonical)
+        .map_err(|e| ipc_error("folder_cover_image: read_dir", e, "could not list folder"))?;
+    let raw_dir = Path::new(path);
+    // Track the smallest key seen rather than collecting + sorting the whole folder:
+    // a cover only ever needs one entry, and this runs per folder tile on screen.
+    let mut best: Option<(String, String)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().into_owned();
+        if name_str.starts_with('.') {
+            continue;
+        }
+        let entry_path = entry.path();
+        if !entry_path.is_file() || !has_gallery_image_ext(&entry_path) {
+            continue;
+        }
+        let key = name_str.to_lowercase();
+        if best.as_ref().map(|(k, _)| key < *k).unwrap_or(true) {
+            best = Some((key, raw_dir.join(&name).to_string_lossy().into_owned()));
+        }
+    }
+    Ok(best.map(|(_, full)| full))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1422,6 +1543,8 @@ pub fn run() {
             remux_ts,
             list_folder_videos,
             list_folder_images,
+            list_folder_entries,
+            folder_cover_image,
             media_thumbnail,
             prepare_thumb_cache,
             get_hwaccel,
@@ -2045,6 +2168,142 @@ mod tests {
             list_folder_images_impl(&allow, media.to_str().unwrap()),
             Err("path not allowed".to_string())
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_folder_entries_returns_subfolders_alongside_images() {
+        let base = temp_root("gallery-entries");
+        let media = base.join("photos");
+        fs::create_dir_all(&media).unwrap();
+        for name in ["b.jpg", "a.png", "clip.mp4", "notes.txt"] {
+            fs::write(media.join(name), b"x").unwrap();
+        }
+        for dir in ["Sub-One", "Sub-Two", ".hidden"] {
+            fs::create_dir_all(media.join(dir)).unwrap();
+        }
+
+        let allow = AllowList::default();
+        allow
+            .0
+            .lock()
+            .unwrap()
+            .insert(fs::canonicalize(&media).unwrap());
+
+        let mut got = list_folder_entries_impl(&allow, media.to_str().unwrap()).unwrap();
+        got.folders.sort();
+        got.images.sort();
+
+        let names = |v: &Vec<String>| -> Vec<String> {
+            v.iter()
+                .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        // gallery-002: subdirectories now come back in their OWN list (the images
+        // list is unchanged from gallery-001 — no video, no .txt, no directory).
+        // A dot-prefixed directory is skipped: those are tool/cache dirs, not albums.
+        assert_eq!(names(&got.folders), vec!["Sub-One", "Sub-Two"]);
+        assert_eq!(names(&got.images), vec!["a.png", "b.jpg"]);
+        // Both lists are rooted at the RAW opened dir, so each round-trips through
+        // convertFileSrc and the asset-protocol scope grant.
+        assert!(got
+            .folders
+            .iter()
+            .chain(got.images.iter())
+            .all(|p| Path::new(p).parent() == Some(media.as_path())));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_folder_entries_returns_a_subfolder_of_an_authorized_root() {
+        // Descending is the whole point of gallery-002: the parent grant already
+        // covers the subtree (path_within_roots is a prefix check), so opening a
+        // sub-gallery needs no new authorization.
+        let base = temp_root("gallery-descend");
+        let media = base.join("photos");
+        let sub = media.join("Sub-One");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(media.join("top.jpg"), b"x").unwrap();
+        fs::write(sub.join("inner.png"), b"x").unwrap();
+
+        let allow = AllowList::default();
+        allow
+            .0
+            .lock()
+            .unwrap()
+            .insert(fs::canonicalize(&media).unwrap()); // only the PARENT
+
+        let got = list_folder_entries_impl(&allow, sub.to_str().unwrap()).unwrap();
+        assert!(got.folders.is_empty());
+        assert_eq!(
+            got.images
+                .iter()
+                .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec!["inner.png"]
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_folder_entries_denies_an_unauthorized_folder() {
+        let base = temp_root("gallery-entries-deny");
+        let media = base.join("photos");
+        fs::create_dir_all(media.join("Sub-One")).unwrap();
+        let allow = AllowList::default();
+        assert_eq!(
+            list_folder_entries_impl(&allow, media.to_str().unwrap()),
+            Err("path not allowed".to_string())
+        );
+        // ...and the subfolder is denied too when nothing above it is authorized.
+        assert_eq!(
+            list_folder_entries_impl(&allow, media.join("Sub-One").to_str().unwrap()),
+            Err("path not allowed".to_string())
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn folder_cover_image_picks_the_first_image_or_none() {
+        let base = temp_root("gallery-cover");
+        let media = base.join("photos");
+        let empty = base.join("empty");
+        fs::create_dir_all(&media).unwrap();
+        fs::create_dir_all(&empty).unwrap();
+        // Deliberately written out of order, and with a non-image sorting first.
+        for name in ["zebra.png", "apple.jpg", "aardvark.txt"] {
+            fs::write(media.join(name), b"x").unwrap();
+        }
+        fs::create_dir_all(media.join("aaa-subdir")).unwrap();
+        fs::write(empty.join("notes.txt"), b"x").unwrap();
+
+        let allow = AllowList::default();
+        let mut roots = allow.0.lock().unwrap();
+        roots.insert(fs::canonicalize(&media).unwrap());
+        roots.insert(fs::canonicalize(&empty).unwrap());
+        drop(roots);
+
+        // The cover is the first IMAGE by case-insensitive name — the .txt and the
+        // subdirectory (both of which sort earlier) are not candidates.
+        let cover = folder_cover_image_impl(&allow, media.to_str().unwrap()).unwrap();
+        assert_eq!(
+            Path::new(cover.as_deref().unwrap())
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+            "apple.jpg"
+        );
+        // A folder with no images has no cover — the tile keeps its folder glyph
+        // rather than showing a broken image.
+        assert_eq!(folder_cover_image_impl(&allow, empty.to_str().unwrap()), Ok(None));
+        // Same deny-by-default gate as every other listing command.
+        assert_eq!(
+            folder_cover_image_impl(&AllowList::default(), media.to_str().unwrap()),
+            Err("path not allowed".to_string())
+        );
+
         let _ = fs::remove_dir_all(&base);
     }
 
