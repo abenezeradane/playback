@@ -956,6 +956,7 @@ function galleryNavEntry(): NavEntry {
   const items = ui.galleryItems;
   const folder = ui.galleryFolder;
   const scrollTop = document.querySelector(".gallery__body")?.scrollTop ?? 0;
+  const cursor = ui.galleryIndex; // ux-004: come back to the tile you opened
   return {
     label: `gallery:${folder}`,
     restore: () => {
@@ -963,6 +964,7 @@ function galleryNavEntry(): NavEntry {
       ui.galleryFolder = folder;
       ui.galleryError = "";
       ui.galleryLoading = false;
+      ui.galleryIndex = cursor;
       clearImageView();
       ui.view = "gallery";
       document.title = `${folder || "Gallery"} — Playback`;
@@ -971,6 +973,12 @@ function galleryNavEntry(): NavEntry {
       void tick().then(() => {
         const body = document.querySelector(".gallery__body");
         if (body) body.scrollTop = scrollTop;
+        // Put keyboard focus back on the tile that was opened, so Back leaves the
+        // user exactly where they were rather than at the top of the grid.
+        if (cursor >= 0) {
+          const grid = document.getElementById("gallery-grid");
+          (grid?.children[cursor] as HTMLElement | undefined)?.focus({ preventScroll: true });
+        }
       });
     },
   };
@@ -2849,7 +2857,7 @@ function showImageError(): void {
 /**
  * Build the grid's items (perf-005).
  *
- * `thumbSrc` starts EMPTY and is filled in later by `fillGalleryThumbs`. It used
+ * `thumbSrc` starts EMPTY and is filled in by the viewport-driven pipeline. It used
  * to be `convertFileSrc(originalPath)`, which made every ~200 px tile decode the
  * full-resolution original — on a folder of 51-megapixel photos that measured as
  * 2.6 s of main-thread stalls (worst single block 1130 ms) and hundreds of MB of
@@ -2863,40 +2871,170 @@ function toGalleryItems(items: QueueItem[]): GalleryItem[] {
  *  this trades wall-clock against not swamping the machine mid-browse. */
 const THUMB_CONCURRENCY = 4;
 
-/** Invalidates an in-flight thumbnail fill when the gallery changes underneath it. */
+/** Invalidates in-flight thumbnail work when the gallery changes underneath it. */
 let galleryToken = 0;
 
-/**
- * Fill in each tile's thumbnail in the background, newest-visible-first order,
- * with bounded concurrency. Each thumbnail is rendered ONCE by the native sidecar
- * and cached on disk, so a second visit to the same folder is served from cache.
- * A per-item failure falls back to the original file, which is what the grid used
- * to do for everything — degraded, never broken.
- */
-async function fillGalleryThumbs(token: number): Promise<void> {
-  const end = perfSpan("gallery.thumbs");
-  await tauriInvoke("prepare_thumb_cache", {}).catch(() => {
-    /* no cache dir — each thumbnail request then fails and falls back below */
+// ---------------------------------------------------------------------------
+// Viewport-driven thumbnail rendering (ux-004)
+//
+// perf-005 rendered every thumbnail in the folder, in index order, on open. That
+// is fine for 63 images and badly wrong for a big folder: measured on a 1200-image
+// folder it issued 1200 sidecar renders totalling 60.6 s of work, when only ~30
+// tiles are ever on screen. (The same measurement showed the GRID itself is not a
+// problem — 1200 tiles render in 1.3 ms with no main-thread blocks — so DOM
+// virtualization was measured to be unnecessary and deliberately not built.)
+//
+// Tiles now request their thumbnail only as they approach the viewport, still at
+// bounded concurrency, so cost scales with what the user actually looks at.
+// ---------------------------------------------------------------------------
+
+let thumbObserver: IntersectionObserver | null = null;
+let thumbQueue: number[] = [];
+let thumbActive = 0;
+
+/** Tear down the pipeline for the previous gallery. */
+function resetThumbPipeline(): void {
+  thumbObserver?.disconnect();
+  thumbObserver = null;
+  thumbQueue = [];
+  thumbActive = 0;
+}
+
+/** Prime the disk cache once per gallery open, then let the observer drive. */
+function startGalleryThumbs(token: number): void {
+  resetThumbPipeline();
+  void tauriInvoke("prepare_thumb_cache", {}).catch(() => {
+    /* no cache dir — each request then fails and falls back to the original */
   });
-  const { convertFileSrc } = await import("@tauri-apps/api/core");
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const i = next++;
-      if (i >= ui.galleryItems.length || token !== galleryToken) return;
-      const item = ui.galleryItems[i];
-      if (!item || item.thumbSrc) continue;
-      const thumb = await tauriInvoke<string>("image_thumbnail", { path: item.path }).catch(
-        () => null,
-      );
-      if (token !== galleryToken) return;
-      const current = ui.galleryItems[i];
-      if (!current || current.path !== item.path) continue; // list changed under us
-      current.thumbSrc = convertFileSrc(thumb ?? item.path);
-    }
+  void token;
+}
+
+/**
+ * Svelte action on each tile: render this tile's thumbnail once it comes within
+ * a screenful of the viewport. One-shot — the tile is unobserved as soon as it
+ * qualifies, so scrolling back and forth never re-queues it.
+ */
+export function galleryTile(node: HTMLElement, index: number): { destroy(): void } {
+  node.dataset.galleryIndex = String(index);
+  if (!thumbObserver) {
+    thumbObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const el = entry.target as HTMLElement;
+          thumbObserver?.unobserve(el);
+          enqueueThumb(Number(el.dataset.galleryIndex));
+        }
+      },
+      // Scroll container, plus a screenful of lead-in so tiles are already filled
+      // by the time they scroll into view.
+      { root: document.querySelector(".gallery__body"), rootMargin: "600px 0px" },
+    );
+  }
+  thumbObserver.observe(node);
+  return {
+    destroy(): void {
+      thumbObserver?.unobserve(node);
+    },
   };
-  await Promise.all(Array.from({ length: THUMB_CONCURRENCY }, worker));
-  if (token === galleryToken) end(String(ui.galleryItems.length));
+}
+
+function enqueueThumb(index: number): void {
+  const item = ui.galleryItems[index];
+  if (!item || item.thumbSrc) return;
+  thumbQueue.push(index);
+  pumpThumbs();
+}
+
+function pumpThumbs(): void {
+  while (thumbActive < THUMB_CONCURRENCY && thumbQueue.length > 0) {
+    void renderThumb(thumbQueue.shift() as number);
+  }
+}
+
+/**
+ * Render one tile's thumbnail natively and swap it in. A failure falls back to
+ * the original file — the behavior the grid had for everything before perf-005:
+ * degraded (a big decode for that one tile), never broken.
+ */
+async function renderThumb(index: number): Promise<void> {
+  const token = galleryToken;
+  const item = ui.galleryItems[index];
+  if (!item || item.thumbSrc) return;
+  thumbActive++;
+  try {
+    const thumb = await tauriInvoke<string>("image_thumbnail", { path: item.path }).catch(
+      () => null,
+    );
+    if (token !== galleryToken) return;
+    const current = ui.galleryItems[index];
+    if (!current || current.path !== item.path) return; // list changed under us
+    const { convertFileSrc } = await import("@tauri-apps/api/core");
+    current.thumbSrc = convertFileSrc(thumb ?? item.path);
+  } finally {
+    thumbActive--;
+    if (token === galleryToken) pumpThumbs();
+  }
+}
+
+// --- Grid keyboard navigation (ux-004) -------------------------------------
+
+/** Columns currently laid out, derived from the DOM (the grid is responsive). */
+function galleryColumns(): number {
+  const grid = document.getElementById("gallery-grid");
+  const tiles = grid?.children;
+  if (!tiles || tiles.length === 0) return 1;
+  const firstTop = (tiles[0] as HTMLElement).offsetTop;
+  let cols = 0;
+  for (let i = 0; i < tiles.length; i++) {
+    if ((tiles[i] as HTMLElement).offsetTop !== firstTop) break;
+    cols++;
+  }
+  return Math.max(1, cols);
+}
+
+/** Move the grid cursor, scroll it into view, and give it real DOM focus (so the
+ *  ux-003 focus ring shows and Enter/Space activate it natively). */
+function focusGalleryTile(index: number): void {
+  const count = ui.galleryItems.length;
+  if (count === 0) return;
+  const next = Math.max(0, Math.min(count - 1, index));
+  ui.galleryIndex = next;
+  void tick().then(() => {
+    const grid = document.getElementById("gallery-grid");
+    const el = grid?.children[next] as HTMLElement | undefined;
+    el?.focus({ preventScroll: true });
+    el?.scrollIntoView({ block: "nearest" });
+  });
+}
+
+/** Arrow/Home/End navigation inside the grid. Returns true when handled. */
+function handleGalleryKey(e: KeyboardEvent): boolean {
+  if (ui.galleryItems.length === 0) return false;
+  const cols = galleryColumns();
+  const cur = ui.galleryIndex < 0 ? 0 : ui.galleryIndex;
+  switch (e.key) {
+    case "ArrowRight":
+      focusGalleryTile(cur + 1);
+      return true;
+    case "ArrowLeft":
+      focusGalleryTile(cur - 1);
+      return true;
+    case "ArrowDown":
+      focusGalleryTile(cur + cols);
+      return true;
+    case "ArrowUp":
+      focusGalleryTile(cur - cols);
+      return true;
+    case "Home":
+      focusGalleryTile(0);
+      return true;
+    case "End":
+      focusGalleryTile(ui.galleryItems.length - 1);
+      return true;
+    default:
+      return false;
+  }
 }
 
 /** Open the Gallery grid for the CURRENT photo's folder, reusing the sibling
@@ -2918,9 +3056,10 @@ export async function openGalleryFromImage(): Promise<void> {
   ui.view = "gallery";
   document.title = `${folder || "Gallery"} — Playback`;
   const token = ++galleryToken;
+  ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
   ui.galleryItems = toGalleryItems(items);
   perfMark("gallery.items", String(ui.galleryItems.length)); // perf-005
-  void fillGalleryThumbs(token);
+  startGalleryThumbs(token);
 }
 
 /** Open the Gallery grid for an explicitly chosen folder (Home's "Open folder"). */
@@ -2946,8 +3085,9 @@ export async function openGalleryForFolder(path: string): Promise<void> {
     const items = toGalleryItems(raw);
     if (ui.view !== "gallery" || ui.galleryFolder !== label) return; // superseded by a newer open
     ui.galleryItems = items;
+    ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
     perfMark("gallery.items", String(items.length)); // perf-005
-    void fillGalleryThumbs(token);
+    startGalleryThumbs(token);
     if (ui.galleryItems.length === 0) ui.galleryError = "No supported images in this folder.";
   } catch (err) {
     if (ui.view === "gallery" && ui.galleryFolder === label) {
@@ -2971,8 +3111,11 @@ export async function openFolderDialog(): Promise<void> {
 
 /** Click a tile in the Gallery grid: open that photo in the single-image viewer. */
 export function openGalleryItem(item: GalleryItem): void {
-  // ux-001: remember the grid (items + scroll) so Back returns to it in place
-  // rather than dumping the user on the home screen.
+  // ux-004: record which tile this was, so Back restores the cursor onto it.
+  const index = ui.galleryItems.indexOf(item);
+  if (index >= 0) ui.galleryIndex = index;
+  // ux-001: remember the grid (items + scroll + cursor) so Back returns to it in
+  // place rather than dumping the user on the home screen.
   pushNav(galleryNavEntry());
   void loadFromPath(item.path);
 }
@@ -3322,6 +3465,16 @@ function wireKeyboard(): void {
 
     if (imageViewActive() && !e.ctrlKey && !e.altKey && !e.metaKey) {
       if (handleImageKey(e)) return;
+    }
+
+    // ux-004: arrow/Home/End navigation inside the gallery grid. Checked before
+    // the Esc branch so Esc still backs out, and before the player transport keys
+    // so the arrows do not also seek a (paused, hidden) video.
+    if (ui.view === "gallery" && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (handleGalleryKey(e)) {
+        e.preventDefault();
+        return;
+      }
     }
 
     // ux-001: Esc backs out one level from the still-image and gallery views,

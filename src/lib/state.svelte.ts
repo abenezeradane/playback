@@ -201,6 +201,11 @@ export const ui = $state({
   galleryFolder: "",
   galleryLoading: false,
   galleryError: "",
+  // ux-004: the grid's keyboard cursor. Arrow keys move it, Enter opens it, and
+  // it drives a roving tabindex so Tab enters/leaves the grid as ONE stop
+  // instead of walking through every tile (a folder of thousands would otherwise
+  // be a tab trap). -1 until the grid is first focused.
+  galleryIndex: -1,
 
   // --- Livestream · Unavailable (frame 04b) ---
   liveTitle: "Livestream",

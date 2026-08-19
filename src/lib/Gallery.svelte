@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
-  import { goBack, openGalleryItem } from "./controller";
+  import { goBack, openGalleryItem, galleryTile } from "./controller";
 </script>
 
 <!-- ===================== GALLERY GRID (gallery-001) ===================== -->
@@ -42,8 +42,19 @@
       </div>
     {:else}
       <div id="gallery-grid" class="gallery__grid">
-        {#each ui.galleryItems as item (item.path)}
-          <button type="button" class="gallery-tile" title={item.name} onclick={() => openGalleryItem(item)}>
+        {#each ui.galleryItems as item, i (item.path)}
+          <!-- ux-004: `galleryTile` renders this tile's thumbnail only once it
+               nears the viewport, and the roving tabindex makes the whole grid a
+               single Tab stop (arrows move within it) so a folder of thousands is
+               not a tab trap. -->
+          <button
+            type="button"
+            class="gallery-tile"
+            title={item.name}
+            tabindex={i === (ui.galleryIndex < 0 ? 0 : ui.galleryIndex) ? 0 : -1}
+            use:galleryTile={i}
+            onclick={() => openGalleryItem(item)}
+          >
             <!-- perf-005: thumbSrc is filled in by the background thumbnail pass,
                  so a tile shows a quiet placeholder until its cached JPEG exists
                  rather than blocking the grid on a full-resolution decode. -->
