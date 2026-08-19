@@ -3149,12 +3149,15 @@ async function renderTilePoster(
   token: number,
 ): Promise<void> {
   let source: string | null = item.path;
-  if (item.kind === "folder") {
+  // gallery-004: an archive tile has no cover of its own yet either — treated
+  // like a folder here so it bails to its glyph instead of trying to decode
+  // the archive file itself as an image (Task 8 supplies the real cover).
+  if (item.kind === "folder" || item.kind === "archive") {
     source = await tauriInvoke<string | null>("folder_cover_image", {
       path: item.path,
     }).catch(() => null);
     if (token !== galleryToken) return;
-    if (!source) return; // no cover — the folder glyph stands on its own
+    if (!source) return; // no cover — the folder/archive glyph stands on its own
   }
   const thumb = await tauriInvoke<string>("media_thumbnail", { path: source }).catch(
     () => null,
@@ -3162,8 +3165,9 @@ async function renderTilePoster(
   if (token !== galleryToken) return;
   const current = ui.galleryItems[index];
   if (!current || current.path !== item.path) return; // list changed under us
-  // A folder never falls back to its own path (a directory is not an image).
-  const src = thumb ?? (current.kind === "folder" ? null : item.path);
+  // A folder never falls back to its own path (a directory is not an image) —
+  // nor does an archive (an archive file is not an image either).
+  const src = thumb ?? (current.kind === "folder" || current.kind === "archive" ? null : item.path);
   if (!src) return;
   const { convertFileSrc } = await import("@tauri-apps/api/core");
   current.thumbSrc = convertFileSrc(src);
@@ -3371,11 +3375,13 @@ export async function openArchiveGallery(
     perfMark("gallery.items", String(items.length));
     if (items.length === 0) ui.galleryError = "Nothing to show in this archive.";
   } catch (err) {
-    if (ui.view === "gallery" && ui.galleryArchive === archive) {
+    if (ui.view === "gallery" && ui.galleryArchive === archive && ui.galleryInner === inner) {
       ui.galleryError = `Could not open this archive: ${String(err)}`;
     }
   } finally {
-    if (ui.view === "gallery" && ui.galleryArchive === archive) ui.galleryLoading = false;
+    if (ui.view === "gallery" && ui.galleryArchive === archive && ui.galleryInner === inner) {
+      ui.galleryLoading = false;
+    }
   }
 }
 
