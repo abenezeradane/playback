@@ -1004,7 +1004,7 @@ export function sortPathsNatural(paths: string[]): string[] {
 export interface GalleryNode {
   path: string;
   name: string;
-  kind: "folder" | "image" | "video";
+  kind: "folder" | "image" | "video" | "archive";
 }
 
 /** Trailing path segment of `path`, for either separator. */
@@ -1023,36 +1023,48 @@ function pathLeaf(path: string): string {
  * each. A camera roll interleaves the two by name (IMG_001.jpg, IMG_002.mp4), and
  * sorting by kind first would tear that sequence apart.
  *
- * Pure; no input array is mutated. `videos` is optional so the gallery-002 call
- * shape still means "no videos".
+ * gallery-004: archives join the FOLDERS block and natural-sort together with
+ * real folders, rather than forming a block of their own. An archive is a
+ * directory to a reader, so `book.cbz` belongs exactly where a folder named
+ * `book` would be — a reader scanning for it looks there.
+ *
+ * Pure; no input array is mutated. `videos` and `archives` are optional so the
+ * older call shapes still mean "none of those".
  */
 export function orderGalleryEntries(
   folders: string[],
   images: string[],
   videos: string[] = [],
+  archives: string[] = [],
 ): GalleryNode[] {
   const nodes = (paths: string[], kind: GalleryNode["kind"]): GalleryNode[] =>
     paths.map((path) => ({ path, name: pathLeaf(path), kind }));
   const sorted = (list: GalleryNode[]): GalleryNode[] =>
     [...list].sort((a, b) => compareNatural(a.path, b.path));
   return [
-    ...sorted(nodes(folders, "folder")),
+    ...sorted([...nodes(folders, "folder"), ...nodes(archives, "archive")]),
     ...sorted([...nodes(images, "image"), ...nodes(videos, "video")]),
   ];
 }
 
 /**
  * The Gallery header's one-line summary of what a folder holds — "2 folders ·
- * 12 photos · 3 videos" — omitting whichever kinds are absent, so a plain photo
- * folder still reads exactly as it did before gallery-002/003 added the others.
+ * 1 archive · 12 photos · 3 videos" — omitting whichever kinds are absent, so a plain photo
+ * folder still reads exactly as it did before gallery-002/003/004 added the others.
  *
  * An entirely empty folder falls back to "0 photos" rather than an empty string,
  * so the header never renders as a bare separator. Pure.
  */
-export function galleryMeta(folders: number, photos: number, videos: number): string {
+export function galleryMeta(
+  folders: number,
+  photos: number,
+  videos: number,
+  archives = 0,
+): string {
   const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
   const parts: string[] = [];
   if (folders > 0) parts.push(plural(folders, "folder"));
+  if (archives > 0) parts.push(plural(archives, "archive"));
   if (photos > 0) parts.push(plural(photos, "photo"));
   if (videos > 0) parts.push(plural(videos, "video"));
   return parts.length > 0 ? parts.join(" · ") : "0 photos";

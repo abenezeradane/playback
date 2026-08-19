@@ -982,6 +982,43 @@ describe("folder queue / playlist (play-013)", () => {
         { path: "C:/P/a.png", name: "a.png", kind: "image" },
       ]);
     });
+    it("sorts archives among the folders, not as their own block (gallery-004)", () => {
+      const nodes = orderGalleryEntries(
+        ["C:/P/Zeta", "C:/P/Alpha"],
+        ["C:/P/m-1.jpg"],
+        [],
+        ["C:/P/book.cbz"],
+      );
+      // An archive IS a directory to a reader, so it sorts WITH the folders by
+      // name — between Alpha and Zeta here. Giving archives their own block
+      // would put book.cbz after Zeta, and sorting it with the media would put
+      // it after m-1.jpg; both are wrong.
+      expect(nodes).toEqual([
+        { path: "C:/P/Alpha", name: "Alpha", kind: "folder" },
+        { path: "C:/P/book.cbz", name: "book.cbz", kind: "archive" },
+        { path: "C:/P/Zeta", name: "Zeta", kind: "folder" },
+        { path: "C:/P/m-1.jpg", name: "m-1.jpg", kind: "image" },
+      ]);
+    });
+    it("keeps the gallery-002/003 call shapes working (gallery-004)", () => {
+      // Omitting `archives` entirely must behave exactly as before.
+      expect(orderGalleryEntries([], ["C:/P/a.png"], ["C:/P/b.mp4"])).toEqual([
+        { path: "C:/P/a.png", name: "a.png", kind: "image" },
+        { path: "C:/P/b.mp4", name: "b.mp4", kind: "video" },
+      ]);
+      expect(orderGalleryEntries([], [], [], ["C:/P/only.cbz"])).toEqual([
+        { path: "C:/P/only.cbz", name: "only.cbz", kind: "archive" },
+      ]);
+    });
+    it("counts archives in the header summary (gallery-004)", () => {
+      // The exact string the smoke asserts against the fixture folder.
+      expect(galleryMeta(2, 1, 0, 1)).toBe("2 folders · 1 archive · 1 photo");
+      expect(galleryMeta(0, 0, 0, 3)).toBe("3 archives");
+      expect(galleryMeta(1, 2, 3, 4)).toBe("1 folder · 4 archives · 2 photos · 3 videos");
+      // Omitting the count is the gallery-003 call shape, unchanged.
+      expect(galleryMeta(1, 2, 3)).toBe("1 folder · 2 photos · 3 videos");
+      expect(galleryMeta(0, 0, 0)).toBe("0 photos");
+    });
     it("handles either gallery block being empty, and backslash paths", () => {
       // A folder holding only sub-folders is a legitimate gallery, not an error.
       expect(orderGalleryEntries(["C:\\P\\Only"], [])).toEqual([
