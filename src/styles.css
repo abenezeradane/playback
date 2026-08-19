@@ -2533,6 +2533,93 @@ body {
   }
 }
 
+/* ===================== FOCUS + PRESS FEEDBACK (ux-003) =====================
+   Audited state before this block: 78 buttons, 40 :hover rules, but only 3
+   :focus-visible rules and 10 :active rules. Keyboard focus fell through to
+   Chromium's default ring — present, but a thin hairline that reads poorly on
+   this dark glass palette — and the one custom treatment that existed used
+   --hairline-strong (rgba(255,255,255,0.16)), far below the 3:1 contrast a focus
+   indicator needs to actually do its job.
+
+   The ring is WHITE, not an accent: the token block states saturated accents are
+   "illustration/semantic only, never on chrome", and chrome here is monochrome.
+   `outline` (not box-shadow) so it follows each control's border-radius and is
+   never clipped by a rounded parent; the offset keeps it legible against both the
+   dark canvas and the white primary pill. */
+.pill:focus-visible,
+.iconbtn:focus-visible,
+.glass-btn:focus-visible,
+.recent-card:focus-visible,
+.gallery-tile:focus-visible,
+.dropzone:focus-visible,
+.home__openfile:focus-visible,
+.recent__clear:focus-visible,
+.imgview__navbtn:focus-visible,
+.cut__tbtn:focus-visible,
+.cut__play:focus-visible,
+.cut__opt:focus-visible,
+.cut__chip:focus-visible,
+.ts-panel__addbtn:focus-visible,
+.ts-panel__clear:focus-visible,
+.ts-list__jump:focus-visible,
+.ts-list__remove:focus-visible,
+.ts-list__edit-btn:focus-visible,
+.pl-card__act:focus-visible,
+.pl-card__open:focus-visible,
+.pl-item__move:focus-visible,
+.pl-recent__add:focus-visible,
+.next-prompt__btn:focus-visible,
+.ts-panel__input:focus-visible,
+.pl-editor__name:focus-visible {
+  outline: 2px solid var(--on-dark);
+  outline-offset: 2px;
+}
+
+/* The pre-existing next-prompt ring was the weak 16%-white one; it now uses the
+   shared treatment above, so drop its bespoke low-contrast shadow. */
+.next-prompt__btn:focus-visible {
+  box-shadow: none;
+}
+
+/* Press feedback for the controls that had none — a click should confirm itself
+   before the action's result appears. Compact buttons take the same scale(0.97)
+   the pill/iconbtn family already used; the full-width chapter row dims instead,
+   because scaling a list row reads as a glitch rather than a press. */
+.home__openfile:active,
+.recent__clear:active,
+.cut__chip:active,
+.ts-panel__addbtn:active,
+.ts-panel__clear:active,
+.ts-list__remove:active,
+.ts-list__edit-btn:active,
+.pl-card__act:active,
+.pl-card__open:active,
+.pl-recent__add:active,
+.next-prompt__btn:active,
+.pl-item__move:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.ts-list__jump:active {
+  background: var(--hairline-soft);
+}
+
+/* A disabled control must not look identical to a live one. .pill is the gap the
+   audit found: the playlist "play" CTA is disabled on an empty playlist. */
+.pill:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.pill:disabled:hover {
+  background: var(--primary); /* cancel the hover lift — nothing will happen */
+}
+
+.pill--ghost:disabled:hover {
+  background: var(--surface-elevated);
+  border-color: var(--hairline);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .gallery-tile__img,
   .gallery-tile__placeholder,
