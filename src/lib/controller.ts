@@ -3380,6 +3380,8 @@ export async function openFileDialog(): Promise<void> {
 // fullscreen instead. Defer the play/pause by the double-click window so a fast
 // second click can cancel it and go fullscreen.
 let videoClickTimer: number | null = null;
+/** Same single-vs-double discrimination for the image viewer (ui-007). */
+let imageClickTimer: number | null = null;
 const DOUBLE_CLICK_MS = 250;
 export function onVideoClick(): void {
   if (videoClickTimer !== null) {
@@ -3392,6 +3394,31 @@ export function onVideoClick(): void {
     videoClickTimer = null;
     if (ui.cutMode) cutPlayPause();
     else doTogglePlay();
+  }, DOUBLE_CLICK_MS);
+}
+
+/**
+ * Click on the picture in the image viewer (ui-007).
+ *
+ * Mirrors `onVideoClick`: double-click toggles fullscreen. The image viewer had no
+ * click handling at all, so double-clicking a photo or GIF did nothing while the
+ * same gesture worked on video — the inconsistency the user reported.
+ *
+ * The single-click half only does something where there is something to do: an
+ * ANIMATED image toggles play/pause (matching the video), a still does nothing
+ * rather than inventing a gesture (no advance-on-click, which would fight the
+ * prev/next chevrons sitting on the same surface).
+ */
+export function onImageClick(): void {
+  if (imageClickTimer !== null) {
+    clearTimeout(imageClickTimer);
+    imageClickTimer = null;
+    void doToggleFullscreen();
+    return;
+  }
+  imageClickTimer = window.setTimeout(() => {
+    imageClickTimer = null;
+    if (ui.imgMode === "animated") toggleGifPlay();
   }, DOUBLE_CLICK_MS);
 }
 

@@ -8,6 +8,7 @@
     doPrevPhoto,
     doNextPhoto,
     openGalleryFromImage,
+    onImageClick,
   } from "./controller";
 </script>
 
@@ -37,9 +38,31 @@
 
   <div class="imgview__viewer">
     <!-- Frame-decoded path (Tier 2): the canvas the ImageDecoder frames paint to. -->
-    <canvas id="img-canvas" class="imgview__canvas" aria-hidden="true" hidden={ui.imgCanvasHidden} bind:this={els.imgCanvas}></canvas>
+    <!-- ui-007: double-click the picture for fullscreen, mirroring the video view.
+         The handlers sit on the media elements themselves, not the whole viewer, so
+         the floating prev/next chevrons over the same area are unaffected. -->
+    <canvas
+      id="img-canvas"
+      class="imgview__canvas"
+      aria-hidden="true"
+      hidden={ui.imgCanvasHidden}
+      bind:this={els.imgCanvas}
+      onclick={onImageClick}
+    ></canvas>
     <!-- Native fallback (Tier 1): the WebView animates + loops the GIF itself. -->
-    <img id="img-el" class="imgview__img" alt="" hidden={ui.imgElHidden} bind:this={els.imgEl} />
+    <!-- role="presentation": the picture is decorative chrome for the click target
+         (alt=""), and fullscreen is already reachable from the keyboard via F, so a
+         keyboard handler here would be a redundant tab stop. Mirrors the
+         video-surface div in Player.svelte. -->
+    <img
+      id="img-el"
+      class="imgview__img"
+      alt=""
+      role="presentation"
+      hidden={ui.imgElHidden}
+      bind:this={els.imgEl}
+      onclick={onImageClick}
+    />
     <!-- Error / unsupported state. -->
     <div id="img-error" class="imgview__error" role="alert" hidden={ui.imgErrorHidden}>
       <span class="imgview__error-icon" aria-hidden="true">
