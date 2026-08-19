@@ -57,10 +57,17 @@ pub(crate) fn archive_kind(path: &Path) -> Option<ArchiveKind> {
 /// only before a write: an entry that could escape the mirror directory is never
 /// listed, so it can never be opened either. Rejects absolute paths, drive
 /// letters, UNC prefixes, `.` and `..` components, empty components (`a//b`),
-/// and NUL bytes. Separators are normalized to `/`, and a trailing separator (an
-/// explicit directory entry) is trimmed. Pure.
+/// and NUL bytes. Also rejects any colon, anywhere in the name — not just the
+/// drive-letter position — because on NTFS `name:stream` is Alternate Data
+/// Stream syntax, and letting it through would attach a hidden stream to an
+/// ordinary file instead of creating one. And rejects any component whose stem
+/// (the part before the first `.`) is a Windows reserved device name (`CON`,
+/// `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, case-insensitive, with or
+/// without an extension — `nul.jpg` counts) — materializing one of those opens a
+/// device rather than a file. Separators are normalized to `/`, and a trailing
+/// separator (an explicit directory entry) is trimmed. Pure.
 pub(crate) fn sanitize_entry_path(raw: &str) -> Option<String> {
-    if raw.contains('\0') {
+    if raw.contains('\0') || raw.contains(':') {
         return None;
     }
     let normalized = raw.replace('\\', "/");
@@ -68,9 +75,8 @@ pub(crate) fn sanitize_entry_path(raw: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    // A leading '/' is rooted; a second character of ':' is a drive letter
-    // ("C:/x" and the equally dangerous drive-relative "C:x").
-    if trimmed.starts_with('/') || trimmed.chars().nth(1) == Some(':') {
+    // A leading '/' is rooted (also catches UNC's leading "//").
+    if trimmed.starts_with('/') {
         return None;
     }
     let body = trimmed.strip_suffix('/').unwrap_or(trimmed);
@@ -79,12 +85,44 @@ pub(crate) fn sanitize_entry_path(raw: &str) -> Option<String> {
     }
     let mut parts: Vec<&str> = Vec::new();
     for part in body.split('/') {
-        if part.is_empty() || part == "." || part == ".." {
+        if part.is_empty() || part == "." || part == ".." || is_reserved_device_name(part) {
             return None;
         }
         parts.push(part);
     }
     Some(parts.join("/"))
+}
+
+/// True when `component` (a single, already-split path segment) names a Windows
+/// reserved device — `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`.
+/// Matched on the STEM (the part before the first `.`), case-insensitively,
+/// because Windows treats `nul.jpg` as the same device as `NUL`.
+fn is_reserved_device_name(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or(component);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON" | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 /// One level of an archive: the sub-folders, images and videos directly inside
@@ -275,6 +313,23 @@ mod tests {
         assert_eq!(sanitize_entry_path("a//b.jpg"), None); // empty component
         assert_eq!(sanitize_entry_path("./a.jpg"), None); // '.' component
         assert_eq!(sanitize_entry_path("a\0b.jpg"), None); // NUL
+
+        // Alternate Data Stream syntax: a colon anywhere, not just the
+        // drive-letter position, would attach a hidden stream to a real file.
+        assert_eq!(sanitize_entry_path("notes.txt:hidden.exe"), None);
+        assert_eq!(sanitize_entry_path("a/C:evil.exe"), None);
+        // Windows reserved device names: matched on the stem, case-insensitive,
+        // with or without an extension.
+        assert_eq!(sanitize_entry_path("CON/evil.exe"), None);
+        assert_eq!(sanitize_entry_path("nul.jpg"), None);
+        assert_eq!(sanitize_entry_path("com1"), None);
+        // A stem with dots must not be mistaken for a reserved name, and an
+        // ordinary hyphenated name must still survive untouched.
+        assert_eq!(sanitize_entry_path("Ch2/p-3.jpg"), Some("Ch2/p-3.jpg".to_string()));
+        assert_eq!(
+            sanitize_entry_path("my.notes.2024.jpg"),
+            Some("my.notes.2024.jpg".to_string())
+        );
     }
 
     #[test]
