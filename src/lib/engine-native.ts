@@ -30,6 +30,7 @@ import {
   type NativePlayerEvent,
   type SeekCoalescer,
 } from "../player-core";
+import { perfEnabled, recordIpc } from "./perf";
 
 /** Minimal TimeRanges stand-in (native local playback has no buffer ranges). */
 export interface TimeRangesLike {
@@ -434,7 +435,21 @@ export class NativeEngine implements EngineSurface {
 
   private mustInvoke(cmd: string, args: Record<string, unknown>): Promise<unknown> {
     if (!this.invoke) return Promise.reject(new Error("engine not initialized"));
-    return this.invoke(cmd, args);
+    // perf-004: the engine owns its own invoke handle, so it has to report its
+    // commands to the trace itself -- otherwise player_load (the bulk of an open)
+    // is invisible in the IPC breakdown.
+    if (!perfEnabled()) return this.invoke(cmd, args);
+    const started = performance.now();
+    return this.invoke(cmd, args).then(
+      (out) => {
+        recordIpc(cmd, performance.now() - started, false);
+        return out;
+      },
+      (err) => {
+        recordIpc(cmd, performance.now() - started, true);
+        throw err;
+      },
+    );
   }
 
   private tryInvoke(cmd: string, args: Record<string, unknown>): Promise<void> {

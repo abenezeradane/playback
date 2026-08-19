@@ -12,6 +12,7 @@
  */
 import { tick } from "svelte";
 import { ui, els, type RecentFile, type QueueItem, type GalleryItem } from "./state.svelte";
+import { initPerf, mark as perfMark, span as perfSpan, recordIpc } from "./perf";
 import {
   createInitialState,
   clamp,
@@ -788,6 +789,7 @@ function syncVideoHole(on: boolean): void {
 /** First presented frame of the current native load — open the hole now (never
  *  earlier, so the desktop can't flash through between load and first frame). */
 function onNativePresented(): void {
+  perfMark("open.firstframe"); // perf-004: end of the user-visible open latency
   if (ui.engineActive === "native" && ui.view === "playing") {
     syncVideoHole(true);
     // The surface div only has a layout box once the hole is open, so this is
@@ -880,6 +882,7 @@ function doNextTimestamp(): void {
 }
 
 export function setPanelOpen(open: boolean): void {
+  perfMark("nav.panel", open ? "on" : "off"); // perf-004
   ui.panelOpen = open;
   if (open) {
     ui.queueOpen = false; // the two right-side panels share a slot
@@ -896,6 +899,7 @@ export function togglePanel(): void {
 
 /** Back button: tear down the current video and return to the home screen. */
 export function goHome(): void {
+  const endClose = perfSpan("close.total"); // perf-004: synchronous teardown cost
   syncVideoHole(false); // close the native hole before the view swaps
   video.pause();
   setCutMode(false);
@@ -921,6 +925,7 @@ export function goHome(): void {
   ui.galleryLoading = false;
   renderRecents();
   document.title = "Playback";
+  endClose();
 }
 
 // --- Keyboard shortcuts overlay (frame 05) ---
@@ -1067,7 +1072,18 @@ const READ_CHUNK_BYTES = 4 * 1024 * 1024;
 
 async function tauriInvoke<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(cmd, args);
+  // perf-004: every command is timed at this single funnel, so a slow open can be
+  // attributed to a named native command instead of guessed at. Inert unless the
+  // native sink is enabled (see perf.ts).
+  const started = performance.now();
+  try {
+    const out = await invoke<T>(cmd, args);
+    recordIpc(cmd, performance.now() - started, false);
+    return out;
+  } catch (err) {
+    recordIpc(cmd, performance.now() - started, true);
+    throw err;
+  }
 }
 
 /**
@@ -1103,6 +1119,7 @@ const CUT_DECK_BUILD_DELAY_MS = 350;
 /** Enter/leave the timeline view. No-op to enter when no video is loaded. */
 export function setCutMode(on: boolean): void {
   if (on && !playerVisible()) return;
+  perfMark("nav.cutMode", on ? "on" : "off"); // perf-004
   ui.cutMode = on;
   if (on) {
     setPanelOpen(false);
@@ -2319,6 +2336,7 @@ function renderRecents(): void {
 }
 
 async function loadFromPath(path: string, fromQueue = false): Promise<void> {
+  perfMark("open.begin", basename(path)); // perf-004: paired with open.firstframe
   currentPath = path;
   closeNextPrompt(); // any pending "Up Next" prompt is moot once a new clip loads
   // A fresh user-initiated open (dialog / drop / Recent / launch arg) leaves any
@@ -2334,10 +2352,12 @@ async function loadFromPath(path: string, fromQueue = false): Promise<void> {
     await openImage(path);
     return;
   }
+  perfMark("open.authorized"); // perf-004: phase boundaries inside the open
   loadTimestampsFor(path);
   try {
     const status = await tauriInvoke<StreamStatus>("stream_status", { path }).catch(() => null);
     const detected = status ? await detectLive(path, status) : "normal";
+    perfMark("open.detected");
     if (detected !== "normal") {
       clearQueue();
       openEmptyLivePlayer(path);
@@ -2350,6 +2370,7 @@ async function loadFromPath(path: string, fromQueue = false): Promise<void> {
       // video…" step. This is the whole point of the engine: the play-016/020
       // preprocessing below exists only for the WebView's <video>.
       loadNative(path, basename(path), parentDir(path));
+      perfMark("open.dispatched");
     } else {
       // WEB engine: some containers the WebView's <video> can't start playing
       // are remuxed to a temp .mp4 via the ffmpeg sidecar first — an MPEG-TS
@@ -3427,6 +3448,8 @@ export function init(): void {
   imgCanvas = els.imgCanvas!;
   imgEl = els.imgEl!;
   tsAddInput = els.tsAddInput!;
+
+  void initPerf(); // perf-004: no-op unless PLAYBACK_PERF_LOG is set
 
   // Resolve the persisted engine choice (native-001) before the first load —
   // loadFromPath awaits this promise, so launch files pick the right engine.

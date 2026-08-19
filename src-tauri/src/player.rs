@@ -16,7 +16,7 @@
 //! * a spontaneous `MPV_EVENT_SHUTDOWN` marks the player dead; the next
 //!   `player_load` reaps it and lazily re-creates the engine.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -208,7 +208,9 @@ fn create_player(app: &tauri::AppHandle) -> Result<Player, String> {
     let mpv = Mpv::create().map_err(|e| ipc_error("player: load libmpv", e, "player unavailable"))?;
 
     // Baseline options (pure, unit-tested), then TEST-ONLY extras, then wid.
-    for (k, v) in mpv::engine_options(crate::read_hwaccel_pref()) {
+    let cache_dir = crate::shader_cache_dir();
+    let cache_str = cache_dir.as_deref().and_then(Path::to_str);
+    for (k, v) in mpv::engine_options(crate::read_hwaccel_pref(), cache_str) {
         mpv.set_option_str(&k, &v)
             .map_err(|e| mpv_err("player: option", e))?;
     }

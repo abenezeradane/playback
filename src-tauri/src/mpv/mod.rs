@@ -328,9 +328,9 @@ unsafe fn read_prop_value(format: c_int, data: *mut c_void) -> PropValue {
 /// (all BEFORE `mpv_initialize`; `wid` is set separately as int64). Pure so the
 /// full option set — including the load-bearing `demuxer-lavf-o` — is pinned by
 /// unit tests.
-pub fn engine_options(hwdec: bool) -> Vec<(String, String)> {
+pub fn engine_options(hwdec: bool, shader_cache_dir: Option<&str>) -> Vec<(String, String)> {
     let s = |a: &str, b: &str| (a.to_string(), b.to_string());
-    vec![
+    let mut opts = vec![
         // Rendering: gpu-next on d3d11 — the modern zero-copy path on Windows.
         s("vo", "gpu-next"),
         s("gpu-context", "d3d11"),
@@ -357,7 +357,19 @@ pub fn engine_options(hwdec: bool) -> Vec<(String, String)> {
         // seeks in a zero-duration OBS/Twitch recording land near the start
         // (verified in FFmpeg mov.c; see docs/native-engine-ipc.md).
         s("demuxer-lavf-o", "use_mfra_for=pts"),
-    ]
+        // PERF (perf-004): skip the extra frame of display latency mpv keeps for
+        // its timing heuristics. Measured -45 ms on first frame; harmless here
+        // because this is a local-file player with no live-stream sync to hold.
+        s("video-latency-hacks", "yes"),
+    ];
+    // PERF (perf-004): gpu-next compiles its libplacebo shaders on first frame,
+    // and without a cache directory it pays that cost on EVERY load — measured
+    // at ~120 ms of the ~320 ms open. Pointing it at a persistent directory
+    // makes the compile a one-time cost for the life of the install.
+    if let Some(dir) = shader_cache_dir {
+        opts.push(s("gpu-shader-cache-dir", dir));
+    }
+    opts
 }
 
 /// Parse the TEST-ONLY `PLAYBACK_MPV_OPTS` env value (`key=value;key=value`)
@@ -413,7 +425,7 @@ mod tests {
     use super::*;
 
     fn opts_map(hwdec: bool) -> std::collections::HashMap<String, String> {
-        engine_options(hwdec).into_iter().collect()
+        engine_options(hwdec, None).into_iter().collect()
     }
 
     #[test]
@@ -442,6 +454,29 @@ mod tests {
     fn engine_options_wire_hwdec_to_the_hwaccel_pref() {
         assert_eq!(opts_map(true).get("hwdec").map(String::as_str), Some("auto-safe"));
         assert_eq!(opts_map(false).get("hwdec").map(String::as_str), Some("no"));
+    }
+
+    /// perf-004: the two options that took a file open from ~320 ms to ~157 ms.
+    /// The shader cache is only set when a directory was resolved — the engine
+    /// must still start (just without the cache) when it could not be created.
+    #[test]
+    fn engine_options_set_the_perf_004_startup_options() {
+        let with_cache: std::collections::HashMap<String, String> =
+            engine_options(true, Some("C:\\cache\\shaders")).into_iter().collect();
+        assert_eq!(
+            with_cache.get("gpu-shader-cache-dir").map(String::as_str),
+            Some("C:\\cache\\shaders")
+        );
+        // Latency hacks are unconditional: they cost nothing for a local player.
+        assert_eq!(with_cache.get("video-latency-hacks").map(String::as_str), Some("yes"));
+        // gpu-next is retained -- the cache is what made it cheap, so there was
+        // no need to fall back to the older `gpu` vo to win the latency back.
+        assert_eq!(with_cache.get("vo").map(String::as_str), Some("gpu-next"));
+
+        // No directory -> no cache option at all (never an empty value, which
+        // mpv would treat as a path).
+        assert!(!opts_map(true).contains_key("gpu-shader-cache-dir"));
+        assert_eq!(opts_map(true).get("video-latency-hacks").map(String::as_str), Some("yes"));
     }
 
     #[test]

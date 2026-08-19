@@ -250,6 +250,62 @@ fn set_engine_pref(engine: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Directory libplacebo (mpv's gpu-next) caches its compiled shaders in (perf-004).
+/// Without it gpu-next recompiles on every load, which measured as ~120 ms of a
+/// ~320 ms file open; with it the compile is paid once for the install. Created on
+/// demand — a failure here is non-fatal, the engine just recompiles as before.
+pub(crate) fn shader_cache_dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+    }?;
+    let dir = base.join(APP_IDENTIFIER).join("shader-cache");
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Perf tracing sink (perf-004). `PLAYBACK_PERF_LOG` names a file the frontend's
+/// trace records are appended to; unset means tracing is OFF and the frontend
+/// never calls `perf_log` at all. Diagnostic-only, and inert in a normal launch.
+fn perf_log_path() -> Option<PathBuf> {
+    std::env::var("PLAYBACK_PERF_LOG")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+}
+
+/// Whether runtime perf tracing is enabled for this launch.
+#[tauri::command]
+fn perf_enabled() -> bool {
+    perf_log_path().is_some()
+}
+
+/// Append a batch of frontend trace records (one JSON object per line).
+#[tauri::command]
+fn perf_log(lines: Vec<String>) -> Result<(), String> {
+    let Some(path) = perf_log_path() else {
+        return Ok(()); // tracing off: accept and discard
+    };
+    use std::io::Write;
+    let mut out = String::with_capacity(lines.len() * 64);
+    for line in lines {
+        // One record per line; strip embedded newlines so the log stays parseable.
+        out.push_str(&line.replace('\n', " "));
+        out.push('\n');
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| ipc_error("perf_log: open", e, "could not write perf log"))?;
+    f.write_all(out.as_bytes())
+        .map_err(|e| ipc_error("perf_log: write", e, "could not write perf log"))?;
+    Ok(())
+}
+
 /// Persist the hardware-acceleration preference (play-010). Written natively so the
 /// next launch can read it before the WebView exists and set the GPU launch flag
 /// accordingly. Takes effect on relaunch.
@@ -1167,6 +1223,8 @@ pub fn run() {
             set_hwaccel,
             get_engine_pref,
             set_engine_pref,
+            perf_enabled,
+            perf_log,
             player::player_engine_status,
             player::player_load,
             player::player_stop,
