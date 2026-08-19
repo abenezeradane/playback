@@ -1507,6 +1507,8 @@ struct FolderEntries {
     folders: Vec<String>,
     images: Vec<String>,
     videos: Vec<String>,
+    /// gallery-004: archives, which the grid shows as folder-like tiles.
+    archives: Vec<String>,
 }
 
 /// List a gallery folder's SUBFOLDERS as well as its images (gallery-002), so the
@@ -1540,6 +1542,7 @@ fn list_folder_entries_impl(allow: &AllowList, path: &str) -> Result<FolderEntri
     let mut folders: Vec<String> = Vec::new();
     let mut images: Vec<String> = Vec::new();
     let mut videos: Vec<String> = Vec::new();
+    let mut archives: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
         // Dot-prefixed entries are tool/cache dirs (.git, .thumbnails), not albums.
@@ -1560,6 +1563,9 @@ fn list_folder_entries_impl(allow: &AllowList, path: &str) -> Result<FolderEntri
                 images.push(full.to_string_lossy().into_owned());
             } else if has_queue_video_ext(&entry_path) {
                 videos.push(full.to_string_lossy().into_owned());
+            } else if archive::has_archive_ext(&entry_path) {
+                // gallery-004: browsable as a directory, so it is a tile.
+                archives.push(full.to_string_lossy().into_owned());
             }
         }
     }
@@ -1567,6 +1573,7 @@ fn list_folder_entries_impl(allow: &AllowList, path: &str) -> Result<FolderEntri
         folders,
         images,
         videos,
+        archives,
     })
 }
 
@@ -1689,6 +1696,9 @@ pub fn run() {
             list_folder_images,
             list_folder_entries,
             folder_cover_image,
+            archive::list_archive_entries,
+            archive::archive_entry_file,
+            archive::archive_cover_entry,
             media_thumbnail,
             video_duration,
             prepare_thumb_cache,
@@ -2493,6 +2503,39 @@ mod tests {
             .videos
             .iter()
             .all(|p| Path::new(p).parent() == Some(media.as_path())));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn list_folder_entries_returns_archives_in_their_own_list() {
+        let base = temp_root("entries-archives");
+        let media = base.join("media");
+        fs::create_dir_all(&media).unwrap();
+        fs::write(media.join("book.cbz"), b"zip").unwrap();
+        fs::write(media.join("PACK.ZIP"), b"zip").unwrap(); // case-insensitive
+        fs::write(media.join("comic.cbr"), b"rar").unwrap();
+        fs::write(media.join("shot.jpg"), b"img").unwrap();
+        fs::write(media.join("clip.mp4"), b"vid").unwrap();
+        fs::write(media.join("notes.txt"), b"txt").unwrap();
+
+        let allow = AllowList::default();
+        allow.0.lock().unwrap().insert(fs::canonicalize(&media).unwrap());
+
+        let got = list_folder_entries_impl(&allow, media.to_str().unwrap()).unwrap();
+        let leaves = |v: &Vec<String>| {
+            let mut out: Vec<String> = v
+                .iter()
+                .map(|p| Path::new(p).file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(leaves(&got.archives), vec!["PACK.ZIP", "book.cbz", "comic.cbr"]);
+        assert_eq!(leaves(&got.images), vec!["shot.jpg"]);
+        assert_eq!(leaves(&got.videos), vec!["clip.mp4"]);
+        // A non-media file is in no list at all.
+        assert!(got.folders.is_empty());
 
         let _ = fs::remove_dir_all(&base);
     }

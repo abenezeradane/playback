@@ -582,6 +582,80 @@ pub(crate) fn ensure_entry(archive: &Path, inner: &str) -> Result<PathBuf, Archi
     Ok(dst)
 }
 
+/// Map an `ArchiveError` to what crosses the IPC boundary (sec-005): a stable,
+/// generic string, with the real cause logged natively.
+fn to_ipc(context: &str, e: ArchiveError) -> String {
+    crate::ipc_error(context, format!("{e:?}"), e.public_message())
+}
+
+/// One level of an archive, as INNER paths (`ch1/page01.jpg`), never cache paths
+/// — the frontend cannot construct a mirror path, only `archive_entry_file` can
+/// mint one. Reads the index only; no entry is decompressed.
+#[tauri::command]
+pub(crate) fn list_archive_entries(
+    allow: tauri::State<'_, crate::AllowList>,
+    archive: String,
+    inner: String,
+) -> Result<ArchiveEntries, String> {
+    // sec-002: the ARCHIVE FILE must already be inside the allow-list. Inner
+    // paths never touch the filesystem outside the mirror, so nothing else here
+    // widens the app's reach.
+    let canonical = crate::ensure_allowed(&allow, &archive)?;
+    let names = archive_index(&canonical).map_err(|e| to_ipc("list_archive_entries", e))?;
+    Ok(archive_level(&names, &inner))
+}
+
+/// Materialize one entry and return its real path, authorizing the directory it
+/// landed in so the WebView may actually load it.
+#[tauri::command]
+pub(crate) fn archive_entry_file(
+    app: tauri::AppHandle,
+    allow: tauri::State<'_, crate::AllowList>,
+    archive: String,
+    inner: String,
+) -> Result<String, String> {
+    let canonical = crate::ensure_allowed(&allow, &archive)?;
+    let file = ensure_entry(&canonical, &inner).map_err(|e| to_ipc("archive_entry_file", e))?;
+    // Authorize the ENTRY'S OWN directory, not just the mirror root: the
+    // asset-protocol grant is non-recursive, so a page inside `ch1/` would
+    // otherwise be readable by the IPC gate (a prefix check) but not loadable by
+    // convertFileSrc.
+    if let Some(dir) = file.parent() {
+        let canonical_dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        crate::authorize_dir(&app, &allow, canonical_dir, Some(dir));
+    }
+    Ok(file.to_string_lossy().into_owned())
+}
+
+/// The inner path of a cover image for an archive (`inner: ""`) or for one folder
+/// inside it. Searches the whole subtree, not just that level, so a `.cbz` whose
+/// pages all live under `ch1/` still gets a picture instead of a bare glyph.
+///
+/// Returns a PATH rather than a rendered thumbnail, for the same reason
+/// `folder_cover_image` does: the tile then goes through the existing
+/// `media_thumbnail` command — one cache, one render pipeline.
+#[tauri::command]
+pub(crate) fn archive_cover_entry(
+    allow: tauri::State<'_, crate::AllowList>,
+    archive: String,
+    inner: String,
+) -> Result<Option<String>, String> {
+    let canonical = crate::ensure_allowed(&allow, &archive)?;
+    let names = archive_index(&canonical).map_err(|e| to_ipc("archive_cover_entry", e))?;
+    let prefix = if inner.is_empty() {
+        String::new()
+    } else {
+        format!("{inner}/")
+    };
+    // Lowest name wins, so a cover is stable across visits rather than depending
+    // on the archive's storage order. Images only: a video cover would cost a
+    // full extraction plus a demux to draw one tile.
+    Ok(names
+        .into_iter()
+        .filter(|n| n.starts_with(&prefix) && has_gallery_image_ext(Path::new(n)))
+        .min_by_key(|n| n.to_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
