@@ -134,6 +134,21 @@ function isMediaPath(path: string): boolean {
  *  Formats ImageDecoder doesn't cover (bmp/avif/ico) return "" so they skip
  *  straight to the native <img> fallback (tryDecodeAnimation bails on an empty
  *  type) — the WebView still displays them fine, just without frame transport. */
+/**
+ * Containers that can carry more than one frame (perf-005).
+ *
+ * Only these justify the whole-file read + `ImageDecoder` path in
+ * `tryDecodeAnimation`. `.png` stays in the list because an APNG is legally named
+ * `.png` and the app must still animate it; JPEG/BMP/ICO cannot animate at all,
+ * and AVIF sequences are not decoded here (a still AVIF renders fine via <img>).
+ */
+const ANIMATABLE_IMAGE_EXTENSIONS = ["gif", "webp", "apng", "png"];
+
+/** True when `path`'s container can hold an animation worth decoding frame-wise. */
+function isAnimatableImagePath(path: string): boolean {
+  return ANIMATABLE_IMAGE_EXTENSIONS.includes(extensionOf(path));
+}
+
 function imageMimeType(path: string): string {
   switch (extensionOf(path)) {
     case "gif":
@@ -2587,6 +2602,7 @@ function clearImageView(): void {
 
 /** Open an animated / still image in the dedicated viewer (play-012). */
 async function openImage(path: string): Promise<void> {
+  perfMark("image.begin", basename(path)); // perf-005
   const token = ++imgToken;
   syncVideoHole(false); // the image viewer paints on the opaque app canvas
   video.pause();
@@ -2631,6 +2647,13 @@ async function openImage(path: string): Promise<void> {
 /** Try to frame-decode the image with WebCodecs ImageDecoder. */
 async function tryDecodeAnimation(path: string, token: number): Promise<boolean> {
   if (typeof ImageDecoder === "undefined") return false;
+  // perf-005: this path reads the WHOLE file over the IPC bridge and decodes it
+  // to a bitmap, which is the right trade only for a container that can actually
+  // animate. JPEG/BMP/ICO never can, so they went through a multi-megabyte read
+  // and a full-resolution decode purely to discover a single frame — measured at
+  // ~246 ms per open on 16-25 MB photos. Those go straight to the <img> tier,
+  // where Chromium decodes off the main thread and at its own scale.
+  if (!isAnimatableImagePath(path)) return false;
   const type = imageMimeType(path);
   if (!type) return false;
   try {
@@ -2665,6 +2688,7 @@ async function tryDecodeAnimation(path: string, token: number): Promise<boolean>
       frame.close();
       frames.push({ bitmap, duration: durationS });
       if (i === 0) {
+        perfMark("image.shown", `decoder ${bitmap.width}x${bitmap.height}`); // perf-005
         ui.imgCanvasHidden = false;
         drawBitmap(bitmap);
       }
@@ -2712,6 +2736,7 @@ function showNativeImage(src: string, token: number): void {
       showImageError();
       return;
     }
+    perfMark("image.shown", `native ${imgEl.naturalWidth}x${imgEl.naturalHeight}`); // perf-005
     ui.imgElHidden = false;
     ui.imgErrorHidden = true;
   };
@@ -2741,17 +2766,64 @@ function showImageError(): void {
 // the normal loadFromPath funnel, so sibling Prev/Next picks up from there too.
 // ---------------------------------------------------------------------------
 
-/** Resolve each item's asset:// src ONCE (not per Svelte render), so
- *  Gallery.svelte stays purely declarative — no Tauri glue in the template. */
-async function toGalleryItems(items: QueueItem[]): Promise<GalleryItem[]> {
+/**
+ * Build the grid's items (perf-005).
+ *
+ * `thumbSrc` starts EMPTY and is filled in later by `fillGalleryThumbs`. It used
+ * to be `convertFileSrc(originalPath)`, which made every ~200 px tile decode the
+ * full-resolution original — on a folder of 51-megapixel photos that measured as
+ * 2.6 s of main-thread stalls (worst single block 1130 ms) and hundreds of MB of
+ * bitmap per tile. The grid now renders instantly with placeholders instead.
+ */
+function toGalleryItems(items: QueueItem[]): GalleryItem[] {
+  return items.map((i) => ({ path: i.path, name: i.name, thumbSrc: "" }));
+}
+
+/** How many thumbnails to render at once. Each is an ffmpeg sidecar process, so
+ *  this trades wall-clock against not swamping the machine mid-browse. */
+const THUMB_CONCURRENCY = 4;
+
+/** Invalidates an in-flight thumbnail fill when the gallery changes underneath it. */
+let galleryToken = 0;
+
+/**
+ * Fill in each tile's thumbnail in the background, newest-visible-first order,
+ * with bounded concurrency. Each thumbnail is rendered ONCE by the native sidecar
+ * and cached on disk, so a second visit to the same folder is served from cache.
+ * A per-item failure falls back to the original file, which is what the grid used
+ * to do for everything — degraded, never broken.
+ */
+async function fillGalleryThumbs(token: number): Promise<void> {
+  const end = perfSpan("gallery.thumbs");
+  await tauriInvoke("prepare_thumb_cache", {}).catch(() => {
+    /* no cache dir — each thumbnail request then fails and falls back below */
+  });
   const { convertFileSrc } = await import("@tauri-apps/api/core");
-  return items.map((i) => ({ path: i.path, name: i.name, thumbSrc: convertFileSrc(i.path) }));
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= ui.galleryItems.length || token !== galleryToken) return;
+      const item = ui.galleryItems[i];
+      if (!item || item.thumbSrc) continue;
+      const thumb = await tauriInvoke<string>("image_thumbnail", { path: item.path }).catch(
+        () => null,
+      );
+      if (token !== galleryToken) return;
+      const current = ui.galleryItems[i];
+      if (!current || current.path !== item.path) continue; // list changed under us
+      current.thumbSrc = convertFileSrc(thumb ?? item.path);
+    }
+  };
+  await Promise.all(Array.from({ length: THUMB_CONCURRENCY }, worker));
+  if (token === galleryToken) end(String(ui.galleryItems.length));
 }
 
 /** Open the Gallery grid for the CURRENT photo's folder, reusing the sibling
  *  queue openImage already built (no extra native call). */
 export async function openGalleryFromImage(): Promise<void> {
   if (ui.photoQueue.length === 0) return;
+  perfMark("gallery.begin", ui.imgMeta || "siblings"); // perf-005
   const folder = ui.imgMeta;
   const items = ui.photoQueue;
   ui.galleryFolder = folder;
@@ -2760,11 +2832,16 @@ export async function openGalleryFromImage(): Promise<void> {
   setShortcutsOpen(false);
   ui.view = "gallery";
   document.title = `${folder || "Gallery"} — Playback`;
-  ui.galleryItems = await toGalleryItems(items);
+  const token = ++galleryToken;
+  ui.galleryItems = toGalleryItems(items);
+  perfMark("gallery.items", String(ui.galleryItems.length)); // perf-005
+  void fillGalleryThumbs(token);
 }
 
 /** Open the Gallery grid for an explicitly chosen folder (Home's "Open folder"). */
 export async function openGalleryForFolder(path: string): Promise<void> {
+  perfMark("gallery.begin", basename(path)); // perf-005
+  const token = ++galleryToken;
   const label = basename(path);
   ui.galleryItems = [];
   ui.galleryFolder = label;
@@ -2778,11 +2855,14 @@ export async function openGalleryForFolder(path: string): Promise<void> {
   try {
     await authorizeMediaDir(path);
     const paths = await tauriInvoke<string[]>("list_folder_images", { path });
+    perfMark("gallery.listed", String(paths?.length ?? 0)); // perf-005
     const sorted = sortPathsNatural(paths ?? []);
     const raw = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
-    const items = await toGalleryItems(raw);
+    const items = toGalleryItems(raw);
     if (ui.view !== "gallery" || ui.galleryFolder !== label) return; // superseded by a newer open
     ui.galleryItems = items;
+    perfMark("gallery.items", String(items.length)); // perf-005
+    void fillGalleryThumbs(token);
     if (ui.galleryItems.length === 0) ui.galleryError = "No supported images in this folder.";
   } catch (err) {
     if (ui.view === "gallery" && ui.galleryFolder === label) {

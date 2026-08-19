@@ -44,7 +44,14 @@
       <div id="gallery-grid" class="gallery__grid">
         {#each ui.galleryItems as item (item.path)}
           <button type="button" class="gallery-tile" title={item.name} onclick={() => openGalleryItem(item)}>
-            <img class="gallery-tile__img" src={item.thumbSrc} alt="" loading="lazy" />
+            <!-- perf-005: thumbSrc is filled in by the background thumbnail pass,
+                 so a tile shows a quiet placeholder until its cached JPEG exists
+                 rather than blocking the grid on a full-resolution decode. -->
+            {#if item.thumbSrc}
+              <img class="gallery-tile__img" src={item.thumbSrc} alt="" loading="lazy" />
+            {:else}
+              <span class="gallery-tile__placeholder" aria-hidden="true"></span>
+            {/if}
             <span class="gallery-tile__name">{item.name}</span>
           </button>
         {/each}

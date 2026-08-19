@@ -1016,6 +1016,158 @@ async fn extract_video_still(
     Ok(base64::engine::general_purpose::STANDARD.encode(&stdout))
 }
 
+// ---------------------------------------------------------------------------
+// Gallery thumbnails (perf-005)
+//
+// The gallery grid used to point each tile's <img src> at the ORIGINAL file, so a
+// folder of 51-megapixel photos made the WebView decode ~200 MB of bitmap per
+// ~200 px tile — measured at 2.6 s of main-thread stalls, worst single block
+// 1130 ms. These commands render a small JPEG once per source, cache it on disk,
+// and hand the frontend a path to THAT instead.
+// ---------------------------------------------------------------------------
+
+/// Longest edge of a generated gallery thumbnail. Sized for a ~200 px grid tile on
+/// a 2x display; small enough that a whole folder of them costs less than ONE
+/// full-resolution decode.
+const THUMB_MAX_PX: u32 = 480;
+
+/// Persistent thumbnail cache directory (alongside the shader cache).
+fn thumb_cache_dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+    }?;
+    let dir = base.join(APP_IDENTIFIER).join("thumb-cache");
+    fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Cache file name for one thumbnail. Same FNV-1a scheme as `remux_output_name`:
+/// keyed on path + size + mtime so an edited or replaced source re-renders rather
+/// than serving a stale tile, and on `max_px` so a size change is not a false hit.
+fn thumb_cache_name(canonical_src: &Path, size: u64, mtime_secs: u64, max_px: u32) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mix = |hash: &mut u64, bytes: &[u8]| {
+        for &b in bytes {
+            *hash ^= u64::from(b);
+            *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    mix(&mut hash, canonical_src.to_string_lossy().as_bytes());
+    mix(&mut hash, &size.to_le_bytes());
+    mix(&mut hash, &mtime_secs.to_le_bytes());
+    mix(&mut hash, &max_px.to_le_bytes());
+    format!("pb-th-{hash:016x}.jpg")
+}
+
+/// Drop thumbnails not touched in 30 days, so the cache cannot grow without bound.
+fn prune_thumb_cache(dir: &Path) {
+    const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("pb-th-") && name.ends_with(".jpg")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|m| m.elapsed().map(|age| age > MAX_AGE).unwrap_or(false))
+            .unwrap_or(false);
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// ffmpeg args rendering ONE downscaled JPEG thumbnail to `dst`. Pure + unit-tested.
+///
+/// `-frames:v 1` takes only the first frame, so an animated GIF/WebP yields a still
+/// poster rather than a re-encoded animation. The scale expression fits the image
+/// INSIDE the box and never upscales a source already smaller than it.
+fn ffmpeg_thumb_args(src: &Path, dst: &Path, max_px: u32) -> Vec<String> {
+    vec![
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-y".into(),
+        "-i".into(),
+        src.to_string_lossy().into_owned(),
+        "-frames:v".into(),
+        "1".into(),
+        "-vf".into(),
+        format!(
+            "scale='min({max_px},iw)':'min({max_px},ih)':force_original_aspect_ratio=decrease"
+        ),
+        "-q:v".into(),
+        "4".into(),
+        dst.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Render (or serve from cache) a small thumbnail for one image, returning the
+/// cached file's path. The frontend feeds that path to `convertFileSrc`, so the
+/// grid loads a ~50 KB JPEG per tile instead of the multi-megabyte original.
+#[tauri::command]
+async fn image_thumbnail(
+    app: tauri::AppHandle,
+    allow: tauri::State<'_, AllowList>,
+    path: String,
+) -> Result<String, String> {
+    let src = ensure_allowed(&allow, &path)?;
+    let meta = fs::metadata(&src).map_err(|_| "file not found".to_string())?;
+    let size = meta.len();
+    let mtime_secs = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let cache_dir = thumb_cache_dir().ok_or_else(|| "no thumbnail cache".to_string())?;
+    let out = cache_dir.join(thumb_cache_name(&src, size, mtime_secs, THUMB_MAX_PX));
+
+    // Authorize the cache directory for both read gates before returning, so the
+    // WebView may actually load the tile (same pattern as the remux temp dir).
+    let canonical_cache = fs::canonicalize(&cache_dir).unwrap_or_else(|_| cache_dir.clone());
+    authorize_dir(&app, &allow, canonical_cache, Some(cache_dir.as_path()));
+
+    // Cache hit: a non-empty thumbnail already exists for this exact source.
+    if fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
+        return Ok(out.to_string_lossy().into_owned());
+    }
+
+    let sidecar = app
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+    let output = sidecar
+        .args(ffmpeg_thumb_args(&src, &out, THUMB_MAX_PX))
+        .output()
+        .await
+        .map_err(|_| "thumbnail failed to start".to_string())?;
+
+    if !output.status.success() || !fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false) {
+        let _ = fs::remove_file(&out); // never leave a 0-byte file to be cache-hit
+        return Err("could not render a thumbnail".to_string());
+    }
+    Ok(out.to_string_lossy().into_owned())
+}
+
+/// Prepare the thumbnail cache for a gallery open: create + authorize the directory
+/// and prune stale entries once, so the per-image command does no extra work.
+#[tauri::command]
+fn prepare_thumb_cache(app: tauri::AppHandle, allow: tauri::State<'_, AllowList>) {
+    let Some(dir) = thumb_cache_dir() else { return };
+    prune_thumb_cache(&dir);
+    let canonical = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+    authorize_dir(&app, &allow, canonical, Some(dir.as_path()));
+}
+
 /// Video container extensions the folder queue enumerates (play-013). Mirrors the
 /// frontend's `VIDEO_EXTENSIONS` — the natively-decodable containers plus the
 /// MPEG-TS family (.ts/.m2ts/.mts), which the frontend remuxes to .mp4 on open
@@ -1219,6 +1371,8 @@ pub fn run() {
             remux_ts,
             list_folder_videos,
             list_folder_images,
+            image_thumbnail,
+            prepare_thumb_cache,
             get_hwaccel,
             set_hwaccel,
             get_engine_pref,
@@ -1419,6 +1573,42 @@ mod tests {
         let args = ffmpeg_still_args(Path::new("/rec.mp4"), -3.0, 160, 90, true);
         let ss = args.iter().position(|a| a == "-ss").unwrap();
         assert_eq!(args[ss + 1], "0.000");
+    }
+
+    #[test]
+    fn ffmpeg_thumb_args_render_one_downscaled_frame_to_a_file() {
+        let args = ffmpeg_thumb_args(Path::new("/photo.jpg"), Path::new("/cache/t.jpg"), 480);
+        assert!(args.windows(2).any(|w| w == ["-i", "/photo.jpg"]));
+        // Exactly one frame: an animated GIF/WebP yields a still poster, never a
+        // re-encoded animation.
+        assert!(args.windows(2).any(|w| w == ["-frames:v", "1"]));
+        // Fit INSIDE the box and never upscale a source already smaller than it.
+        assert!(args.windows(2).any(|w| w[0] == "-vf"
+            && w[1] == "scale='min(480,iw)':'min(480,ih)':force_original_aspect_ratio=decrease"));
+        // Overwrite, and the destination is the final argument.
+        assert!(args.iter().any(|a| a == "-y"));
+        assert_eq!(args.last().map(String::as_str), Some("/cache/t.jpg"));
+    }
+
+    #[test]
+    fn thumb_cache_name_is_deterministic_and_invalidates_on_change() {
+        let a = Path::new("/photos/a.jpg");
+        let b = Path::new("/photos/b.jpg");
+        // Same inputs -> same name, so revisiting an unchanged folder is a cache hit.
+        assert_eq!(
+            thumb_cache_name(a, 1000, 42, 480),
+            thumb_cache_name(a, 1000, 42, 480)
+        );
+        // A different path, size, mtime, or requested size each re-render rather
+        // than serving a stale or wrongly-sized tile.
+        assert_ne!(thumb_cache_name(a, 1000, 42, 480), thumb_cache_name(b, 1000, 42, 480));
+        assert_ne!(thumb_cache_name(a, 1000, 42, 480), thumb_cache_name(a, 2000, 42, 480));
+        assert_ne!(thumb_cache_name(a, 1000, 42, 480), thumb_cache_name(a, 1000, 43, 480));
+        assert_ne!(thumb_cache_name(a, 1000, 42, 480), thumb_cache_name(a, 1000, 42, 240));
+        // Shape: a stable prefix + .jpg so prune_thumb_cache recognises its own files.
+        let name = thumb_cache_name(a, 1000, 42, 480);
+        assert!(name.starts_with("pb-th-"));
+        assert!(name.ends_with(".jpg"));
     }
 
     #[test]
