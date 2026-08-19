@@ -3129,48 +3129,101 @@ async function renderThumb(index: number): Promise<void> {
   perfMark("thumb.render", String(index));
   thumbActive++;
   try {
-    await renderTilePoster(index, item, token);
+    const source = await renderTilePoster(index, item, token);
     // gallery-003: the duration badge is a second probe, run inside the SAME
     // bounded slot rather than alongside the poster — a video tile must not double
     // the number of concurrent ffmpeg processes. It runs even when the poster
     // failed, since a tile showing a placeholder can still honestly say "1:34".
-    if (item.kind === "video") await renderTileDuration(index, item, token);
+    // gallery-004: it probes the MATERIALIZED path, never an inner path — and an
+    // archive video has none, so it is skipped there along with its poster.
+    if (item.kind === "video" && source) {
+      await renderTileDuration(index, item, source, token);
+    }
   } finally {
     thumbActive--;
     if (token === galleryToken) pumpThumbs();
   }
 }
 
-/** The picture on one tile: a cached JPEG for an image, a poster frame for a video,
- *  a cover for a folder. Bails silently when the gallery changed underneath it. */
+/**
+ * The real, on-disk file a tile should be thumbnailed from — materializing an
+ * archive entry when that is what the tile is (gallery-004). Returns null when
+ * the tile has no picture to show, which is a legitimate outcome: a folder with
+ * no images keeps its glyph.
+ *
+ * A VIDEO inside an archive deliberately returns null. Drawing its poster would
+ * mean extracting the whole clip — potentially gigabytes — to fill a 200 px tile,
+ * which is exactly the cost this feature's laziness exists to avoid. Its bytes
+ * are materialized when the user actually opens it.
+ */
+async function tileSourcePath(item: GalleryItem): Promise<string | null> {
+  // An archive TILE: cover image from anywhere inside it.
+  if (item.kind === "archive") {
+    const inner = await tauriInvoke<string | null>("archive_cover_entry", {
+      archive: item.path,
+      inner: "",
+    }).catch(() => null);
+    if (!inner) return null;
+    return await tauriInvoke<string>("archive_entry_file", {
+      archive: item.path,
+      inner,
+    }).catch(() => null);
+  }
+  if (item.archive) {
+    // A folder INSIDE an archive: cover image from that subtree.
+    if (item.kind === "folder") {
+      const inner = await tauriInvoke<string | null>("archive_cover_entry", {
+        archive: item.archive,
+        inner: item.path,
+      }).catch(() => null);
+      if (!inner) return null;
+      return await tauriInvoke<string>("archive_entry_file", {
+        archive: item.archive,
+        inner,
+      }).catch(() => null);
+    }
+    if (item.kind === "video") return null; // see the doc comment above
+    return await tauriInvoke<string>("archive_entry_file", {
+      archive: item.archive,
+      inner: item.path,
+    }).catch(() => null);
+  }
+  // A real folder asks which image inside it should be the cover.
+  if (item.kind === "folder") {
+    return await tauriInvoke<string | null>("folder_cover_image", {
+      path: item.path,
+    }).catch(() => null);
+  }
+  return item.path;
+}
+
+/** The picture on one tile: a cached JPEG for an image, a poster frame for a
+ *  video, a cover for a folder or archive. Returns the real source path it used
+ *  (so the duration probe can reuse it), or null when the tile has no picture.
+ *  Bails silently when the gallery changed underneath it. */
 async function renderTilePoster(
   index: number,
   item: GalleryItem,
   token: number,
-): Promise<void> {
-  let source: string | null = item.path;
-  // gallery-004: an archive tile has no cover of its own yet either — treated
-  // like a folder here so it bails to its glyph instead of trying to decode
-  // the archive file itself as an image (Task 8 supplies the real cover).
-  if (item.kind === "folder" || item.kind === "archive") {
-    source = await tauriInvoke<string | null>("folder_cover_image", {
-      path: item.path,
-    }).catch(() => null);
-    if (token !== galleryToken) return;
-    if (!source) return; // no cover — the folder/archive glyph stands on its own
-  }
+): Promise<string | null> {
+  const source = await tileSourcePath(item);
+  if (token !== galleryToken) return null;
+  if (!source) return null;
   const thumb = await tauriInvoke<string>("media_thumbnail", { path: source }).catch(
     () => null,
   );
-  if (token !== galleryToken) return;
+  if (token !== galleryToken) return null;
   const current = ui.galleryItems[index];
-  if (!current || current.path !== item.path) return; // list changed under us
-  // A folder never falls back to its own path (a directory is not an image) —
-  // nor does an archive (an archive file is not an image either).
-  const src = thumb ?? (current.kind === "folder" || current.kind === "archive" ? null : item.path);
-  if (!src) return;
+  if (!current || current.path !== item.path) return null; // list changed under us
+  // A folder or archive never falls back to its own path (neither is an image),
+  // and neither does an archive ENTRY, whose path is an inner path rather than a
+  // file. Only a plain on-disk image degrades to a full-resolution decode.
+  const fallback = current.kind === "image" && !current.archive ? source : null;
+  const src = thumb ?? fallback;
+  if (!src) return source;
   const { convertFileSrc } = await import("@tauri-apps/api/core");
   current.thumbSrc = convertFileSrc(src);
+  return source;
 }
 
 /** The running-time badge on one video tile (gallery-003). A container that reports
@@ -3179,10 +3232,11 @@ async function renderTilePoster(
 async function renderTileDuration(
   index: number,
   item: GalleryItem,
+  source: string,
   token: number,
 ): Promise<void> {
   const seconds = await tauriInvoke<number | null>("video_duration", {
-    path: item.path,
+    path: source,
   }).catch(() => null);
   if (token !== galleryToken) return;
   if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return;
