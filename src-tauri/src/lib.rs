@@ -1672,6 +1672,10 @@ pub fn run() {
         .manage(player::PlayerState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        // img-002: the image clipboard write. Only write_image is used; the
+        // capability grants only that permission, not the plugin's default set
+        // (which also allows READING the user's clipboard).
+        .plugin(tauri_plugin_clipboard_manager::init())
         // native-001: tear the mpv engine down BEFORE the main window (the
         // parent of mpv's child HWND) is destroyed — destroying the wid window
         // under a live mpv VO is documented crash territory. The handler runs
@@ -1708,6 +1712,9 @@ pub fn run() {
             set_engine_pref,
             perf_enabled,
             perf_log,
+            reveal_in_explorer,
+            image_info,
+            copy_image_to_clipboard,
             player::player_engine_status,
             player::player_load,
             player::player_stop,
@@ -1725,6 +1732,251 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playback");
+}
+
+
+// ---------------------------------------------------------------------------
+// Image file actions (img-002)
+//
+// Reveal a photo in Explorer, and report what a viewer can tell the reader
+// about it: file size plus whatever the camera wrote into EXIF. Copying the
+// picture to the clipboard is the third action and lives entirely in the
+// frontend, which already has the decoded pixels.
+// ---------------------------------------------------------------------------
+
+/// Strip Windows' extended-length prefix from a canonical path.
+///
+/// `fs::canonicalize` returns `\\?\C:\...` (and `\\?\UNC\server\share` for a
+/// network path). That form is correct for the Win32 file APIs and WRONG for
+/// Explorer, which does not parse it: handed one, Explorer silently opens a
+/// window on Documents and selects nothing. A wrong result with no error, so
+/// the prefix comes off before the path is passed on.
+fn strip_extended_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    path.to_string()
+}
+
+/// Explorer's arguments for "open the containing folder and select this file".
+///
+/// `/select,` and the path are ONE argument, not two. Split into two, Explorer
+/// opens Documents and selects nothing — again a silent wrong result rather
+/// than a failure, which is why this has a test of its own.
+fn explorer_select_args(path: &str) -> Vec<String> {
+    vec![format!("/select,{path}")]
+}
+
+/// What the info panel shows about a picture. Everything from EXIF is optional:
+/// a screenshot or an exported PNG has none of it, and the panel omits the rows
+/// rather than showing zeroes as though they were readings.
+#[derive(serde::Serialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ImageInfo {
+    size_bytes: u64,
+    camera: Option<String>,
+    taken: Option<String>,
+    exposure: Option<String>,
+    aperture: Option<String>,
+    iso: Option<String>,
+}
+
+/// How much of a file to read looking for EXIF. The APP1 block sits within the
+/// first few KB of a JPEG; 256 KB is generous for an oversized thumbnail or
+/// maker-note blob and still bounded, so a 200 MB TIFF is not read whole just
+/// to print a shutter speed.
+const EXIF_SCAN_BYTES: u64 = 256 * 1024;
+
+/// Pull the human-readable EXIF fields out of an image's leading bytes.
+///
+/// Never fails and never panics: a file with no EXIF, a truncated block, or a
+/// hostile one all yield `None` for every field. The panel's job is to report
+/// what is really there, so "absent" has to be representable and has to be what
+/// anything unreadable produces.
+fn exif_summary(bytes: &[u8]) -> ImageInfo {
+    let mut out = ImageInfo::default();
+    let mut cursor = std::io::Cursor::new(bytes);
+    let reader = match exif::Reader::new().read_from_container(&mut cursor) {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+
+    // `display_value()` renders ASCII fields with surrounding quotes; the panel
+    // wants the text itself.
+    let text = |tag: exif::Tag| -> Option<String> {
+        reader.get_field(tag, exif::In::PRIMARY).map(|f| {
+            f.display_value().to_string().trim_matches('"').trim().to_string()
+        })
+    };
+    let non_empty = |s: Option<String>| s.filter(|v| !v.is_empty());
+
+    // A camera writes maker and model separately, and most models already start
+    // with the maker ("Canon EOS R5"), so joining blindly gives "Canon Canon
+    // EOS R5".
+    let make = non_empty(text(exif::Tag::Make));
+    let model = non_empty(text(exif::Tag::Model));
+    out.camera = match (make, model) {
+        (Some(mk), Some(md)) if md.starts_with(&mk) => Some(md),
+        (Some(mk), Some(md)) => Some(format!("{mk} {md}")),
+        (Some(mk), None) => Some(mk),
+        (None, Some(md)) => Some(md),
+        (None, None) => None,
+    };
+
+    // EXIF stores dates as "2026:03:14 09:21:07", but the crate's display already
+    // renders a DateTime field as "2026-03-14 09:21:07" — normalizing the date half
+    // and leaving the time alone. Re-normalizing here turned the TIME into
+    // "09-21-07" as well, which is what the unit test caught.
+    out.taken = non_empty(
+        text(exif::Tag::DateTimeOriginal).or_else(|| text(exif::Tag::DateTime)),
+    );
+
+    // Shutter speed reads as a fraction, the way a camera displays it.
+    out.exposure = reader
+        .get_field(exif::Tag::ExposureTime, exif::In::PRIMARY)
+        .and_then(|f| match &f.value {
+            exif::Value::Rational(v) => v.first().copied(),
+            _ => None,
+        })
+        .filter(|r| r.denom != 0 && r.num != 0)
+        .map(|r| {
+            if r.num >= r.denom {
+                format!("{} s", r.to_f64())
+            } else {
+                format!("{}/{} s", 1, (r.denom as f64 / r.num as f64).round() as u64)
+            }
+        });
+
+    out.aperture = reader
+        .get_field(exif::Tag::FNumber, exif::In::PRIMARY)
+        .and_then(|f| match &f.value {
+            exif::Value::Rational(v) => v.first().copied(),
+            _ => None,
+        })
+        .filter(|r| r.denom != 0)
+        .map(|r| {
+            let f = r.to_f64();
+            // f/2.8 keeps its decimal; f/8 does not need ".0".
+            if (f - f.round()).abs() < 0.05 {
+                format!("f/{}", f.round() as u64)
+            } else {
+                format!("f/{f:.1}")
+            }
+        });
+
+    out.iso = reader
+        .get_field(exif::Tag::PhotographicSensitivity, exif::In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+        .filter(|v| *v > 0)
+        .map(|v| format!("ISO {v}"));
+
+    out
+}
+
+/// Open the containing folder with this file selected.
+///
+/// `spawn_blocking` because launching a process blocks, and every command in
+/// this app runs on the WebView2 UI thread otherwise (the rule gallery-004
+/// established). Explorer's exit status is deliberately ignored: it returns 1
+/// on success as often as not, so treating a non-zero status as failure would
+/// report an error for a window that opened correctly.
+#[tauri::command]
+async fn reveal_in_explorer(allow: tauri::State<'_, AllowList>, path: String) -> Result<(), String> {
+    let canonical = ensure_allowed(&allow, &path)?;
+    let target = strip_extended_prefix(&canonical.to_string_lossy());
+    tauri::async_runtime::spawn_blocking(move || {
+        std::process::Command::new("explorer.exe")
+            .args(explorer_select_args(&target))
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| ipc_error("reveal_in_explorer: spawn", e, "could not open the folder"))
+    })
+    .await
+    .map_err(|e| ipc_error("reveal_in_explorer: join", e, "could not open the folder"))?
+}
+
+/// File size plus the EXIF summary for the info panel. Dimensions and format are
+/// NOT reported here — the frontend already has the decoded picture and its own
+/// file extension, so asking the native side to decode the image again purely to
+/// re-learn its width would be a second full decode for nothing.
+#[tauri::command]
+async fn image_info(allow: tauri::State<'_, AllowList>, path: String) -> Result<ImageInfo, String> {
+    ensure_allowed(&allow, &path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let meta = fs::metadata(&path)
+            .map_err(|e| ipc_error("image_info: metadata", e, "file not found"))?;
+        let mut file = fs::File::open(&path)
+            .map_err(|e| ipc_error("image_info: open", e, "file not found"))?;
+        let mut head = Vec::new();
+        // Bounded read: EXIF lives at the front, and the panel is not worth
+        // pulling a multi-hundred-megabyte file through memory for.
+        std::io::Read::take(&mut file, EXIF_SCAN_BYTES)
+            .read_to_end(&mut head)
+            .map_err(|e| ipc_error("image_info: read", e, "could not read this file"))?;
+        let mut info = exif_summary(&head);
+        info.size_bytes = meta.len();
+        Ok(info)
+    })
+    .await
+    .map_err(|e| ipc_error("image_info: join", e, "could not read this file"))?
+}
+
+
+/// Ceiling on one clipboard payload. A 4000x2400 photograph encodes to a few
+/// megabytes of PNG; 64 MiB is far above any real picture and still bounded, so
+/// a hostile or wedged caller cannot force an unbounded native allocation. Same
+/// reasoning as `MAX_CHUNK` on `read_stream_chunk`.
+const MAX_CLIPBOARD_PNG_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Decode the base64 PNG the WebView sends for a clipboard copy.
+///
+/// Base64, not a byte array, and PNG, not raw pixels — both deliberate. A raw
+/// `Uint8Array` argument arrives on WebView2 as a JSON `number[]`, and the RGBA
+/// of a 4000x2400 photograph is 38 MB, or 38 MILLION array elements: measured at
+/// roughly six seconds for one Ctrl-C. Encoding to PNG in the WebView and
+/// shipping it as a base64 string is the same transport `read_stream_chunk`
+/// already uses, for the same reason.
+///
+/// The length is checked BEFORE decoding, so an oversized payload is refused
+/// rather than allocated.
+fn decode_clipboard_png(b64: &str) -> Result<Vec<u8>, String> {
+    if b64.is_empty() {
+        return Err("empty image payload".to_string());
+    }
+    // Base64 is 4 characters per 3 bytes; this bounds the decoded size without
+    // decoding first.
+    if (b64.len() as u64 / 4) * 3 > MAX_CLIPBOARD_PNG_BYTES {
+        return Err("image too large to copy".to_string());
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| ipc_error("copy_image_to_clipboard: base64", e, "could not copy this image"))
+}
+
+/// Put a picture on the system clipboard.
+///
+/// The WebView renders what is on screen (orientation baked in) to a PNG and
+/// sends it here; this decodes it and hands it to the clipboard. Doing the write
+/// natively means the WebView is never granted clipboard permission at all —
+/// the capability deliberately does NOT include any `clipboard-manager:` grant,
+/// so nothing running in the page can read or write the user's clipboard on its
+/// own. Only this command can, and only with a picture.
+#[tauri::command]
+async fn copy_image_to_clipboard(app: tauri::AppHandle, png_base64: String) -> Result<(), String> {
+    let bytes = decode_clipboard_png(&png_base64)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let image = tauri::image::Image::from_bytes(&bytes)
+            .map_err(|e| ipc_error("copy_image_to_clipboard: decode", e, "could not copy this image"))?;
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        app.clipboard()
+            .write_image(&image)
+            .map_err(|e| ipc_error("copy_image_to_clipboard: write", e, "could not copy this image"))
+    })
+    .await
+    .map_err(|e| ipc_error("copy_image_to_clipboard: join", e, "could not copy this image"))?
 }
 
 #[cfg(test)]
@@ -2701,5 +2953,166 @@ mod tests {
         // Degenerate inputs never panic and report "not fragmented".
         assert!(!scan_is_fragmented(&mut Cursor::new(Vec::<u8>::new())).unwrap());
         assert!(!scan_is_fragmented(&mut Cursor::new(ftyp.clone())).unwrap());
+    }
+
+    // --- img-002: reveal in Explorer + EXIF summary --------------------------
+
+    #[test]
+    fn strips_the_extended_length_prefix_explorer_cannot_read() {
+        // fs::canonicalize returns \\?\C:\... on Windows. Explorer does not
+        // understand that form and silently opens the Documents folder instead of
+        // selecting the file, so the prefix has to come off before it is handed over.
+        assert_eq!(strip_extended_prefix(r"\\?\C:\photos\a.jpg"), r"C:\photos\a.jpg");
+        // UNC shares keep working: \\?\UNC\server\share -> \\server\share.
+        assert_eq!(
+            strip_extended_prefix(r"\\?\UNC\server\share\a.jpg"),
+            r"\\server\share\a.jpg"
+        );
+        // An ordinary path is returned untouched.
+        assert_eq!(strip_extended_prefix(r"C:\photos\a.jpg"), r"C:\photos\a.jpg");
+    }
+
+    #[test]
+    fn builds_one_select_argument_not_two() {
+        // "/select," and the path are ONE argument. Passed as two, Explorer opens a
+        // window on Documents and selects nothing -- a silent wrong result, not an error.
+        let args = explorer_select_args(r"C:\photos\a.jpg");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0], r"/select,C:\photos\a.jpg");
+    }
+
+    #[test]
+    fn reads_the_camera_date_and_exposure_out_of_exif() {
+        let jpeg = jpeg_with_exif();
+        let info = exif_summary(&jpeg);
+        assert_eq!(info.camera.as_deref(), Some("TestMake TestModel"));
+        assert_eq!(info.taken.as_deref(), Some("2026-03-14 09:21:07"));
+        assert_eq!(info.exposure.as_deref(), Some("1/250 s"));
+        assert_eq!(info.aperture.as_deref(), Some("f/2.8"));
+        assert_eq!(info.iso.as_deref(), Some("ISO 400"));
+    }
+
+    #[test]
+    fn reports_nothing_rather_than_zeroes_for_a_file_with_no_exif() {
+        // A PNG from a screenshot has no EXIF at all. Every field must come back
+        // absent so the panel can omit the rows, rather than showing "f/0" or
+        // "1970-01-01" as though they were real readings.
+        let info = exif_summary(b"\x89PNG\r\n\x1a\n not really a png body");
+        assert!(info.camera.is_none());
+        assert!(info.taken.is_none());
+        assert!(info.exposure.is_none());
+        assert!(info.aperture.is_none());
+        assert!(info.iso.is_none());
+    }
+
+    #[test]
+    fn survives_a_truncated_or_hostile_exif_block_without_panicking() {
+        let jpeg = jpeg_with_exif();
+        for cut in [2usize, 8, 20, 40, 64] {
+            if cut < jpeg.len() {
+                let _ = exif_summary(&jpeg[..cut]); // must not panic
+            }
+        }
+        let _ = exif_summary(&[0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF]); // length past EOF
+    }
+
+    /// A minimal JPEG carrying one APP1 Exif block: SOI, APP1(Exif\0\0 + TIFF), EOI.
+    /// Built by hand so the expectations above are exact and need no fixture file.
+    fn jpeg_with_exif() -> Vec<u8> {
+        // Little-endian TIFF. IFD0 holds Make, Model and the Exif IFD pointer;
+        // the Exif IFD holds DateTimeOriginal, ExposureTime, FNumber and ISO.
+        let mut tiff: Vec<u8> = Vec::new();
+        tiff.extend_from_slice(b"II\x2a\x00"); // little-endian magic
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 at offset 8
+
+        // Values too big for the 4-byte inline slot live in a pool after both IFDs.
+        // IFD0:     2 + 3*12 + 4 = 42 bytes, at offset 8   -> ends at 50.
+        // Exif IFD: 2 + 4*12 + 4 = 54 bytes, at offset 50  -> ends at 104.
+        let pool_start: u32 = 104;
+        let make = b"TestMake\0";
+        let model = b"TestModel\0";
+        let date = b"2026:03:14 09:21:07\0";
+        let make_off = pool_start;
+        let model_off = make_off + make.len() as u32;
+        let date_off = model_off + model.len() as u32;
+        let exposure_off = date_off + date.len() as u32; // two u32s: a rational
+        let fnumber_off = exposure_off + 8;
+
+        let entry = |tag: u16, fmt: u16, count: u32, value: u32| -> Vec<u8> {
+            let mut e = Vec::new();
+            e.extend_from_slice(&tag.to_le_bytes());
+            e.extend_from_slice(&fmt.to_le_bytes());
+            e.extend_from_slice(&count.to_le_bytes());
+            e.extend_from_slice(&value.to_le_bytes());
+            e
+        };
+
+        // --- IFD0 ---
+        tiff.extend_from_slice(&3u16.to_le_bytes());
+        tiff.extend_from_slice(&entry(0x010F, 2, make.len() as u32, make_off)); // Make
+        tiff.extend_from_slice(&entry(0x0110, 2, model.len() as u32, model_off)); // Model
+        tiff.extend_from_slice(&entry(0x8769, 4, 1, 50)); // Exif IFD pointer
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // no IFD1
+
+        // --- Exif IFD (at offset 50) ---
+        tiff.extend_from_slice(&4u16.to_le_bytes());
+        tiff.extend_from_slice(&entry(0x9003, 2, date.len() as u32, date_off)); // DateTimeOriginal
+        tiff.extend_from_slice(&entry(0x829A, 5, 1, exposure_off)); // ExposureTime
+        tiff.extend_from_slice(&entry(0x829D, 5, 1, fnumber_off)); // FNumber
+        tiff.extend_from_slice(&entry(0x8827, 3, 1, 400)); // ISOSpeedRatings (SHORT)
+        tiff.extend_from_slice(&0u32.to_le_bytes());
+
+        // --- value pool ---
+        assert_eq!(
+            tiff.len() as u32,
+            pool_start,
+            "IFD layout drifted from the offsets computed above"
+        );
+        tiff.extend_from_slice(make);
+        tiff.extend_from_slice(model);
+        tiff.extend_from_slice(date);
+        tiff.extend_from_slice(&1u32.to_le_bytes()); // ExposureTime = 1/250
+        tiff.extend_from_slice(&250u32.to_le_bytes());
+        tiff.extend_from_slice(&28u32.to_le_bytes()); // FNumber = 28/10 = f/2.8
+        tiff.extend_from_slice(&10u32.to_le_bytes());
+
+        let mut app1: Vec<u8> = Vec::new();
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(&tiff);
+
+        let mut jpeg: Vec<u8> = vec![0xFF, 0xD8]; // SOI
+        jpeg.extend_from_slice(&[0xFF, 0xE1]); // APP1
+        jpeg.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes()); // length, big-endian
+        jpeg.extend_from_slice(&app1);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        jpeg
+    }
+
+    #[test]
+    fn decodes_a_base64_clipboard_payload() {
+        // The picture crosses the IPC bridge as base64, the same transport
+        // read_stream_chunk uses. A raw byte array arrives on WebView2 as a JSON
+        // number[] instead: 38 MB of RGBA took SIX SECONDS to copy that way,
+        // which is what sent this through base64 and a PNG encode.
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode([0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        let out = decode_clipboard_png(&encoded).unwrap();
+        assert_eq!(out, vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    }
+
+    #[test]
+    fn rejects_a_payload_that_is_not_base64_instead_of_panicking() {
+        assert!(decode_clipboard_png("not base64 !!!").is_err());
+        assert!(decode_clipboard_png("").is_err());
+    }
+
+    #[test]
+    fn refuses_an_oversized_payload_rather_than_allocating_it() {
+        // A hostile or wedged caller must not be able to force an unbounded
+        // native allocation, the same reasoning as read_stream_chunk's MAX_CHUNK.
+        // Base64 is 4 characters per 3 bytes, so a string this long decodes past
+        // the ceiling and has to be refused on its LENGTH, before it is decoded.
+        let oversized = "A".repeat((MAX_CLIPBOARD_PNG_BYTES as usize / 3 + 16) * 4);
+        assert!(decode_clipboard_png(&oversized).is_err());
     }
 }

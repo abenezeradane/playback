@@ -18,6 +18,9 @@
     doImageRotate,
     doImageFlip,
     showImageChrome,
+    doImageCopy,
+    doImageReveal,
+    doImageInfo,
   } from "./controller";
 </script>
 
@@ -117,6 +120,27 @@
       <span class="imgview__error-text">This image could not be opened.</span>
     </div>
 
+    <!-- img-002: what is known about the picture. Every EXIF row is optional —
+         a screenshot carries none of it, and the panel omits those rows rather
+         than printing blanks or zeroes as though they were readings. -->
+    {#if ui.imgInfoOpen}
+      <aside class="imgview__info" aria-label="Image information">
+        <dl class="imgview__info-rows">
+          {#each ui.imgInfoRows as row (row.label)}
+            <div class="imgview__info-row">
+              <dt>{row.label}</dt>
+              <dd>{row.value}</dd>
+            </div>
+          {/each}
+        </dl>
+      </aside>
+    {/if}
+
+    <!-- Copying changes nothing on screen, so it says so. -->
+    {#if ui.imgActionFlash}
+      <div class="imgview__flash" role="status">{ui.imgActionFlash}</div>
+    {/if}
+
     {#if ui.photoQueue.length > 1}
       <!-- Sibling photo nav (gallery-001): floating prev/next, clamped at the ends. -->
       <button id="img-prev" class="imgview__navbtn imgview__navbtn--prev" type="button" title="Previous photo (←)" aria-label="Previous photo" disabled={ui.photoIndex <= 0} onclick={doPrevPhoto}>
@@ -174,6 +198,19 @@
       </button>
       <button id="img-flip-v" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgFlipV} title="Flip vertical (V)" aria-label="Flip vertical" onclick={() => doImageFlip("v")}>
         <svg class="ic" viewBox="0 0 24 24"><path d="M3 12h18" /><path d="M7 9 12 4l5 5H7Z" /><path d="M7 15l5 5 5-5H7Z" /></svg>
+      </button>
+    </div>
+
+    <!-- img-002: actions on the FILE rather than on the view of it. -->
+    <div class="imgview__tools imgview__tools--file">
+      <button id="img-copy" class="iconbtn iconbtn--sm" type="button" title="Copy image (C)" aria-label="Copy image" onclick={() => void doImageCopy()}>
+        <svg class="ic" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+      </button>
+      <button id="img-reveal" class="iconbtn iconbtn--sm" type="button" title="Show in Explorer (E)" aria-label="Show in Explorer" onclick={() => void doImageReveal()}>
+        <svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></svg>
+      </button>
+      <button id="img-info" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgInfoOpen} title="Image info (I)" aria-label="Image info" onclick={() => void doImageInfo()}>
+        <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 16v-4" /><circle cx="12" cy="8.2" r="1" /></svg>
       </button>
     </div>
   </div>

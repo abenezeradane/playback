@@ -123,6 +123,9 @@ import {
   imageTransformCss,
   imageZoomPercent,
   wheelZoomTarget,
+  revealTargetPath,
+  formatFileSize,
+  orientationDrawMatrix,
   type EngineSnapshot,
   type NativePlayerEvent,
 } from "./player-core";
@@ -2052,5 +2055,93 @@ describe("image transform — wheel zoom (img-001)", () => {
     expect(wheelZoomTarget(IMAGE_ZOOM_MIN, 100)).toBe(IMAGE_ZOOM_MIN);
     expect(wheelZoomTarget(1, NaN)).toBe(1);
     expect(wheelZoomTarget(1, 0)).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Image file actions (img-002)
+// ---------------------------------------------------------------------------
+
+describe("image file actions — what Explorer should select (img-002)", () => {
+  it("selects the photo itself for an ordinary file", () => {
+    expect(revealTargetPath("C:\photos\a.jpg", null)).toBe("C:\photos\a.jpg");
+  });
+
+  it("selects the ARCHIVE, not the cache mirror, for a page browsed inside one", () => {
+    // A page from a .cbz lives in the thumbnail cache under pb-ar-<hash>. That
+    // directory is an implementation detail with a 30-day prune on it — revealing
+    // it shows the reader a folder that means nothing and will not be there later.
+    // gallery-004 fixed this same class of bug twice; the archive is the artifact.
+    const origin = {
+      archive: "D:\comics\book.cbz",
+      innerDir: "chapter-1",
+      mirrorDir: "C:\cache\pb-ar-9f3c",
+    };
+    expect(revealTargetPath("C:\cache\pb-ar-9f3c\chapter-1\p-1.jpg", origin)).toBe(
+      "D:\comics\book.cbz",
+    );
+  });
+
+  it("falls back to the photo when the origin carries no archive", () => {
+    expect(
+      revealTargetPath("C:\photos\a.jpg", { archive: "", innerDir: "", mirrorDir: "" }),
+    ).toBe("C:\photos\a.jpg");
+  });
+});
+
+describe("image file actions — file size for the info panel (img-002)", () => {
+  it("scales the unit to the size", () => {
+    expect(formatFileSize(0)).toBe("0 bytes");
+    expect(formatFileSize(1)).toBe("1 byte");
+    expect(formatFileSize(842)).toBe("842 bytes");
+    expect(formatFileSize(2048)).toBe("2.0 KB");
+    expect(formatFileSize(3_774_873)).toBe("3.6 MB");
+    expect(formatFileSize(5_368_709_120)).toBe("5.0 GB");
+  });
+
+  it("does not print a misleading decimal on a whole unit", () => {
+    expect(formatFileSize(1024)).toBe("1.0 KB");
+    expect(formatFileSize(1_048_576)).toBe("1.0 MB");
+  });
+
+  it("reports nothing rather than NaN for an unknown size", () => {
+    expect(formatFileSize(NaN)).toBe("");
+    expect(formatFileSize(-5)).toBe("");
+  });
+});
+
+describe("image file actions — baking orientation into a copy (img-002)", () => {
+  // The clipboard copy renders the picture into an offscreen canvas with the
+  // rotation and mirroring baked in, so what is pasted matches what is on screen.
+  // These matrices are what ctx.setTransform gets before a drawImage at (0, 0).
+  const nat = { width: 400, height: 300 };
+
+  it("is the identity for an untouched picture", () => {
+    expect(orientationDrawMatrix(nat, 0, false, false)).toEqual([1, 0, 0, 1, 0, 0]);
+  });
+
+  it("carries the top-left corner to the top-right on a quarter turn clockwise", () => {
+    // The output canvas is 300x400 (the rotated box). Turned clockwise, the
+    // picture's own top-left corner must land at the output's TOP-RIGHT, so the
+    // translation is (300, 0).
+    expect(orientationDrawMatrix(nat, 90, false, false)).toEqual([0, 1, -1, 0, 300, 0]);
+  });
+
+  it("carries it to the bottom-right on a half turn", () => {
+    expect(orientationDrawMatrix(nat, 180, false, false)).toEqual([-1, 0, 0, -1, 400, 300]);
+  });
+
+  it("mirrors across the picture's own axis, not the screen's", () => {
+    // Unrotated, a horizontal mirror sends the top-left corner to the top-right.
+    expect(orientationDrawMatrix(nat, 0, true, false)).toEqual([-1, 0, 0, 1, 400, 0]);
+    // Vertical sends it to the bottom-left.
+    expect(orientationDrawMatrix(nat, 0, false, true)).toEqual([1, 0, 0, -1, 0, 300]);
+  });
+
+  it("applies the mirror BEFORE the rotation, matching the on-screen transform", () => {
+    // Same order as imageTransformCss: mirror in the picture's own axes, then
+    // turn. Composed the other way round the result is mirrored across the wrong
+    // axis, and a copied photo would not match the one on screen.
+    expect(orientationDrawMatrix(nat, 90, true, false)).toEqual([0, -1, -1, 0, 300, 400]);
   });
 });

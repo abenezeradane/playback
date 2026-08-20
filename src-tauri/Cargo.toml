@@ -1,6 +1,6 @@
 [package]
 name = "playback"
-version = "0.59.0"
+version = "0.60.0"
 description = "A fully featured video player built with Tauri 2.0"
 authors = ["Playback"]
 edition = "2021"
@@ -15,7 +15,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset"] }
+# img-002 adds "image-png": tauri::image::Image::from_bytes decodes the PNG the
+# WebView sends for a clipboard copy. Without it Image can only take raw RGBA,
+# which is what made the copy cross the IPC bridge as 38 million JSON numbers.
+tauri = { version = "2", features = ["protocol-asset", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-single-instance = "2"
@@ -35,6 +38,12 @@ unrar = "0.5"
 # RUNTIME (never linked) so a missing DLL degrades to the WebView engine instead
 # of failing process start.
 libloading = "0.8"
+# img-002: the clipboard write happens in RUST, through this plugin's ClipboardExt
+# trait — the JS side of the plugin is deliberately not installed and the WebView
+# is granted no clipboard permission, so nothing in the page can read or write
+# the user's clipboard. Only copy_image_to_clipboard can, and only a picture.
+tauri-plugin-clipboard-manager = "2"
+kamadak-exif = "0.6"
 
 [target.'cfg(windows)'.dependencies]
 # Child-window z-order management for the mpv wid embed (push mpv's child HWND

@@ -226,6 +226,16 @@ export const ui = $state({
   // header + toolbar out and hides the cursor over the picture.
   imgIdle: false,
 
+  // --- Image file actions (img-002) ---
+  // The info panel: open state plus the rows it shows. Rows are built rather
+  // than fixed because most of them are OPTIONAL — a screenshot has no EXIF, and
+  // the panel omits those rows rather than printing blanks or zeroes.
+  imgInfoOpen: false,
+  imgInfoRows: [] as { label: string; value: string }[],
+  // Brief confirmation for an action with no visible result of its own; copying
+  // changes nothing on screen, so without this there is no way to tell it worked.
+  imgActionFlash: "",
+
   // --- Photo sibling nav + gallery (gallery-001) ---
   // The other images in the current photo's folder, in natural sort order —
   // derived fresh on every image open (mirrors the play-013 folder queue, but for

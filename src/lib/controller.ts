@@ -104,6 +104,11 @@ import {
   zoomImageAt,
   stepImageZoom,
   wheelZoomTarget,
+  revealTargetPath,
+  formatFileSize,
+  fileExtension,
+  orientationDrawMatrix,
+  rotatedSize,
   imageTransformCss,
   imageZoomPercent,
   type ImageTransform,
@@ -3404,6 +3409,180 @@ function cancelImageIdle(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Image file actions (img-002)
+//
+// Copy the picture, reveal it on disk, and report what is known about it. The
+// three actions the transform tools (img-001) do not cover, because they act on
+// the FILE rather than on the view of it.
+// ---------------------------------------------------------------------------
+
+/**
+ * The pixels to copy, as an untainted source.
+ *
+ * The frame-decoded canvas is used directly when it is the visible tier: it
+ * already holds exactly the frame on screen (which is the right answer for an
+ * animated image), and it was painted from bytes this app read itself, so it is
+ * not tainted.
+ *
+ * The <img> tier cannot be used that way. It loads through the asset protocol,
+ * a different origin, which TAINTS any canvas it is drawn into — `toBlob` on
+ * that canvas throws a SecurityError. So the still path re-reads the file and
+ * decodes it here, where the bytes are our own and the canvas stays clean.
+ */
+async function currentImagePixels(): Promise<CanvasImageSource | null> {
+  if (!ui.imgCanvasHidden && imgCanvas.width > 0) return imgCanvas;
+  if (ui.imgElHidden || imgEl.naturalWidth === 0 || !currentPath) return null;
+  const status = await tauriInvoke<StreamStatus>("stream_status", { path: currentPath }).catch(
+    () => null,
+  );
+  if (!status || status.size <= 0 || status.size > IMAGE_MAX_BYTES) return null;
+  const bytes = await readWholeFile(currentPath, status.size);
+  if (bytes.length === 0) return null;
+  return await createImageBitmap(new Blob([bytes as BlobPart]));
+}
+
+/**
+ * Copy the picture to the clipboard.
+ *
+ * Orientation is baked in, so what is pasted matches what is on screen: a photo
+ * turned on its side copies turned. Zoom and pan are NOT baked in — they are
+ * where the reader is looking, not what the picture is, so the copy is of the
+ * whole photograph at its own resolution. An animated image copies the frame
+ * currently displayed.
+ *
+ * The picture is encoded to PNG here and crosses to the native side as base64.
+ * Handing the clipboard plugin raw RGBA instead means a `Uint8Array` argument,
+ * which arrives on WebView2 as a JSON `number[]` — 38 million elements for a
+ * 4000x2400 photograph, measured at about six seconds for one copy. Base64 is
+ * the same transport `read_stream_chunk` already uses, for the same reason.
+ */
+export async function doImageCopy(): Promise<void> {
+  if (!imageMeasured()) return;
+  try {
+    const src = await currentImagePixels();
+    if (!src) return;
+    const out = rotatedSize(imgNatural, imgTransform.rotation);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(out.width);
+    canvas.height = Math.round(out.height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("no 2d context");
+    ctx.setTransform(
+      ...orientationDrawMatrix(
+        imgNatural,
+        imgTransform.rotation,
+        imgTransform.flipH,
+        imgTransform.flipV,
+      ),
+    );
+    ctx.drawImage(src, 0, 0, imgNatural.width, imgNatural.height);
+    if (src instanceof ImageBitmap) src.close();
+
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((b) => resolve(b), "image/png"),
+    );
+    if (!blob) throw new Error("could not encode the picture");
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error ?? new Error("could not read the picture"));
+      reader.readAsDataURL(blob);
+    });
+    await tauriInvoke("copy_image_to_clipboard", {
+      pngBase64: dataUrl.slice(dataUrl.indexOf(",") + 1),
+    });
+    flashImageAction("Copied");
+  } catch (err) {
+    // Reported HERE rather than through showError, which writes to ui.emptyError
+    // — a field only the empty/home surface renders, so a failure in the image
+    // viewer would be completely invisible to the reader.
+    flashImageAction("Could not copy this image");
+    console.error("copy image", err);
+  }
+}
+
+/** Open the containing folder with this photo selected. */
+export async function doImageReveal(): Promise<void> {
+  if (!currentPath) return;
+  // gallery-004: a page browsed from inside an archive lives in the thumbnail
+  // cache. Reveal the ARCHIVE, which is the file the reader actually has.
+  const target = revealTargetPath(currentPath, currentArchiveOrigin);
+  try {
+    await tauriInvoke("reveal_in_explorer", { path: target });
+  } catch (err) {
+    showError(`Could not open the folder: ${String(err)}`);
+  }
+}
+
+/** What the native side reports about the file itself. */
+interface NativeImageInfo {
+  sizeBytes: number;
+  camera?: string | null;
+  taken?: string | null;
+  exposure?: string | null;
+  aperture?: string | null;
+  iso?: string | null;
+}
+
+/**
+ * Toggle the info panel, loading its contents the first time it is opened for
+ * a given photo.
+ *
+ * Dimensions and format come from what is already on screen; only the file size
+ * and the EXIF need the native side, so the panel opens immediately with the
+ * half it can answer at once and fills the rest in when it arrives.
+ */
+export async function doImageInfo(): Promise<void> {
+  if (ui.imgInfoOpen) {
+    ui.imgInfoOpen = false;
+    return;
+  }
+  if (!imageMeasured()) return;
+  ui.imgInfoOpen = true;
+  ui.imgInfoRows = [
+    { label: "Dimensions", value: `${imgNatural.width} × ${imgNatural.height}` },
+    { label: "Format", value: (fileExtension(currentPath ?? "") || "image").toUpperCase() },
+  ];
+  if (!currentPath) return;
+  const token = imgToken;
+  const target = revealTargetPath(currentPath, currentArchiveOrigin);
+  // The archive itself is the file on disk, so its size is the honest answer for
+  // a page browsed inside one; its EXIF is simply absent, which the panel omits.
+  const info = await tauriInvoke<NativeImageInfo>("image_info", { path: target }).catch(() => null);
+  if (!info || token !== imgToken || !ui.imgInfoOpen) return;
+  const rows = [...ui.imgInfoRows];
+  const size = formatFileSize(info.sizeBytes);
+  if (size) rows.push({ label: "File size", value: size });
+  for (const [label, value] of [
+    ["Camera", info.camera],
+    ["Taken", info.taken],
+    ["Exposure", info.exposure],
+    ["Aperture", info.aperture],
+    ["ISO", info.iso],
+  ] as const) {
+    if (value) rows.push({ label, value });
+  }
+  ui.imgInfoRows = rows;
+  // The panel's whole point is WHICH rows are there — a picture with no EXIF
+  // must not grow camera rows out of nothing. Emitting the labels makes that
+  // exactly assertable by the smoke, instead of leaving it to be guessed at
+  // from how tall the panel looks (perf-004's trace, as the gallery smokes use).
+  perfMark("image.info", rows.map((r) => r.label).join("|"));
+}
+
+/** Brief confirmation over the picture, for an action with no visible result of
+ *  its own (copying changes nothing on screen, so without this it is impossible
+ *  to tell whether the button did anything). */
+let imgActionFlashTimer: number | undefined;
+function flashImageAction(text: string): void {
+  ui.imgActionFlash = text;
+  window.clearTimeout(imgActionFlashTimer);
+  imgActionFlashTimer = window.setTimeout(() => {
+    ui.imgActionFlash = "";
+  }, 1400);
+}
+
+// ---------------------------------------------------------------------------
 // Gallery grid (gallery-001)
 //
 // A full-screen browser for every image in a folder. Entry points: the image
@@ -4228,6 +4407,23 @@ function handleImageKey(e: KeyboardEvent): boolean {
     case "V":
       e.preventDefault();
       doImageFlip("v");
+      return true;
+    // img-002: actions on the file. All three are free in this view — the
+    // player's own c/i bindings are gated on playerVisible().
+    case "c":
+    case "C":
+      e.preventDefault();
+      void doImageCopy();
+      return true;
+    case "e":
+    case "E":
+      e.preventDefault();
+      void doImageReveal();
+      return true;
+    case "i":
+    case "I":
+      e.preventDefault();
+      void doImageInfo();
       return true;
     default:
       break;

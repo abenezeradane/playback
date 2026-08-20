@@ -1942,3 +1942,87 @@ export function wheelZoomTarget(zoom: number, deltaY: number): number {
   );
   return clampImageZoom(from * Math.pow(WHEEL_ZOOM_PER_NOTCH, notches));
 }
+
+// --- Image file actions (img-002) --------------------------------------------
+
+/** Where a photo browsed from inside an archive really came from (gallery-004). */
+export interface ArchiveOrigin {
+  archive: string;
+  innerDir: string;
+  mirrorDir: string;
+}
+
+/**
+ * The path "Reveal in Explorer" should select.
+ *
+ * For a photo opened from inside an archive that is the ARCHIVE, never the
+ * materialized page. A page lives in the thumbnail cache under `pb-ar-<hash>`,
+ * a directory that means nothing to a reader and that the 30-day prune will
+ * eventually delete — revealing it would point them at something disposable
+ * instead of at their file.
+ */
+export function revealTargetPath(
+  photoPath: string,
+  origin: ArchiveOrigin | null | undefined,
+): string {
+  return origin && origin.archive ? origin.archive : photoPath;
+}
+
+/**
+ * A file size for the info panel, scaled to a sensible unit.
+ *
+ * An unknown or nonsensical size yields "" rather than "NaN bytes", so the
+ * panel can drop the row instead of printing a non-answer.
+ */
+export function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return bytes === 1 ? "1 byte" : `${Math.round(bytes)} bytes`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value.toFixed(1)} ${units[unit]}`;
+}
+
+/**
+ * The canvas transform that bakes a picture's rotation and mirroring into a
+ * copy: `ctx.setTransform(...m)` then `drawImage(src, 0, 0)` paints it correctly
+ * oriented into a canvas of `rotatedSize(natural, rotation)`.
+ *
+ * The composition order matches `imageTransformCss` deliberately — mirror first,
+ * in the picture's own axes, then rotate. Composed the other way a mirrored,
+ * turned photo copies mirrored across the wrong axis and the pasted picture does
+ * not match the one on screen.
+ *
+ * Zoom and pan are deliberately NOT baked in. They are where the reader is
+ * looking, not what the picture is; a copy is of the photograph, at its own
+ * resolution.
+ */
+export function orientationDrawMatrix(
+  natural: ImageSize,
+  rotation: ImageRotation,
+  flipH: boolean,
+  flipV: boolean,
+): [number, number, number, number, number, number] {
+  const rad = (rotation * Math.PI) / 180;
+  // Exact at the quarter turns; Math.cos(Math.PI / 2) is 6.1e-17, not 0.
+  const cos = Math.round(Math.cos(rad));
+  const sin = Math.round(Math.sin(rad));
+  const sx = flipH ? -1 : 1;
+  const sy = flipV ? -1 : 1;
+  // Rotation composed with the mirror: R * S. The `+ 0` on each component
+  // normalizes the -0 that a zeroed sine or a negated zero produces, so a
+  // quarter-turn matrix reads [0, 1, -1, 0] rather than [-0, 1, -1, 0].
+  const a = cos * sx + 0;
+  const b = sin * sx + 0;
+  const c = -sin * sy + 0;
+  const d = cos * sy + 0;
+  const out = rotatedSize(natural, rotation);
+  // Place the picture's centre at the output's centre.
+  const e = out.width / 2 + (a * -(natural.width / 2) + c * -(natural.height / 2));
+  const f = out.height / 2 + (b * -(natural.width / 2) + d * -(natural.height / 2));
+  return [a, b, c, d, e + 0, f + 0];
+}
