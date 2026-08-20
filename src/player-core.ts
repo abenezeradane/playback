@@ -1000,7 +1000,10 @@ export function sortPathsNatural(paths: string[]): string[] {
  *  image to open. `kind` is what a tile's click, icon, and thumbnail all branch on.
  *
  *  gallery-003 adds `video` — a tile that opens in the player rather than the photo
- *  viewer, and that carries a play badge and a duration. */
+ *  viewer, and that carries a play badge and a duration.
+ *
+ *  gallery-004 adds `archive` — a `.zip`/`.cbz`/`.rar`/`.cbr` tile that browses as
+ *  a directory, so it sorts with the folders rather than with the media. */
 export interface GalleryNode {
   path: string;
   name: string;

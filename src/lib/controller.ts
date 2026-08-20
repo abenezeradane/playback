@@ -2545,6 +2545,49 @@ async function fillRecentThumbs(): Promise<void> {
   }
 }
 
+/**
+ * gallery-004: where the file now open came FROM, when it came from inside an
+ * archive — `null` whenever the open is an ordinary file.
+ *
+ * The mirror directory's whole point is that a materialized entry is an ordinary
+ * file at a real path, so nearly every consumer needs no idea an archive was
+ * involved. But three surfaces treat that path's DIRECTORY as meaningful, and a
+ * mirror directory (`pb-ar-5f4c500c7d2181f4`) is neither a name to show a user
+ * nor a folder to browse: Recents, the image viewer's subtitle, and the G key's
+ * "open the grid for this photo's folder".
+ *
+ * MODULE STATE rather than an option threaded through `loadFromPath`, because
+ * the sibling steps have nothing to thread: `doNextPhoto`/`doPrevPhoto` walk
+ * `ui.photoQueue`, which holds materialized MIRROR paths, and call
+ * `loadFromPath` with no other context. An options parameter would carry the
+ * archive identity onto page one and lose it on page two — which is the bug
+ * itself, since reading eight pages then fills all of RECENTS_MAX with cache
+ * paths and evicts the comic's own card. Scoping on the mirror DIRECTORY instead
+ * means every sibling on the level inherits it and any other open drops it.
+ *
+ * `innerDir` and `mirrorDir` describe the LEVEL, not the page, so they stay
+ * correct as the user steps sideways through it.
+ */
+let currentArchiveOrigin: {
+  archive: string;
+  innerDir: string;
+  mirrorDir: string;
+} | null = null;
+
+/** The inner DIRECTORY containing `inner` ("" at the archive root). Inner paths
+ *  are always '/'-separated (the native side normalizes them on the way out). */
+function innerDirOf(inner: string): string {
+  const cut = inner.lastIndexOf("/");
+  return cut >= 0 ? inner.slice(0, cut) : "";
+}
+
+/** Viewer subtitle for a page opened from inside an archive: the archive's own
+ *  name, plus the level inside it when that is not the root. */
+function archiveOriginMeta(origin: { archive: string; innerDir: string }): string {
+  const name = basename(origin.archive);
+  return origin.innerDir ? `${name} / ${origin.innerDir}` : name;
+}
+
 async function loadFromPath(
   path: string,
   fromQueue = false,
@@ -2552,12 +2595,29 @@ async function loadFromPath(
 ): Promise<void> {
   perfMark("open.begin", basename(path)); // perf-004: paired with open.firstframe
   currentPath = path;
+  // gallery-004: the archive origin survives a sibling step within the SAME
+  // materialized level (Left/Right through a comic) and is dropped by anything
+  // else, so it answers "am I still reading this archive?" rather than naming one
+  // page. An exact string compare is correct here, not a loose path match:
+  // `list_folder_images` deliberately roots its results at the RAW directory it
+  // was given (see resolve_listing_dir), so every queue entry's dirname is the
+  // very string `mirrorDir` was derived from.
+  if (currentArchiveOrigin && dirnameOf(path) !== currentArchiveOrigin.mirrorDir) {
+    currentArchiveOrigin = null;
+  }
   closeNextPrompt(); // any pending "Up Next" prompt is moot once a new clip loads
   // A fresh user-initiated open (dialog / drop / Recent / launch arg) leaves any
   // active playlist; a load that steps the current queue (Next/Prev, click-to-jump,
   // playPlaylist) passes fromQueue=true to preserve it.
   if (!fromQueue) playlistActive = false;
-  addRecent(path, basename(path));
+  // gallery-004: a materialized page is a CACHE path — it dies with the 30-day
+  // prune and with any edit to the archive. The archive is the thing worth
+  // returning to, so that is what Recents records.
+  if (currentArchiveOrigin) {
+    addRecent(currentArchiveOrigin.archive, basename(currentArchiveOrigin.archive));
+  } else {
+    addRecent(path, basename(path));
+  }
   // sec-002: authorize this file's directory before any native read of it.
   await authorizeMediaDir(path);
   // gallery-004: an archive is a place, not a clip. Routing it here — at the one
@@ -2655,6 +2715,9 @@ async function needsFragmentedRemux(
  * which case the error is already surfaced and the home screen is shown).
  */
 async function remuxForPlayback(path: string): Promise<string | null> {
+  // Set the title explicitly rather than relying on its default: gallery-004's
+  // archive extraction shares this overlay and leaves "Extracting…" behind.
+  ui.preppingTitle = "Preparing video…";
   ui.preppingLabel = basename(path);
   ui.prepping = true;
   try {
@@ -2829,9 +2892,13 @@ async function openImage(path: string): Promise<void> {
   resetGifState();
 
   const title = basename(path);
-  const folder = parentDir(path);
   ui.imgTitle = title;
-  ui.imgMeta = folder || "Image";
+  // gallery-004: a materialized page's real parent IS the mirror directory
+  // (`pb-ar-<hash>`), a cache implementation detail that means nothing to a
+  // reader. Name the archive and the level inside it instead.
+  ui.imgMeta = currentArchiveOrigin
+    ? archiveOriginMeta(currentArchiveOrigin)
+    : parentDir(path) || "Image";
   document.title = `${title} — Playback`;
 
   ui.view = "image";
@@ -3358,6 +3425,17 @@ export async function openGalleryFromImage(): Promise<void> {
   if (from) {
     pushNav({ label: `image:${basename(from)}`, restore: () => loadFromPath(from) });
   }
+  // gallery-004: a page inside an archive has no real folder to open — its parent
+  // directory is the mirror cache. Handing that to openGalleryForFolder opened
+  // the MIRROR as if it were an ordinary folder: `pb-ar-<hash>` as the title and
+  // breadcrumb, `ui.galleryArchive` left "" while the grid showed archive
+  // contents, and (for a zip) only whatever had been materialized so far rather
+  // than the archive's real contents. Route back to the archive LEVEL instead.
+  const origin = currentArchiveOrigin;
+  if (origin) {
+    await openArchiveGallery(origin.archive, origin.innerDir);
+    return;
+  }
   // gallery-002: this used to reuse `photoQueue` with no IPC at all, but that queue
   // is images-only by design (sibling Prev/Next must never land on a directory), so
   // the grid would have hidden sub-folders depending on how it was reached. It now
@@ -3522,23 +3600,55 @@ async function openArchiveEntry(item: GalleryItem): Promise<void> {
   // surface before the first load has settled.
   if (ui.prepping) return;
   const archive = item.archive;
+  // ux-001 supersede guard. Every other open path here is guarded (galleryToken,
+  // imgToken, currentPath); this one was not, and it is the one with the longest
+  // await. The .prepping overlay blocks the POINTER but the global keydown
+  // handler has no ui.prepping gate, so Esc during "Extracting…" reaches
+  // goBack(): the user backs out to the parent grid, then the materialization
+  // finishes and yanks them into the viewer of the page they abandoned.
+  // galleryToken is the right token because it is bumped by exactly the two
+  // things that invalidate this open — a newer gallery open, and a nav-stack
+  // restore.
+  const token = galleryToken;
   ui.prepping = true;
-  ui.preppingLabel = "Extracting…";
+  // M1: the overlay's TITLE says what is happening; the label slot underneath is
+  // the filename, in this flow as in the remux one. Before this, extraction put
+  // "Extracting…" in the label and the hard-coded title still read "Preparing
+  // video…", so the primary flow of this feature announced the wrong operation
+  // and dropped the filename entirely.
+  ui.preppingTitle = "Extracting…";
+  ui.preppingLabel = basename(item.path);
   try {
     const real = await tauriInvoke<string>("archive_entry_file", {
       archive,
       inner: item.path,
     }).catch(() => null);
+    if (token !== galleryToken) return; // superseded: Esc/Back left this level
     if (!real) {
-      showError("Could not read that file from the archive.");
+      // showError writes ui.emptyError, which renders ONLY in Home.svelte — and
+      // the view during an extraction is the gallery, so routing an entry failure
+      // there made it completely invisible: the overlay just vanished and nothing
+      // happened. That was the outcome for an encrypted entry, a cap abort and a
+      // corrupt page alike. openArchiveGallery already routes LISTING failures to
+      // ui.galleryError; entry failures belong on the same surface.
+      ui.galleryError = "Could not read that file from the archive.";
       return;
     }
     if (item.kind === "image") {
-      await materializeArchiveLevel(archive, item.path);
-      await loadFromPath(real);
-    } else {
-      await loadFromPath(real, false, { noFolderQueue: true });
+      await materializeArchiveLevel(archive, item.path, token);
     }
+    if (token !== galleryToken) return; // superseded while materializing the level
+    // gallery-004: record WHERE this page came from before handing the mirror
+    // path to loadFromPath, so Recents, the viewer subtitle and the G key all
+    // name the archive rather than the cache directory it landed in.
+    currentArchiveOrigin = {
+      archive,
+      innerDir: innerDirOf(item.path),
+      mirrorDir: dirnameOf(real),
+    };
+    // A VIDEO plays alone: a level of clips could be many gigabytes, so there is
+    // no play-013 folder queue behind it.
+    await loadFromPath(real, false, item.kind === "image" ? {} : { noFolderQueue: true });
   } finally {
     ui.prepping = false;
   }
@@ -3547,15 +3657,23 @@ async function openArchiveEntry(item: GalleryItem): Promise<void> {
 /** Materialize every IMAGE alongside `inner` in its archive level, so the photo
  *  viewer's sibling queue (built by `buildPhotoQueue` off the mirror directory)
  *  sees the whole level rather than only the page that was clicked. Best-effort:
- *  a page that fails to extract is simply absent from the queue. */
-async function materializeArchiveLevel(archive: string, inner: string): Promise<void> {
-  const cut = inner.lastIndexOf("/");
-  const dir = cut >= 0 ? inner.slice(0, cut) : "";
+ *  a page that fails to extract is simply absent from the queue.
+ *
+ *  `token` is the caller's `galleryToken` snapshot. The loop cannot cancel a
+ *  native call already in flight, but it can stop issuing the remaining ones — so
+ *  backing out of a three-hundred-page level costs one more extraction, not
+ *  three hundred. */
+async function materializeArchiveLevel(
+  archive: string,
+  inner: string,
+  token: number,
+): Promise<void> {
   const entries = await tauriInvoke<{ images: string[] }>("list_archive_entries", {
     archive,
-    inner: dir,
+    inner: innerDirOf(inner),
   }).catch(() => null);
   for (const image of entries?.images ?? []) {
+    if (token !== galleryToken) return; // the user left; stop spending on this level
     if (image === inner) continue; // already materialized by the caller
     await tauriInvoke<string>("archive_entry_file", { archive, inner: image }).catch(
       () => null,

@@ -38,12 +38,15 @@
 
   {#if ui.prepping}
     <!-- Transport-stream remux progress (play-016): a non-blocking overlay shown
-         while the ffmpeg sidecar converts a .ts/.m2ts/.mts to a playable .mp4. -->
+         while the ffmpeg sidecar converts a .ts/.m2ts/.mts to a playable .mp4.
+         gallery-004 shares it for archive extraction, so the title comes from
+         state rather than being hard-coded here — the label below is always the
+         filename. -->
     <div class="prepping" role="status" aria-live="polite">
       <div class="prepping__card">
         <div class="prepping__spinner" aria-hidden="true"></div>
         <div class="prepping__text">
-          <div class="prepping__title">Preparing video…</div>
+          <div class="prepping__title">{ui.preppingTitle}</div>
           <div class="prepping__sub">{ui.preppingLabel}</div>
         </div>
       </div>

@@ -79,7 +79,12 @@ export const ui = $state({
   emptyError: "",
   // Transient "converting…" overlay shown while the ffmpeg sidecar remuxes a
   // transport stream (.ts/.m2ts/.mts) to a playable .mp4 on open (play-016).
+  // gallery-004 reuses the same overlay for archive extraction, so the TITLE is
+  // state rather than hard-coded markup: the remux says "Preparing video…", an
+  // archive page says "Extracting…". The LABEL slot underneath is the filename
+  // in both cases — it is what tells the user WHICH file is being worked on.
   prepping: false,
+  preppingTitle: "Preparing video…",
   preppingLabel: "",
 
   // --- Standard player (play-001) ---
