@@ -3423,7 +3423,30 @@ export async function openGalleryFromImage(): Promise<void> {
   // ux-001: G opened the grid FROM this photo, so Back returns to this photo.
   const from = currentPath;
   if (from) {
-    pushNav({ label: `image:${basename(from)}`, restore: () => loadFromPath(from) });
+    // gallery-004: the ORIGIN travels with the path in this closure, because Back
+    // re-enters `from` through loadFromPath — and by then the origin has usually
+    // moved on (descend into a nested level and open a page there) or been
+    // cleared. loadFromPath's mirror-directory scoping would then find a
+    // non-matching origin and drop it, silently reverting all three surfaces at
+    // once: the subtitle falls back to `pb-ar-<hash>`, G reopens the mirror as a
+    // real folder, and a cache path is written into PERSISTED recents — the
+    // sticky one, since it outlives the session and dead-ends after the 30-day
+    // prune. Capturing by reference is safe because the origin is only ever
+    // REPLACED with a fresh object, never mutated in place.
+    //
+    // This is the only nav closure that needs it: `galleryNavEntry` restores grid
+    // state and calls clearImageView() rather than re-entering a media path, and
+    // every other loadFromPath call site is either a fresh user-initiated open
+    // (where dropping the origin is correct) or a sibling step the mirror-directory
+    // scoping already covers.
+    const origin = currentArchiveOrigin;
+    pushNav({
+      label: `image:${basename(from)}`,
+      restore: () => {
+        currentArchiveOrigin = origin;
+        return loadFromPath(from);
+      },
+    });
   }
   // gallery-004: a page inside an archive has no real folder to open — its parent
   // directory is the mirror cache. Handing that to openGalleryForFolder opened

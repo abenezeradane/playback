@@ -668,6 +668,36 @@ fn to_ipc(context: &str, e: ArchiveError) -> String {
     crate::ipc_error(context, format!("{e:?}"), e.public_message())
 }
 
+/// Run one blocking archive operation on the BLOCKING POOL rather than on an
+/// async runtime worker.
+///
+/// `async fn` alone was not enough. It got the work off the WebView2 UI thread —
+/// which is what fixed the "Not Responding" freeze — but an `async fn` whose body
+/// never yields still occupies the runtime worker it was spawned onto for the
+/// whole call. Every OTHER async command in `lib.rs` awaits an ffmpeg sidecar and
+/// genuinely yields; these are the only ones that sit and compute. That matters
+/// because of how they are called: an archive level renders 4 tiles wide, each
+/// tile calling `archive_entry_file` against the SAME mirror, plus
+/// `fillRecentThumbs` — so roughly 5-6 workers end up pinned for the length of a
+/// multi-minute `.cbr` pass. `ensure_entry`'s per-mirror mutex makes it worse, not
+/// better: the waiters block on the lock while holding their workers. On a 4-core
+/// machine that starves the runtime and stalls IPC that has nothing to do with
+/// archives. `spawn_blocking` is the pool built for exactly this.
+///
+/// A `JoinError` (the closure panicked) becomes `Unreadable` — honest, and it
+/// keeps a panic from taking the whole command down with a runtime error string
+/// that would leak detail across the IPC boundary (sec-005).
+async fn blocking<T, F>(f: F) -> Result<T, ArchiveError>
+where
+    F: FnOnce() -> Result<T, ArchiveError> + Send + 'static,
+    T: Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(_) => Err(ArchiveError::Unreadable),
+    }
+}
+
 /// One level of an archive, as INNER paths (`ch1/page01.jpg`), never cache paths
 /// — the frontend cannot construct a mirror path, only `archive_entry_file` can
 /// mint one. Reads the index only; no entry is decompressed.
@@ -687,8 +717,11 @@ pub(crate) async fn list_archive_entries(
     // paths never touch the filesystem outside the mirror, so nothing else here
     // widens the app's reach.
     let canonical = crate::ensure_allowed(&allow, &archive)?;
-    let names = archive_index(&canonical).map_err(|e| to_ipc("list_archive_entries", e))?;
-    Ok(archive_level(&names, &inner))
+    // The allow-list check stays out here (it needs the borrowed `State`); only
+    // the file IO crosses onto the blocking pool, carrying owned data.
+    blocking(move || Ok(archive_level(&archive_index(&canonical)?, &inner)))
+        .await
+        .map_err(|e| to_ipc("list_archive_entries", e))
 }
 
 /// Materialize one entry and return its real path, authorizing the directory it
@@ -715,7 +748,12 @@ pub(crate) async fn archive_entry_file(
     inner: String,
 ) -> Result<String, String> {
     let canonical = crate::ensure_allowed(&allow, &archive)?;
-    let file = ensure_entry(&canonical, &inner).map_err(|e| to_ipc("archive_entry_file", e))?;
+    // THE extraction. This is the call that can run for minutes on a large `.cbr`
+    // and that N concurrent tile renders queue up behind on the mirror lock, so
+    // it belongs on the blocking pool rather than on a runtime worker.
+    let file = blocking(move || ensure_entry(&canonical, &inner))
+        .await
+        .map_err(|e| to_ipc("archive_entry_file", e))?;
     // Authorize the ENTRY'S OWN directory, not just the mirror root: the
     // asset-protocol grant is non-recursive, so a page inside `ch1/` would
     // otherwise be readable by the IPC gate (a prefix check) but not loadable by
@@ -744,19 +782,26 @@ pub(crate) async fn archive_cover_entry(
     inner: String,
 ) -> Result<Option<String>, String> {
     let canonical = crate::ensure_allowed(&allow, &archive)?;
-    let names = archive_index(&canonical).map_err(|e| to_ipc("archive_cover_entry", e))?;
-    let prefix = if inner.is_empty() {
-        String::new()
-    } else {
-        format!("{inner}/")
-    };
-    // Lowest name wins, so a cover is stable across visits rather than depending
-    // on the archive's storage order. Images only: a video cover would cost a
-    // full extraction plus a demux to draw one tile.
-    Ok(names
-        .into_iter()
-        .filter(|n| n.starts_with(&prefix) && has_gallery_image_ext(Path::new(n)))
-        .min_by_key(|n| n.to_lowercase()))
+    // On the blocking pool because this is the per-TILE call: a 4-wide grid of
+    // archive tiles issues several of these at once, each reading a whole archive
+    // index, so it is the indexing command most able to pin several workers.
+    blocking(move || {
+        let names = archive_index(&canonical)?;
+        let prefix = if inner.is_empty() {
+            String::new()
+        } else {
+            format!("{inner}/")
+        };
+        // Lowest name wins, so a cover is stable across visits rather than depending
+        // on the archive's storage order. Images only: a video cover would cost a
+        // full extraction plus a demux to draw one tile.
+        Ok(names
+            .into_iter()
+            .filter(|n| n.starts_with(&prefix) && has_gallery_image_ext(Path::new(n)))
+            .min_by_key(|n| n.to_lowercase()))
+    })
+    .await
+    .map_err(|e| to_ipc("archive_cover_entry", e))
 }
 
 #[cfg(test)]
