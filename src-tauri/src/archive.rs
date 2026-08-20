@@ -365,6 +365,17 @@ pub(crate) fn zip_index(archive: &Path) -> Result<Vec<String>, ArchiveError> {
 /// laziness affordable for zip (rar cannot do this — see `rar_extract_all`).
 /// A partially written file is removed on failure so a later run cannot cache-hit
 /// a truncated page.
+///
+/// The entry is resolved BY INDEX, comparing sanitized names, rather than handed
+/// to `zip.by_name`. `sanitize_entry_path` is a rewriter as well as a validator —
+/// it maps `\` to `/` and trims — and `zip_index` publishes the REWRITTEN name,
+/// which is therefore what comes back in over IPC. But the zip crate's name
+/// lookup keys on the RAW stored `file_name` and does no separator
+/// normalization, so a `.cbz` authored with `\` separators (non-conformant, but
+/// real Windows tooling produces them) would list every page and then fail to
+/// open any of them. Sanitizing both sides of the comparison is what keeps the
+/// listing key and the lookup key the same string. The scan is over the central
+/// directory only — no entry is decompressed to answer it.
 pub(crate) fn zip_extract_entry(
     archive: &Path,
     inner: &str,
@@ -375,10 +386,19 @@ pub(crate) fn zip_extract_entry(
     let clean = sanitize_entry_path(inner).ok_or(ArchiveError::NotFound)?;
     let file = std::fs::File::open(archive).map_err(|_| ArchiveError::NotFound)?;
     let mut zip = zip::ZipArchive::new(file).map_err(zip_error)?;
-    let mut entry = zip.by_name(&clean).map_err(zip_error)?;
-    if entry.is_dir() {
-        return Err(ArchiveError::NotFound);
-    }
+    let idx = (0..zip.len())
+        .find(|&i| {
+            zip.by_index_raw(i)
+                .ok()
+                .filter(|e| !e.is_dir())
+                .and_then(|e| sanitize_entry_path(e.name()))
+                .as_deref()
+                == Some(clean.as_str())
+        })
+        .ok_or(ArchiveError::NotFound)?;
+    // Directory entries were already excluded by the scan above, so this is a
+    // file. `by_index` (not `_raw`) is what decrypts/decompresses on read.
+    let mut entry = zip.by_index(idx).map_err(zip_error)?;
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|_| ArchiveError::Unreadable)?;
     }
@@ -482,9 +502,15 @@ fn rar_extract_all(archive: &Path, mirror: &Path) -> Result<(), ArchiveError> {
 }
 
 /// The extraction pass itself. Entries whose names fail `sanitize_entry_path`,
-/// directories, and encrypted entries are SKIPPED rather than extracted — the
-/// unrar library would otherwise happily honour `..`, and an encrypted entry
-/// has no bytes worth caching. The cap is enforced against bytes ACTUALLY
+/// directories, encrypted entries, and entries that are NEITHER a gallery image
+/// NOR a queue video are SKIPPED rather than extracted — the unrar library would
+/// otherwise happily honour `..`, and an encrypted entry has no bytes worth
+/// caching. The media filter closes an unstated asymmetry with zip, which only
+/// ever writes the one entry a viewer asked for: without it, opening a `.cbr`
+/// wrote every `.exe`/`.dll`/`.txt` it contained into LOCALAPPDATA. Those bytes
+/// were pure waste — `archive_level` never lists a non-media entry, so nothing
+/// could ever have opened one — and the filter is the same pair of predicates
+/// that decides what a level shows, so the two cannot drift. The cap is enforced against bytes ACTUALLY
 /// WRITTEN (read back from disk after `extract_to`), not the header's declared
 /// `unpacked_size`, for the same reason `copy_capped` does the same for zip: an
 /// archive header is attacker-controlled and lies. Any error return here — a
@@ -503,7 +529,10 @@ fn rar_extract_all_pass(archive: &Path, mirror: &Path) -> Result<(), ArchiveErro
         let clean = if is_dir || is_encrypted {
             None
         } else {
-            sanitize_entry_path(&name)
+            sanitize_entry_path(&name).filter(|c| {
+                let as_path = Path::new(c.as_str());
+                has_gallery_image_ext(as_path) || has_queue_video_ext(as_path)
+            })
         };
         match clean {
             Some(clean) => {
@@ -539,7 +568,54 @@ pub(crate) fn archive_index(archive: &Path) -> Result<Vec<String>, ArchiveError>
     }
 }
 
+/// One lock per MIRROR DIRECTORY, minted on first use and kept for the process
+/// lifetime (a `PathBuf` key and an `Arc<Mutex<()>>` per archive the user has
+/// actually opened — bounded by that, and tiny).
+///
+/// Keyed per mirror rather than one global lock so that materializing a page out
+/// of one comic never blocks a thumbnail out of a different one: the gallery
+/// renders tiles concurrently, and unrelated archives share nothing that needs
+/// serializing. What DOES need serializing is two callers racing on the same
+/// mirror — see `ensure_entry`.
+///
+/// Deliberately a `std::sync::Mutex`, not an async-aware one. Extraction is
+/// blocking work (`rar_extract_all` can stream up to `MAX_ARCHIVE_BYTES`), so an
+/// async lock held across it would pin an executor thread for the whole pass
+/// while pretending to yield. A blocking mutex inside a command body that is
+/// already off the UI thread is the honest shape.
+static MIRROR_LOCKS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+/// The lock guarding `mirror`, creating it if this is the first caller.
+///
+/// Poisoning is absorbed (`into_inner`) rather than propagated: the guarded data
+/// is `()`, so a panic in a previous holder tells us nothing about consistency —
+/// and the on-disk invariants (`RAR_COMPLETE_MARKER`, `rar_extract_all`'s
+/// remove-on-failure) are what actually protect the mirror. Refusing every
+/// subsequent open of an archive because one earlier extraction panicked would
+/// be strictly worse than re-attempting it.
+fn mirror_lock(mirror: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let map = MIRROR_LOCKS.get_or_init(Default::default);
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    std::sync::Arc::clone(guard.entry(mirror.to_path_buf()).or_default())
+}
+
 /// Materialize one entry and return its real path in the mirror directory.
+///
+/// INVARIANT: everything below this point runs holding this mirror's lock, so at
+/// most one materialization is ever in flight against one mirror directory. That
+/// is REQUIRED, not merely nice, now that the three archive commands are `async`
+/// and therefore run off the WebView2 UI thread: before that they were serialized
+/// for free by the single-threaded command dispatch, and no two could overlap. As
+/// genuinely concurrent calls they can, and the damage is not bounded to wasted
+/// work — two rar passes over the same mirror interleave `extract_to` writes and
+/// `remove_dir_all` cleanups, so one pass failing (a cap abort, a bad header)
+/// after the other has already written `RAR_COMPLETE_MARKER` deletes a mirror
+/// that is flagged complete, leaving later cache hits pointing at pages that no
+/// longer exist. Holding the lock across the cache-hit check AND the extraction
+/// arms is what makes check-then-extract atomic; a lock taken only around the
+/// write would not.
 ///
 /// This is THE seam: everything above it is format-agnostic, and everything
 /// below it is the per-format strategy — zip random-accesses the one entry, rar
@@ -562,6 +638,10 @@ pub(crate) fn ensure_entry(archive: &Path, inner: &str) -> Result<PathBuf, Archi
     let key = std::fs::canonicalize(archive).unwrap_or_else(|_| archive.to_path_buf());
     let mirror = archive_mirror_dir(&key)?;
     let dst = mirror.join(&clean);
+    // See the INVARIANT above: held across the cache-hit check and the extraction
+    // arms both, so check-then-extract is atomic per mirror.
+    let lock = mirror_lock(&mirror);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     match archive_kind(archive) {
         Some(ArchiveKind::Zip) => {
             if std::fs::metadata(&dst).map(|m| m.len() > 0).unwrap_or(false) {
@@ -591,8 +671,14 @@ fn to_ipc(context: &str, e: ArchiveError) -> String {
 /// One level of an archive, as INNER paths (`ch1/page01.jpg`), never cache paths
 /// — the frontend cannot construct a mirror path, only `archive_entry_file` can
 /// mint one. Reads the index only; no entry is decompressed.
+///
+/// `async` for the same reason `archive_entry_file` is (see there): Tauri runs a
+/// non-`async` command inline on the WebView2 UI thread, and reading the index of
+/// a very large archive off a slow disk is not something to do there. The
+/// reference argument (`tauri::State`) is legal in an async command because the
+/// return type is `Result`.
 #[tauri::command]
-pub(crate) fn list_archive_entries(
+pub(crate) async fn list_archive_entries(
     allow: tauri::State<'_, crate::AllowList>,
     archive: String,
     inner: String,
@@ -607,8 +693,22 @@ pub(crate) fn list_archive_entries(
 
 /// Materialize one entry and return its real path, authorizing the directory it
 /// landed in so the WebView may actually load it.
+///
+/// `async` is load-bearing here, not stylistic. Tauri runs a non-`async` command
+/// INLINE ON THE WEBVIEW2 UI THREAD, and this command is the one place in the
+/// codebase that can do unbounded work: a `.cbr` sends `ensure_entry` into
+/// `rar_extract_all`, which streams up to `MAX_ARCHIVE_BYTES`. On the UI thread
+/// that runs with no message pump, so Windows paints the window as "Not
+/// Responding" — and it fires at STARTUP too, because `fillRecentThumbs` calls
+/// this for a recent `.cbr` card. Every other long-running command in `lib.rs`
+/// (`remux_ts`, `media_thumbnail`, `video_duration`, `compute_waveform_peaks`,
+/// `extract_video_still`) is `async fn` for the same reason; the sync ones are
+/// all single `read_dir`/`metadata` calls.
+///
+/// Going async is what makes `ensure_entry`'s mirror lock necessary — see the
+/// INVARIANT recorded there. The two changes only make sense together.
 #[tauri::command]
-pub(crate) fn archive_entry_file(
+pub(crate) async fn archive_entry_file(
     app: tauri::AppHandle,
     allow: tauri::State<'_, crate::AllowList>,
     archive: String,
@@ -634,8 +734,11 @@ pub(crate) fn archive_entry_file(
 /// Returns a PATH rather than a rendered thumbnail, for the same reason
 /// `folder_cover_image` does: the tile then goes through the existing
 /// `media_thumbnail` command — one cache, one render pipeline.
+///
+/// `async` for the same reason as its two siblings: it reads a whole archive
+/// index, and a non-`async` command would do that on the WebView2 UI thread.
 #[tauri::command]
-pub(crate) fn archive_cover_entry(
+pub(crate) async fn archive_cover_entry(
     allow: tauri::State<'_, crate::AllowList>,
     archive: String,
     inner: String,
@@ -887,6 +990,31 @@ mod tests {
             zip_extract_entry(&zip_path, "../evil.exe", &out_dir.join("evil.exe")),
             Err(ArchiveError::NotFound)
         );
+    }
+
+    /// Whole-branch review, Finding I2: `sanitize_entry_path` is a REWRITER as
+    /// well as a validator (`\` becomes `/`), and `zip_index` publishes the
+    /// rewritten name — but the zip crate's `by_name` keys on the RAW stored
+    /// name and normalizes nothing. A `.cbz` authored with `\` separators (which
+    /// real Windows tooling produces) therefore used to list every page
+    /// correctly and then fail to open a single one of them. Listing and
+    /// extraction must agree on the same key, so this asserts BOTH halves of the
+    /// round trip against one such fixture.
+    #[test]
+    fn zip_entry_stored_with_backslash_separators_lists_and_extracts() {
+        let zip_path = write_test_zip("backslash", &[("Ch2\\p-3.jpg", b"ORANGEPAGE")]);
+        // Half one: it lists, under the normalized name.
+        assert_eq!(zip_index(&zip_path).unwrap(), vec!["Ch2/p-3.jpg".to_string()]);
+        // Half two: that very name, handed straight back, actually opens.
+        let out_dir = zip_path.parent().unwrap().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let dst = out_dir.join("p-3.jpg");
+        zip_extract_entry(&zip_path, "Ch2/p-3.jpg", &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"ORANGEPAGE");
+        // And end to end through the real seam, which is what the command calls.
+        let real = ensure_entry(&zip_path, "Ch2/p-3.jpg").unwrap();
+        assert_eq!(std::fs::read(&real).unwrap(), b"ORANGEPAGE");
+        assert!(real.parent().unwrap().ends_with("Ch2"));
     }
 
     #[test]
