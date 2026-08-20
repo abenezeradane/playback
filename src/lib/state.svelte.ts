@@ -210,6 +210,22 @@ export const ui = $state({
   imgElHidden: true,
   imgErrorHidden: true,
 
+  // --- Image transform tools (img-001) ---
+  // The live transform lives in the controller (it is read and written on every
+  // wheel tick and pointer move, which has no business waking the reactive
+  // graph); these are the derived values the toolbar renders. `imgZoomLabel` is
+  // the readout, `imgCanPan` drives the grab cursor and tells the arrow keys
+  // whether to pan or step to the next photo, and the rest are button states.
+  imgZoomLabel: "100%",
+  imgCanPan: false,
+  imgAtFit: true,
+  imgRotation: 0,
+  imgFlipH: false,
+  imgFlipV: false,
+  // The chrome auto-hide, mirroring the player's `idle` flag: true fades the
+  // header + toolbar out and hides the cursor over the picture.
+  imgIdle: false,
+
   // --- Photo sibling nav + gallery (gallery-001) ---
   // The other images in the current photo's folder, in natural sort order —
   // derived fresh on every image open (mirrors the play-013 folder queue, but for
@@ -263,6 +279,11 @@ export const els: {
   cutTimeline?: HTMLDivElement;
   imgCanvas?: HTMLCanvasElement;
   imgEl?: HTMLImageElement;
+  /** img-001: the viewer box the picture is fitted into (the pan/zoom
+   *  reference frame), and the wrapper both render tiers sit in — one CSS
+   *  transform on the wrapper moves the canvas and the <img> together. */
+  imgViewer?: HTMLDivElement;
+  imgSurface?: HTMLDivElement;
   tsAddInput?: HTMLInputElement;
   /** The inline timestamp-edit field — mounts only while a row is being edited (play-017). */
   tsEditInput?: HTMLInputElement;

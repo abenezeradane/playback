@@ -93,6 +93,21 @@ import {
   type Playlist,
   type PlaylistStore,
   type Shuttle,
+  resetImageTransform,
+  fitImage,
+  rotateImageBy,
+  flipImage,
+  toggleImageFit,
+  panImageBy,
+  clampImagePan,
+  canPanImage,
+  zoomImageAt,
+  stepImageZoom,
+  wheelZoomTarget,
+  imageTransformCss,
+  imageZoomPercent,
+  type ImageTransform,
+  type ImageSize,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -2869,6 +2884,8 @@ function resetGifState(): void {
 function clearImageView(): void {
   imgToken++;
   resetGifState();
+  resetImageTools(); // img-001
+  cancelImageIdle();
   clearPhotoQueue();
   imgEl.removeAttribute("src");
   ui.imgElHidden = true;
@@ -2890,6 +2907,8 @@ async function openImage(path: string): Promise<void> {
   setPanelOpen(false);
   setShortcutsOpen(false);
   resetGifState();
+  resetImageTools(); // img-001: a new photo never inherits the last one's framing
+  showImageChrome();
 
   const title = basename(path);
   ui.imgTitle = title;
@@ -3033,6 +3052,9 @@ function showNativeImage(src: string, token: number): Promise<void> {
       }
       perfMark("image.shown", `native ${imgEl.naturalWidth}x${imgEl.naturalHeight}`); // perf-005
       imgNativeShownAt = performance.now(); // perf-007: handover reference point
+      // img-001: the first tier to know the picture's real size sets up the
+      // transform (surface sizing + the initial fit).
+      setImageNaturalSize(imgEl.naturalWidth, imgEl.naturalHeight);
       ui.imgElHidden = false;
       ui.imgErrorHidden = true;
       resolve();
@@ -3053,6 +3075,332 @@ function showImageError(): void {
   ui.imgElHidden = true;
   imgEl.removeAttribute("src");
   ui.imgErrorHidden = false;
+  cancelImageIdle(); // img-001: never fade the chrome over an error message
+}
+
+// ---------------------------------------------------------------------------
+// Image transform tools (img-001)
+//
+// Zoom / pan / rotate / flip for the photo viewer. The arithmetic all lives in
+// player-core (fitScale, zoomImageAt, clampImagePan, ...); this half owns the
+// live value, the DOM it is written to, and the gestures that drive it.
+//
+// The transform is a plain module variable rather than reactive state: it is
+// rewritten on every wheel tick and every pointer move while dragging, and
+// waking the reactive graph at that rate to re-render a toolbar that has not
+// changed is waste. `syncImageToolsUi` pushes the few values the toolbar
+// actually shows into `ui` after each change.
+//
+// Both render tiers — the frame-decoded <canvas> and the native <img> — sit
+// inside ONE wrapper (`els.imgSurface`) that carries the CSS transform, so a
+// zoomed GIF keeps animating and the two tiers can never drift apart.
+// ---------------------------------------------------------------------------
+
+let imgTransform: ImageTransform = resetImageTransform();
+/** The picture's intrinsic pixel size; (0,0) until a tier reports it. */
+let imgNatural: ImageSize = { width: 0, height: 0 };
+/** Watches the viewer box so "fit" re-fits when the window resizes. */
+let imgResizeObserver: ResizeObserver | undefined;
+
+/**
+ * The box the picture is fitted into: the viewer's CONTENT box, in CSS pixels,
+ * with its origin in viewport coordinates.
+ *
+ * The padding matters and must be subtracted. `.imgview__viewer` carries
+ * `padding: 84px 48px 96px`, and that padding is the only thing keeping the
+ * picture clear of the ABSOLUTELY POSITIONED header above it and the tools bar
+ * below. Measuring the border box (what getBoundingClientRect returns) fitted
+ * the picture to the whole window instead, so a fitted photo ran underneath
+ * both — caught in the first smoke run, where the fitted picture reached the
+ * top and bottom edges of the window.
+ *
+ * The ORIGIN is returned alongside the size because the two must agree: flex
+ * centring puts the picture at the middle of the CONTENT box, so a cursor
+ * anchor has to be measured from that same origin. The padding is asymmetric
+ * (84 above, 96 below), so mixing the two origins would bias every zoom.
+ */
+function imageViewportRect(): { left: number; top: number; width: number; height: number } {
+  const el = els.imgViewer;
+  if (!el) return { left: 0, top: 0, width: 0, height: 0 };
+  const box = el.getBoundingClientRect();
+  const cs = getComputedStyle(el);
+  const pl = parseFloat(cs.paddingLeft) || 0;
+  const pr = parseFloat(cs.paddingRight) || 0;
+  const pt = parseFloat(cs.paddingTop) || 0;
+  const pb = parseFloat(cs.paddingBottom) || 0;
+  return {
+    left: box.left + pl,
+    top: box.top + pt,
+    width: Math.max(0, box.width - pl - pr),
+    height: Math.max(0, box.height - pt - pb),
+  };
+}
+
+/** The size of that box — what every fit and clamp is measured against. */
+function imageViewport(): ImageSize {
+  const r = imageViewportRect();
+  return { width: r.width, height: r.height };
+}
+
+/** True once a tier has reported the picture's real size — every gesture is a
+ *  no-op before that, since none of the geometry means anything yet. */
+function imageMeasured(): boolean {
+  return imgNatural.width > 0 && imgNatural.height > 0;
+}
+
+/** Push the derived toolbar values into reactive state. */
+function syncImageToolsUi(): void {
+  const view = imageViewport();
+  ui.imgZoomLabel = `${imageZoomPercent(imgTransform)}%`;
+  ui.imgCanPan = imageMeasured() && canPanImage(imgTransform, imgNatural, view);
+  ui.imgAtFit = imgTransform.mode === "fit";
+  ui.imgRotation = imgTransform.rotation;
+  ui.imgFlipH = imgTransform.flipH;
+  ui.imgFlipV = imgTransform.flipV;
+}
+
+/** Write the current transform to the DOM and refresh the toolbar. */
+function applyImageTransform(): void {
+  const surface = els.imgSurface;
+  if (surface) surface.style.transform = imageTransformCss(imgTransform);
+  syncImageToolsUi();
+}
+
+/** Replace the transform, clamping the pan, and paint it. */
+function setImageTransform(next: ImageTransform): void {
+  imgTransform = imageMeasured() ? clampImagePan(next, imgNatural, imageViewport()) : next;
+  applyImageTransform();
+}
+
+/**
+ * Record the picture's intrinsic size and fit it to the window.
+ *
+ * The surface is sized to the picture's REAL pixels so the transform's scale is
+ * an absolute zoom — that is what makes "100%" mean 100% and the readout
+ * honest. Both tiers call this; they describe the same picture, so a second
+ * call with the same size is a no-op beyond re-fitting.
+ */
+function setImageNaturalSize(width: number, height: number): void {
+  if (!(width > 0) || !(height > 0)) return;
+  imgNatural = { width, height };
+  const surface = els.imgSurface;
+  if (surface) {
+    surface.style.width = `${width}px`;
+    surface.style.height = `${height}px`;
+  }
+  setImageTransform(fitImage(imgTransform, imgNatural, imageViewport()));
+}
+
+/**
+ * Drop every transform back to a clean fit.
+ *
+ * Called on each new photo: carrying a 400% zoom or a 90-degree turn into the
+ * next picture would ambush the reader, who asked for THIS photo, not for the
+ * last one's framing.
+ */
+function resetImageTools(): void {
+  imgTransform = resetImageTransform();
+  imgNatural = { width: 0, height: 0 };
+  imgDragging = false;
+  imgDragMoved = false;
+  imgDragPointer = null;
+  const surface = els.imgSurface;
+  if (surface) {
+    surface.style.width = "";
+    surface.style.height = "";
+  }
+  applyImageTransform();
+}
+
+/** Re-fit (or re-clamp) after the viewer box changes size. */
+function onImageViewportResize(): void {
+  if (!imageViewActive() || !imageMeasured()) return;
+  const view = imageViewport();
+  setImageTransform(
+    imgTransform.mode === "fit" ? fitImage(imgTransform, imgNatural, view) : imgTransform,
+  );
+}
+
+/** Watch the viewer box (window resize, fullscreen, chrome changes). */
+function observeImageViewport(): void {
+  const viewer = els.imgViewer;
+  if (!viewer || typeof ResizeObserver === "undefined") return;
+  imgResizeObserver?.disconnect();
+  imgResizeObserver = new ResizeObserver(() => onImageViewportResize());
+  imgResizeObserver.observe(viewer);
+}
+
+/** A pointer position in viewer coordinates — the anchor every zoom is taken
+ *  about. Falls back to the viewer's centre when there is no pointer (keyboard
+ *  zoom, toolbar buttons). */
+/** Anything carrying viewport coordinates — a real MouseEvent, or the plain
+ *  {clientX, clientY} the deferred click handler saves off. */
+type ClientPoint = { clientX: number; clientY: number };
+
+function imagePointFromEvent(e: ClientPoint | null): { x: number; y: number } {
+  const r = imageViewportRect();
+  if (!e) return { x: r.width / 2, y: r.height / 2 };
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+// --- Gestures ---------------------------------------------------------------
+
+/** Wheel over the picture: continuous zoom anchored at the cursor. */
+export function onImageWheel(e: WheelEvent): void {
+  if (!imageMeasured()) return;
+  // The viewer never scrolls, so the wheel is unambiguously a zoom here.
+  e.preventDefault();
+  showImageChrome();
+  setImageTransform(
+    zoomImageAt(
+      imgTransform,
+      imgNatural,
+      imageViewport(),
+      wheelZoomTarget(imgTransform.zoom, e.deltaY),
+      imagePointFromEvent(e),
+    ),
+  );
+}
+
+let imgDragging = false;
+/** Whether this drag travelled far enough to be a pan rather than a click. */
+let imgDragMoved = false;
+let imgDragPointer: number | null = null;
+let imgDragLast = { x: 0, y: 0 };
+/** Pointer travel, in CSS pixels, past which a press is a drag and its trailing
+ *  click is suppressed. Small enough that a deliberate drag always registers,
+ *  large enough to survive the hand-wobble in an ordinary click. */
+const IMAGE_DRAG_SLOP = 4;
+
+export function onImagePointerDown(e: PointerEvent): void {
+  // Cleared FIRST, ahead of every guard below. A drag whose release lands
+  // outside the picture fires no click, so the "swallow the click that ended a
+  // pan" flag would otherwise still be set when the next, unrelated click
+  // arrives — and that click would vanish.
+  imgDragMoved = false;
+  // Left button only: the middle button is a paste on some systems and the
+  // right one belongs to the context menu.
+  if (e.button !== 0 || !imageMeasured()) return;
+  if (!canPanImage(imgTransform, imgNatural, imageViewport())) return;
+  imgDragging = true;
+  imgDragPointer = e.pointerId;
+  imgDragLast = { x: e.clientX, y: e.clientY };
+  // Capture so a fast drag that leaves the window still delivers its moves and
+  // its release — without it the picture sticks to the cursor.
+  (e.currentTarget as Element | null)?.setPointerCapture?.(e.pointerId);
+}
+
+export function onImagePointerMove(e: PointerEvent): void {
+  if (!imgDragging || e.pointerId !== imgDragPointer) return;
+  const dx = e.clientX - imgDragLast.x;
+  const dy = e.clientY - imgDragLast.y;
+  imgDragLast = { x: e.clientX, y: e.clientY };
+  if (Math.abs(dx) > IMAGE_DRAG_SLOP || Math.abs(dy) > IMAGE_DRAG_SLOP) imgDragMoved = true;
+  setImageTransform(panImageBy(imgTransform, dx, dy, imgNatural, imageViewport()));
+}
+
+export function onImagePointerUp(e: PointerEvent): void {
+  if (e.pointerId !== imgDragPointer) return;
+  (e.currentTarget as Element | null)?.releasePointerCapture?.(e.pointerId);
+  imgDragging = false;
+  imgDragPointer = null;
+  // `imgDragMoved` is read by the click handler that fires straight after this,
+  // then cleared there.
+}
+
+// --- Commands (toolbar buttons + hotkeys) -----------------------------------
+
+/** Zoom one ladder stop, about the cursor if there is one. */
+export function doImageZoomStep(dir: number, e?: ClientPoint | null): void {
+  if (!imageMeasured()) return;
+  setImageTransform(
+    zoomImageAt(
+      imgTransform,
+      imgNatural,
+      imageViewport(),
+      stepImageZoom(imgTransform.zoom, dir),
+      imagePointFromEvent(e ?? null),
+    ),
+  );
+}
+
+/** Fit the picture to the window (the 0 key / the fit button). */
+export function doImageFit(): void {
+  if (!imageMeasured()) return;
+  setImageTransform(fitImage(imgTransform, imgNatural, imageViewport()));
+}
+
+/** True pixel size (the 1 key), about the centre. */
+export function doImageActualSize(): void {
+  if (!imageMeasured()) return;
+  setImageTransform(
+    zoomImageAt(imgTransform, imgNatural, imageViewport(), 1, imagePointFromEvent(null)),
+  );
+}
+
+/** The click / fit button toggle: fit becomes 100%, anything else returns to fit. */
+export function doImageToggleFit(e?: ClientPoint | null): void {
+  if (!imageMeasured()) return;
+  setImageTransform(
+    toggleImageFit(imgTransform, imgNatural, imageViewport(), imagePointFromEvent(e ?? null)),
+  );
+}
+
+/** Turn a quarter: +1 clockwise, -1 anticlockwise. View-only — the file on disk
+ *  is never touched. */
+export function doImageRotate(dir: number): void {
+  if (!imageMeasured()) return;
+  setImageTransform(rotateImageBy(imgTransform, dir >= 0 ? 90 : -90, imgNatural, imageViewport()));
+}
+
+/** Mirror about the picture's own horizontal / vertical axis. View-only. */
+export function doImageFlip(axis: "h" | "v"): void {
+  if (!imageMeasured()) return;
+  setImageTransform(flipImage(imgTransform, axis));
+}
+
+/** Arrow-key pan, one nudge. */
+function doImagePan(dx: number, dy: number): void {
+  if (!imageMeasured()) return;
+  setImageTransform(panImageBy(imgTransform, dx, dy, imgNatural, imageViewport()));
+}
+
+/** Whether the arrows should pan rather than step to the next photo — true only
+ *  when part of the picture is actually off-screen. */
+function imageArrowsPan(): boolean {
+  return imageMeasured() && canPanImage(imgTransform, imgNatural, imageViewport());
+}
+
+/** One arrow-key pan nudge, in CSS pixels. */
+const IMAGE_PAN_STEP = 60;
+
+// --- Chrome auto-hide -------------------------------------------------------
+//
+// Mirrors the player's `showControls` (the `idle` flag + a `data-idle`
+// attribute that fades the chrome and hides the cursor). It cannot reuse it:
+// the player's version only hides while a video is PLAYING, a condition that
+// means nothing for a still photograph.
+
+let imgIdleTimer: number | undefined;
+/** How long the mouse must sit still before the photo is left alone. */
+const IMAGE_IDLE_MS = 2600;
+
+/** Show the image chrome and restart the idle countdown. */
+export function showImageChrome(): void {
+  ui.imgIdle = false;
+  window.clearTimeout(imgIdleTimer);
+  imgIdleTimer = window.setTimeout(() => {
+    // Never hide the chrome out from under a pointer that is mid-drag, and
+    // never on the error state, where the chrome is the only thing to read.
+    if (imageViewActive() && !imgDragging && ui.imgMode !== "error") ui.imgIdle = true;
+  }, IMAGE_IDLE_MS);
+}
+
+/** Stop the countdown and bring the chrome back (leaving the view, opening a
+ *  new photo, hitting an error). */
+function cancelImageIdle(): void {
+  window.clearTimeout(imgIdleTimer);
+  ui.imgIdle = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -3756,6 +4104,12 @@ function drawBitmap(bitmap: ImageBitmap): void {
     imgCanvas.width = bitmap.width;
     imgCanvas.height = bitmap.height;
   }
+  // img-001: guarded on a real CHANGE. The canvas tier takes over from the
+  // <img> at the same size, and re-fitting on every animation frame would
+  // wrench a zoomed-in GIF back to fit sixty times a second.
+  if (imgNatural.width !== bitmap.width || imgNatural.height !== bitmap.height) {
+    setImageNaturalSize(bitmap.width, bitmap.height);
+  }
   const ctx = imgCanvas.getContext("2d");
   if (!ctx) return;
   ctx.clearRect(0, 0, imgCanvas.width, imgCanvas.height);
@@ -3834,11 +4188,63 @@ function updateGifInfo(): void {
 
 /** Image-viewer transport hotkeys; returns true if the key was handled. */
 function handleImageKey(e: KeyboardEvent): boolean {
+  // img-001: the transform tools answer for ANY image, animated or still, and
+  // are checked first — zoom is the gesture a reader reaches for most.
+  switch (e.key) {
+    case "+":
+    case "=":
+      e.preventDefault();
+      doImageZoomStep(1);
+      return true;
+    case "-":
+    case "_":
+      e.preventDefault();
+      doImageZoomStep(-1);
+      return true;
+    case "0":
+      e.preventDefault();
+      doImageFit();
+      return true;
+    case "1":
+      e.preventDefault();
+      doImageActualSize();
+      return true;
+    case "r":
+    case "R":
+      e.preventDefault();
+      doImageRotate(1);
+      return true;
+    case "l":
+    case "L":
+      e.preventDefault();
+      doImageRotate(-1);
+      return true;
+    case "h":
+    case "H":
+      e.preventDefault();
+      doImageFlip("h");
+      return true;
+    case "v":
+    case "V":
+      e.preventDefault();
+      doImageFlip("v");
+      return true;
+    default:
+      break;
+  }
   // Sibling photo nav (gallery-001) and the gallery-grid hotkey work for ANY
-  // opened image — animated or a single static frame — so they're checked before
-  // the animated-only bail below.
+  // opened image — animated or a single static frame.
+  //
+  // img-001: the arrows are shared. While part of the picture is off-screen they
+  // pan it, because that is plainly what an arrow means when you are zoomed in;
+  // once the whole picture fits they go back to stepping through the folder.
   switch (e.key) {
     case "ArrowRight":
+      if (imageArrowsPan()) {
+        e.preventDefault();
+        doImagePan(-IMAGE_PAN_STEP, 0);
+        return true;
+      }
       if (ui.photoQueue.length > 1) {
         e.preventDefault();
         doNextPhoto();
@@ -3846,9 +4252,28 @@ function handleImageKey(e: KeyboardEvent): boolean {
       }
       return false;
     case "ArrowLeft":
+      if (imageArrowsPan()) {
+        e.preventDefault();
+        doImagePan(IMAGE_PAN_STEP, 0);
+        return true;
+      }
       if (ui.photoQueue.length > 1) {
         e.preventDefault();
         doPrevPhoto();
+        return true;
+      }
+      return false;
+    case "ArrowUp":
+      if (imageArrowsPan()) {
+        e.preventDefault();
+        doImagePan(0, IMAGE_PAN_STEP);
+        return true;
+      }
+      return false;
+    case "ArrowDown":
+      if (imageArrowsPan()) {
+        e.preventDefault();
+        doImagePan(0, -IMAGE_PAN_STEP);
         return true;
       }
       return false;
@@ -3883,13 +4308,13 @@ function handleImageKey(e: KeyboardEvent): boolean {
       e.preventDefault();
       stepGifFrame(1);
       return true;
-    case "+":
-    case "=":
+    // img-001 moved the rate off +/-, which now zoom every image. The rate
+    // button in the transport is unchanged; these are its hotkeys.
+    case "]":
       e.preventDefault();
       stepGifRate(1);
       return true;
-    case "-":
-    case "_":
+    case "[":
       e.preventDefault();
       stepGifRate(-1);
       return true;
@@ -3955,21 +4380,33 @@ export function onVideoClick(): void {
  * click handling at all, so double-clicking a photo or GIF did nothing while the
  * same gesture worked on video — the inconsistency the user reported.
  *
- * The single-click half only does something where there is something to do: an
- * ANIMATED image toggles play/pause (matching the video), a still does nothing
- * rather than inventing a gesture (no advance-on-click, which would fight the
- * prev/next chevrons sitting on the same surface).
+ * img-001 gave the single-click half a job on a STILL image: toggle fit against
+ * 100%, anchored where you clicked. An ANIMATED image keeps play/pause, which
+ * it has had since ui-007 — a reader watching a GIF reaches for pause far more
+ * often than for a zoom, and the zoom is still on the wheel, the keys and the
+ * toolbar for them.
+ *
+ * A click that ends a PAN is swallowed: dragging the picture around would
+ * otherwise snap it to a different zoom every time you let go.
  */
-export function onImageClick(): void {
+export function onImageClick(e: MouseEvent): void {
+  if (imgDragMoved) {
+    imgDragMoved = false;
+    return;
+  }
   if (imageClickTimer !== null) {
     clearTimeout(imageClickTimer);
     imageClickTimer = null;
     void doToggleFullscreen();
     return;
   }
+  // The event object is pooled-and-reused in some engines, so capture the
+  // coordinates now rather than reading them inside the deferred callback.
+  const point = { clientX: e.clientX, clientY: e.clientY };
   imageClickTimer = window.setTimeout(() => {
     imageClickTimer = null;
     if (ui.imgMode === "animated") toggleGifPlay();
+    else doImageToggleFit(point);
   }, DOUBLE_CLICK_MS);
 }
 
@@ -4454,6 +4891,7 @@ export function init(): void {
     els.video!.addEventListener("leavepictureinpicture", onLeavePip);
   }
 
+  observeImageViewport(); // img-001: "fit" re-fits when the window changes size
   wireKeyboard();
   wireFocusReturn();
   wireMoreMenu();

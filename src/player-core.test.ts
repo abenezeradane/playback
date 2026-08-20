@@ -104,6 +104,25 @@ import {
   filmstripCellTime,
   frameStepTarget,
   ZERO_MARGINS,
+  resetImageTransform,
+  rotatedSize,
+  fitScale,
+  renderedSize,
+  clampImageZoom,
+  stepImageZoom,
+  zoomImageAt,
+  clampImagePan,
+  canPanImage,
+  IMAGE_ZOOM_MIN,
+  IMAGE_ZOOM_MAX,
+  rotateImageBy,
+  flipImage,
+  fitImage,
+  toggleImageFit,
+  panImageBy,
+  imageTransformCss,
+  imageZoomPercent,
+  wheelZoomTarget,
   type EngineSnapshot,
   type NativePlayerEvent,
 } from "./player-core";
@@ -1679,5 +1698,359 @@ describe("native engine — filmstrip cell times + frame step (native-002)", () 
     // Unknown fps falls back to the app default 30.
     expect(frameStepTarget(10, NaN, true)).toBeCloseTo(10 + 1 / 30, 9);
     expect(frameStepTarget(10, 0, false)).toBeCloseTo(10 - 1 / 30, 9);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Image viewer transform tools (img-001)
+// ---------------------------------------------------------------------------
+
+describe("image transform — geometry basics (img-001)", () => {
+  it("starts fit to the window, unzoomed, unrotated, unflipped", () => {
+    const t = resetImageTransform();
+    expect(t.zoom).toBe(1);
+    expect(t.x).toBe(0);
+    expect(t.y).toBe(0);
+    expect(t.rotation).toBe(0);
+    expect(t.flipH).toBe(false);
+    expect(t.flipV).toBe(false);
+    expect(t.mode).toBe("fit");
+  });
+
+  it("swaps width and height for the quarter turns only", () => {
+    const nat = { width: 400, height: 300 };
+    expect(rotatedSize(nat, 0)).toEqual({ width: 400, height: 300 });
+    expect(rotatedSize(nat, 90)).toEqual({ width: 300, height: 400 });
+    expect(rotatedSize(nat, 180)).toEqual({ width: 400, height: 300 });
+    expect(rotatedSize(nat, 270)).toEqual({ width: 300, height: 400 });
+  });
+
+  it("fits by the tighter axis of the ROTATED box", () => {
+    // A 400x300 landscape photo in a 200x200 window fits by WIDTH: 200/400.
+    expect(fitScale({ width: 400, height: 300 }, { width: 200, height: 200 }, 0)).toBeCloseTo(0.5, 9);
+    // Turned 90 degrees it is 300x400 on screen, so it fits by HEIGHT: 200/400.
+    // This is the case a naive fitScale gets wrong — it would still say 0.5 by
+    // width and overflow the window vertically.
+    expect(fitScale({ width: 400, height: 300 }, { width: 200, height: 200 }, 90)).toBeCloseTo(0.5, 9);
+    // Make the asymmetry visible: a wide window, where the two answers differ.
+    expect(fitScale({ width: 400, height: 200 }, { width: 800, height: 400 }, 0)).toBeCloseTo(1, 9);
+    expect(fitScale({ width: 400, height: 200 }, { width: 800, height: 400 }, 90)).toBeCloseTo(1, 9);
+    expect(fitScale({ width: 1000, height: 200 }, { width: 800, height: 400 }, 90)).toBeCloseTo(0.4, 9);
+  });
+
+  it("never upscales a small picture past 100%, matching the old CSS letterbox", () => {
+    // The pre-img-001 rendering was max-width/max-height: 100%, which shrinks a
+    // big photo and leaves a small one alone. A 50x50 icon must not be blown up
+    // to fill a 1000x800 window.
+    expect(fitScale({ width: 50, height: 50 }, { width: 1000, height: 800 }, 0)).toBe(1);
+  });
+
+  it("falls back to 100% for degenerate sizes rather than 0 or Infinity", () => {
+    expect(fitScale({ width: 0, height: 0 }, { width: 800, height: 600 }, 0)).toBe(1);
+    expect(fitScale({ width: 400, height: 300 }, { width: 0, height: 0 }, 0)).toBe(1);
+    expect(fitScale({ width: NaN, height: 300 }, { width: 800, height: 600 }, 0)).toBe(1);
+  });
+
+  it("reports the on-screen box as the rotated size times the zoom", () => {
+    const t = { ...resetImageTransform(), zoom: 2, rotation: 90 as const };
+    expect(renderedSize({ width: 400, height: 300 }, t)).toEqual({ width: 600, height: 800 });
+  });
+});
+
+describe("image transform — zoom ladder and cursor-anchored zoom (img-001)", () => {
+  it("clamps a zoom into the usable range and rejects nonsense", () => {
+    expect(clampImageZoom(500)).toBe(IMAGE_ZOOM_MAX);
+    expect(clampImageZoom(0.0001)).toBe(IMAGE_ZOOM_MIN);
+    expect(clampImageZoom(NaN)).toBe(1);
+    expect(clampImageZoom(0)).toBe(IMAGE_ZOOM_MIN);
+    expect(clampImageZoom(2)).toBe(2);
+  });
+
+  it("steps to the next ladder stop, in both directions", () => {
+    expect(stepImageZoom(1, 1)).toBeCloseTo(1.5, 9);
+    expect(stepImageZoom(1, -1)).toBeCloseTo(0.67, 9);
+    expect(stepImageZoom(2, 1)).toBeCloseTo(3, 9);
+  });
+
+  it("steps to the nearest stop BEYOND an off-ladder zoom, never back onto itself", () => {
+    // Wheel zoom lands anywhere; a following +/- press must still move, and must
+    // move in the direction pressed.
+    expect(stepImageZoom(0.83, 1)).toBeCloseTo(1, 9);
+    expect(stepImageZoom(0.83, -1)).toBeCloseTo(0.67, 9);
+    expect(stepImageZoom(2.4, 1)).toBeCloseTo(3, 9);
+    expect(stepImageZoom(2.4, -1)).toBeCloseTo(2, 9);
+  });
+
+  it("stops at the ends of the ladder instead of running away", () => {
+    expect(stepImageZoom(IMAGE_ZOOM_MAX, 1)).toBe(IMAGE_ZOOM_MAX);
+    expect(stepImageZoom(IMAGE_ZOOM_MIN, -1)).toBe(IMAGE_ZOOM_MIN);
+  });
+
+  it("keeps the point under the cursor under the cursor", () => {
+    // 400x300 photo at 100% in an 800x600 viewport: centred, so the picture's
+    // centre is at screen (400, 300). The cursor sits 100px to its right.
+    const t = { ...resetImageTransform(), zoom: 1 };
+    const nat = { width: 400, height: 300 };
+    const view = { width: 800, height: 600 };
+    const next = zoomImageAt(t, nat, view, 4, { x: 500, y: 300 });
+    expect(next.zoom).toBe(4);
+    // That image point is now 4 x 100 = 400px right of the picture's centre, so
+    // the centre must move to 500 - 400 = screen x 100, i.e. 300px left of the
+    // viewport centre.
+    expect(next.x).toBeCloseTo(-300, 9);
+    expect(next.y).toBeCloseTo(0, 9);
+    expect(next.mode).toBe("free");
+  });
+
+  it("leaves the pan alone when the cursor is already at the centre", () => {
+    const t = { ...resetImageTransform(), zoom: 1 };
+    const next = zoomImageAt(t, { width: 400, height: 300 }, { width: 800, height: 600 }, 4, {
+      x: 400,
+      y: 300,
+    });
+    expect(next.x).toBeCloseTo(0, 9);
+    expect(next.y).toBeCloseTo(0, 9);
+  });
+
+  it("re-centres when the zoomed picture no longer overflows the window", () => {
+    // Zooming 400x300 to 2x fills an 800x600 viewport EXACTLY. Nothing is hidden,
+    // so the cursor-anchored offset must be clamped away rather than leaving the
+    // picture off-centre with dead space beside it.
+    const t = { ...resetImageTransform(), zoom: 1 };
+    const next = zoomImageAt(t, { width: 400, height: 300 }, { width: 800, height: 600 }, 2, {
+      x: 500,
+      y: 300,
+    });
+    expect(next.x).toBe(0);
+    expect(next.y).toBe(0);
+  });
+
+  it("clamps a zoom request into range as it applies it", () => {
+    const t = resetImageTransform();
+    const next = zoomImageAt(t, { width: 400, height: 300 }, { width: 800, height: 600 }, 9999, {
+      x: 400,
+      y: 300,
+    });
+    expect(next.zoom).toBe(IMAGE_ZOOM_MAX);
+  });
+});
+
+describe("image transform — pan clamping (img-001)", () => {
+  const nat = { width: 400, height: 300 };
+  const view = { width: 800, height: 600 };
+
+  it("stops the pan at the picture's edge", () => {
+    // At 4x the picture is 1600x1200 in an 800x600 window: 400px of slack each
+    // way horizontally, 300px vertically.
+    const t = { ...resetImageTransform(), zoom: 4, x: 1000, y: 1000, mode: "free" as const };
+    const c = clampImagePan(t, nat, view);
+    expect(c.x).toBe(400);
+    expect(c.y).toBe(300);
+    const c2 = clampImagePan({ ...t, x: -1000, y: -1000 }, nat, view);
+    expect(c2.x).toBe(-400);
+    expect(c2.y).toBe(-300);
+  });
+
+  it("leaves a pan that is already inside the slack untouched", () => {
+    const t = { ...resetImageTransform(), zoom: 4, x: 120, y: -80, mode: "free" as const };
+    const c = clampImagePan(t, nat, view);
+    expect(c.x).toBe(120);
+    expect(c.y).toBe(-80);
+  });
+
+  it("re-centres a picture smaller than the window", () => {
+    const t = { ...resetImageTransform(), zoom: 0.5, x: 300, y: 300, mode: "free" as const };
+    const c = clampImagePan(t, nat, view);
+    expect(c.x).toBe(0);
+    expect(c.y).toBe(0);
+  });
+
+  it("measures the slack against the ROTATED box", () => {
+    // Turned 90 degrees at 4x the picture is 1200x1600, so the slack is 200px
+    // horizontally and 500px vertically — the opposite shape to the unrotated case.
+    const t = {
+      ...resetImageTransform(),
+      zoom: 4,
+      rotation: 90 as const,
+      x: 1000,
+      y: 1000,
+      mode: "free" as const,
+    };
+    const c = clampImagePan(t, nat, view);
+    expect(c.x).toBe(200);
+    expect(c.y).toBe(500);
+  });
+
+  it("reports panning as possible only when something is actually hidden", () => {
+    expect(canPanImage({ ...resetImageTransform(), zoom: 4 }, nat, view)).toBe(true);
+    expect(canPanImage({ ...resetImageTransform(), zoom: 0.5 }, nat, view)).toBe(false);
+    // Exactly filling the window hides nothing, so the arrow keys must keep
+    // navigating to the next photo rather than silently becoming a pan.
+    expect(canPanImage({ ...resetImageTransform(), zoom: 2 }, nat, view)).toBe(false);
+    // Overflowing in ONE axis is enough.
+    expect(canPanImage({ ...resetImageTransform(), zoom: 2.5 }, nat, view)).toBe(true);
+  });
+});
+
+describe("image transform — rotate, flip and fit (img-001)", () => {
+  const wide = { width: 1000, height: 300 };
+  const view = { width: 800, height: 600 };
+
+  it("turns by quarters and wraps at both ends", () => {
+    const t = resetImageTransform();
+    expect(rotateImageBy(t, 90, wide, view).rotation).toBe(90);
+    expect(rotateImageBy({ ...t, rotation: 270 }, 90, wide, view).rotation).toBe(0);
+    expect(rotateImageBy(t, -90, wide, view).rotation).toBe(270);
+    expect(rotateImageBy({ ...t, rotation: 180 }, -90, wide, view).rotation).toBe(90);
+  });
+
+  it("re-fits to the turned box while in fit mode", () => {
+    // 1000x300 in an 800x600 window fits by width at 0.8. Stood on its end it is
+    // 300x1000 and fits by HEIGHT at 0.6. Keeping 0.8 would run it off the top
+    // and bottom of the window.
+    const fitted = fitImage(resetImageTransform(), wide, view);
+    expect(fitted.zoom).toBeCloseTo(0.8, 9);
+    const turned = rotateImageBy(fitted, 90, wide, view);
+    expect(turned.zoom).toBeCloseTo(0.6, 9);
+    expect(turned.mode).toBe("fit");
+  });
+
+  it("keeps the user's own zoom when turning outside fit mode", () => {
+    const zoomed = { ...resetImageTransform(), zoom: 3, mode: "free" as const };
+    expect(rotateImageBy(zoomed, 90, wide, view).zoom).toBe(3);
+  });
+
+  it("re-centres when it turns, so the view is never left off in a corner", () => {
+    const panned = { ...resetImageTransform(), zoom: 4, x: 300, y: 200, mode: "free" as const };
+    const turned = rotateImageBy(panned, 90, wide, view);
+    expect(turned.x).toBe(0);
+    expect(turned.y).toBe(0);
+  });
+
+  it("toggles each mirror independently", () => {
+    const t = resetImageTransform();
+    expect(flipImage(t, "h").flipH).toBe(true);
+    expect(flipImage(t, "h").flipV).toBe(false);
+    expect(flipImage(flipImage(t, "h"), "h").flipH).toBe(false);
+    expect(flipImage(t, "v").flipV).toBe(true);
+    const both = flipImage(flipImage(t, "h"), "v");
+    expect(both.flipH).toBe(true);
+    expect(both.flipV).toBe(true);
+  });
+
+  it("returns to fit centred, keeping rotation and mirrors", () => {
+    const messy = {
+      ...resetImageTransform(),
+      zoom: 7,
+      x: 120,
+      y: -90,
+      rotation: 90 as const,
+      flipH: true,
+      mode: "free" as const,
+    };
+    const f = fitImage(messy, wide, view);
+    expect(f.zoom).toBeCloseTo(0.6, 9);
+    expect(f.x).toBe(0);
+    expect(f.y).toBe(0);
+    expect(f.mode).toBe("fit");
+    expect(f.rotation).toBe(90);
+    expect(f.flipH).toBe(true);
+  });
+
+  it("clicking a fitted picture goes to 100% under the cursor, and back", () => {
+    const fitted = fitImage(resetImageTransform(), wide, view);
+    const zoomed = toggleImageFit(fitted, wide, view, { x: 700, y: 300 });
+    expect(zoomed.zoom).toBe(1);
+    expect(zoomed.mode).toBe("free");
+    const back = toggleImageFit(zoomed, wide, view, { x: 700, y: 300 });
+    expect(back.zoom).toBeCloseTo(0.8, 9);
+    expect(back.mode).toBe("fit");
+    expect(back.x).toBe(0);
+  });
+
+  it("does nothing on a picture already smaller than the window", () => {
+    // Fit and 100% are the same thing for a small picture, so the click has
+    // nowhere to go. Recorded deliberately: a no-op, not an accident.
+    const small = { width: 120, height: 80 };
+    const fitted = fitImage(resetImageTransform(), small, view);
+    expect(fitted.zoom).toBe(1);
+    const clicked = toggleImageFit(fitted, small, view, { x: 400, y: 300 });
+    expect(clicked.zoom).toBe(1);
+  });
+
+  it("pans by a delta and stops at the edge", () => {
+    const t = { ...resetImageTransform(), zoom: 4, mode: "free" as const };
+    // 1000x300 at 4x is 4000x1200 in an 800x600 window: 1600px of horizontal
+    // slack, 300px of vertical.
+    const moved = panImageBy(t, 200, 100, wide, view);
+    expect(moved.x).toBe(200);
+    expect(moved.y).toBe(100);
+    const pinned = panImageBy(moved, 9999, 9999, wide, view);
+    expect(pinned.x).toBe(1600);
+    expect(pinned.y).toBe(300);
+  });
+});
+
+describe("image transform — CSS projection (img-001)", () => {
+  it("writes an identity transform for a fresh picture", () => {
+    expect(imageTransformCss(resetImageTransform())).toBe(
+      "translate(0px, 0px) scale(1) rotate(0deg) scale(1, 1)",
+    );
+  });
+
+  it("mirrors in IMAGE space: the flip is applied before the rotation", () => {
+    // CSS applies a transform list right-to-left, so the mirror sitting LAST in
+    // the string is the first thing applied to the picture's own axes. Move it
+    // ahead of the rotate and a flipped-then-turned photo mirrors across the
+    // screen's axes instead of its own.
+    const t = { ...resetImageTransform(), rotation: 90 as const, flipH: true, zoom: 2, x: 10, y: -5 };
+    expect(imageTransformCss(t)).toBe(
+      "translate(10px, -5px) scale(2) rotate(90deg) scale(-1, 1)",
+    );
+  });
+
+  it("trims float noise out of the numbers it writes", () => {
+    const t = { ...resetImageTransform(), zoom: 0.30000000000000004, x: 1 / 3 };
+    expect(imageTransformCss(t)).toBe("translate(0.3333px, 0px) scale(0.3) rotate(0deg) scale(1, 1)");
+  });
+
+  it("reads out whole percentages for the toolbar", () => {
+    expect(imageZoomPercent({ ...resetImageTransform(), zoom: 1 })).toBe(100);
+    expect(imageZoomPercent({ ...resetImageTransform(), zoom: 0.6666 })).toBe(67);
+    expect(imageZoomPercent({ ...resetImageTransform(), zoom: 16 })).toBe(1600);
+  });
+});
+
+describe("image transform — wheel zoom (img-001)", () => {
+  it("scrolls up to magnify and down to shrink", () => {
+    // A wheel event's deltaY is NEGATIVE scrolling up/away from the user.
+    expect(wheelZoomTarget(1, -100)).toBeGreaterThan(1);
+    expect(wheelZoomTarget(1, 100)).toBeLessThan(1);
+  });
+
+  it("moves by the same ratio at every zoom level", () => {
+    // Constant-ratio zoom feels even; a constant ADDITION would crawl at 16x and
+    // lurch at 0.1x.
+    const up = wheelZoomTarget(1, -100) / 1;
+    const upFar = wheelZoomTarget(4, -100) / 4;
+    expect(upFar).toBeCloseTo(up, 6);
+  });
+
+  it("comes back to where it started after a scroll up and down", () => {
+    expect(wheelZoomTarget(wheelZoomTarget(2, -100), 100)).toBeCloseTo(2, 6);
+  });
+
+  it("caps one event's jump so a trackpad flick does not slam to the limit", () => {
+    // Some trackpads and high-resolution wheels report deltaY in the thousands.
+    const huge = wheelZoomTarget(1, -5000);
+    expect(huge).toBeLessThanOrEqual(2);
+    expect(huge).toBeGreaterThan(1);
+  });
+
+  it("stays inside the zoom range and survives a nonsense delta", () => {
+    expect(wheelZoomTarget(IMAGE_ZOOM_MAX, -100)).toBe(IMAGE_ZOOM_MAX);
+    expect(wheelZoomTarget(IMAGE_ZOOM_MIN, 100)).toBe(IMAGE_ZOOM_MIN);
+    expect(wheelZoomTarget(1, NaN)).toBe(1);
+    expect(wheelZoomTarget(1, 0)).toBe(1);
   });
 });

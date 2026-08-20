@@ -1615,3 +1615,330 @@ export function frameStepTarget(current: number, fps: number, forward: boolean):
   const dt = 1 / rate;
   return Math.max(0, (Number.isFinite(current) ? current : 0) + (forward ? dt : -dt));
 }
+
+// --- Image viewer transform tools (img-001) ----------------------------------
+//
+// The photo viewer's zoom / pan / rotate / flip state and the geometry that
+// keeps it honest. Pure by design: the viewer owns one ImageTransform value and
+// every gesture is a function from one transform to the next, so the awkward
+// parts (anchoring a zoom at the cursor, fitting a ROTATED box, clamping a pan
+// so the window never shows dead space beside the picture) are unit-testable
+// without a DOM.
+//
+// Conventions used throughout this section:
+//   * `zoom` is ABSOLUTE scale against the image's natural pixel size, so 1 is
+//     true 100% and the on-screen readout is honest.
+//   * `x`/`y` are the picture's centre offset from the viewport centre, in CSS
+//     pixels. (0, 0) is centred, which is where "fit" always sits.
+//   * "rendered" means the on-screen box: the rotated size times the zoom.
+
+/** Quarter turns are the only rotations the viewer offers (no free rotate). */
+export type ImageRotation = 0 | 90 | 180 | 270;
+
+export interface ImageSize {
+  width: number;
+  height: number;
+}
+
+export interface ImagePoint {
+  x: number;
+  y: number;
+}
+
+export interface ImageTransform {
+  zoom: number;
+  x: number;
+  y: number;
+  rotation: ImageRotation;
+  flipH: boolean;
+  flipV: boolean;
+  /** "fit" re-derives zoom from the viewport on every resize; "free" is the
+   *  user's own zoom and survives a resize untouched. */
+  mode: "fit" | "free";
+}
+
+/** The state every freshly-opened photo starts in (and that 0 returns to). */
+export function resetImageTransform(): ImageTransform {
+  return { zoom: 1, x: 0, y: 0, rotation: 0, flipH: false, flipV: false, mode: "fit" };
+}
+
+function isPositiveSize(s: ImageSize): boolean {
+  return (
+    Number.isFinite(s.width) && Number.isFinite(s.height) && s.width > 0 && s.height > 0
+  );
+}
+
+/** The picture's footprint after rotation — width and height swap on a quarter
+ *  turn. Everything that measures the picture on screen goes through this. */
+export function rotatedSize(natural: ImageSize, rotation: ImageRotation): ImageSize {
+  return rotation === 90 || rotation === 270
+    ? { width: natural.height, height: natural.width }
+    : { width: natural.width, height: natural.height };
+}
+
+/**
+ * The zoom at which the picture just fits the viewport, measured against the
+ * ROTATED box — a landscape photo turned on its side fits by height, not width.
+ *
+ * Capped at 1: "fit" shrinks a picture too big for the window but never blows a
+ * small one up, which is exactly what the `max-width/max-height: 100%` CSS this
+ * replaced did. Degenerate sizes yield 1 rather than 0 or Infinity.
+ */
+export function fitScale(
+  natural: ImageSize,
+  viewport: ImageSize,
+  rotation: ImageRotation,
+): number {
+  if (!isPositiveSize(natural) || !isPositiveSize(viewport)) return 1;
+  const box = rotatedSize(natural, rotation);
+  return Math.min(1, Math.min(viewport.width / box.width, viewport.height / box.height));
+}
+
+/** The picture's on-screen box under `t`. */
+export function renderedSize(natural: ImageSize, t: ImageTransform): ImageSize {
+  const box = rotatedSize(natural, t.rotation);
+  return { width: box.width * t.zoom, height: box.height * t.zoom };
+}
+
+/** Zoom range the viewer allows. Below the floor a photo is an unreadable
+ *  speck; above the ceiling a 24MP image is a wall of single pixels. */
+export const IMAGE_ZOOM_MIN = 0.1;
+export const IMAGE_ZOOM_MAX = 16;
+
+/** The stops the +/- keys and the toolbar buttons walk between. The wheel is
+ *  continuous and ignores these, which is why stepImageZoom has to cope with a
+ *  starting zoom that sits between two stops. */
+export const IMAGE_ZOOM_STOPS = [
+  0.1, 0.25, 0.33, 0.5, 0.67, 1, 1.5, 2, 3, 4, 6, 8, 12, 16,
+] as const;
+
+/** Float slack for comparing a zoom against a ladder stop. */
+const ZOOM_EPSILON = 1e-6;
+
+export function clampImageZoom(zoom: number): number {
+  if (!Number.isFinite(zoom)) return 1;
+  return Math.min(IMAGE_ZOOM_MAX, Math.max(IMAGE_ZOOM_MIN, zoom));
+}
+
+/**
+ * The next ladder stop past `zoom` in direction `dir` (+1 up, -1 down).
+ *
+ * "Past" is strict, so a zoom already sitting on a stop moves off it, and a
+ * wheel-zoom's off-ladder value (0.83, say) snaps to the first stop in the
+ * direction pressed rather than to the nearest one — pressing + must never
+ * make the picture smaller.
+ */
+export function stepImageZoom(zoom: number, dir: number): number {
+  const from = clampImageZoom(zoom);
+  if (dir > 0) {
+    for (const stop of IMAGE_ZOOM_STOPS) if (stop > from + ZOOM_EPSILON) return stop;
+    return IMAGE_ZOOM_MAX;
+  }
+  for (let i = IMAGE_ZOOM_STOPS.length - 1; i >= 0; i--) {
+    const stop = IMAGE_ZOOM_STOPS[i];
+    if (stop < from - ZOOM_EPSILON) return stop;
+  }
+  return IMAGE_ZOOM_MIN;
+}
+
+/**
+ * Hold the pan inside the picture's own edges: you may drag as far as the
+ * hidden overflow and no further, so the window never shows dead space beside
+ * a picture bigger than it. A picture SMALLER than the window has no slack at
+ * all and snaps back to centred.
+ */
+export function clampImagePan(
+  t: ImageTransform,
+  natural: ImageSize,
+  viewport: ImageSize,
+): ImageTransform {
+  const r = renderedSize(natural, t);
+  const slackX = Math.max(0, (r.width - viewport.width) / 2);
+  const slackY = Math.max(0, (r.height - viewport.height) / 2);
+  // `+ 0` normalizes the -0 that clamping a negative pan against a zero slack
+  // produces, so a centred picture is always exactly 0 rather than "-0px" in
+  // the CSS transform.
+  const axis = (v: number, slack: number): number =>
+    Number.isFinite(v) ? Math.min(slack, Math.max(-slack, v)) + 0 : 0;
+  return { ...t, x: axis(t.x, slackX), y: axis(t.y, slackY) };
+}
+
+/** Whether any of the picture is off-screen — the test for whether panning is
+ *  meaningful at all. The arrow keys use it to decide between panning and
+ *  stepping to the next photo. */
+export function canPanImage(
+  t: ImageTransform,
+  natural: ImageSize,
+  viewport: ImageSize,
+): boolean {
+  const r = renderedSize(natural, t);
+  // Half a pixel of slack: a picture that fills the window EXACTLY hides
+  // nothing, and float noise must not make it look pannable.
+  return r.width > viewport.width + 0.5 || r.height > viewport.height + 0.5;
+}
+
+/**
+ * Zoom to `nextZoom` while keeping whatever image point sits under `anchor`
+ * (viewport coordinates) fixed under it — the wheel-zoom and click-to-zoom
+ * behaviour. Centre-anchored zoom, the naive version, slides the thing you were
+ * looking at out from under the cursor.
+ *
+ * The result is pan-clamped, so a zoom that stops overflowing the window
+ * re-centres rather than leaving the picture hanging off to one side.
+ */
+export function zoomImageAt(
+  t: ImageTransform,
+  natural: ImageSize,
+  viewport: ImageSize,
+  nextZoom: number,
+  anchor: ImagePoint,
+): ImageTransform {
+  const zoom = clampImageZoom(nextZoom);
+  if (!isPositiveSize(natural) || !isPositiveSize(viewport) || !(t.zoom > 0)) {
+    return { ...t, zoom, mode: "free" };
+  }
+  const k = zoom / t.zoom;
+  const cx = viewport.width / 2;
+  const cy = viewport.height / 2;
+  // Vector from the picture's centre to the anchor, scaled by the zoom change.
+  const dx = anchor.x - (cx + t.x);
+  const dy = anchor.y - (cy + t.y);
+  const moved: ImageTransform = {
+    ...t,
+    zoom,
+    x: anchor.x - k * dx - cx,
+    y: anchor.y - k * dy - cy,
+    mode: "free",
+  };
+  return clampImagePan(moved, natural, viewport);
+}
+
+/** Snap any multiple of 90 (positive or negative) into the 0/90/180/270 set. */
+function normalizeRotation(deg: number): ImageRotation {
+  const q = (((Math.round(deg / 90) % 4) + 4) % 4) * 90;
+  return q as ImageRotation;
+}
+
+/**
+ * Turn by `delta` degrees (±90 in practice).
+ *
+ * Two things travel with the turn. The pan resets, because a picture left
+ * panned into a corner lands somewhere unrecognisable once its axes swap. And
+ * a picture in fit mode re-fits to the NEW box — a wide photo stood on its end
+ * fits by height, and keeping the old zoom would run it off the window.
+ */
+export function rotateImageBy(
+  t: ImageTransform,
+  delta: number,
+  natural: ImageSize,
+  viewport: ImageSize,
+): ImageTransform {
+  const rotation = normalizeRotation(t.rotation + delta);
+  const zoom = t.mode === "fit" ? fitScale(natural, viewport, rotation) : t.zoom;
+  return clampImagePan({ ...t, rotation, zoom, x: 0, y: 0 }, natural, viewport);
+}
+
+/** Toggle one mirror. The axis is the picture's own, not the screen's — see
+ *  imageTransformCss for where that is actually decided. */
+export function flipImage(t: ImageTransform, axis: "h" | "v"): ImageTransform {
+  return axis === "h" ? { ...t, flipH: !t.flipH } : { ...t, flipV: !t.flipV };
+}
+
+/** Back to fit-to-window, centred. Rotation and mirrors are the user's stated
+ *  intent about the picture itself, so they survive. */
+export function fitImage(
+  t: ImageTransform,
+  natural: ImageSize,
+  viewport: ImageSize,
+): ImageTransform {
+  return {
+    ...t,
+    zoom: fitScale(natural, viewport, t.rotation),
+    x: 0,
+    y: 0,
+    mode: "fit",
+  };
+}
+
+/**
+ * The click / actual-size gesture: fit becomes 100% under the cursor, anything
+ * else returns to fit.
+ *
+ * For a picture smaller than the window the two are the same zoom, so this is a
+ * no-op — deliberate, rather than inventing an arbitrary magnification.
+ */
+export function toggleImageFit(
+  t: ImageTransform,
+  natural: ImageSize,
+  viewport: ImageSize,
+  anchor: ImagePoint,
+): ImageTransform {
+  const fit = fitScale(natural, viewport, t.rotation);
+  const atFit = t.mode === "fit" || Math.abs(t.zoom - fit) < ZOOM_EPSILON;
+  return atFit ? zoomImageAt(t, natural, viewport, 1, anchor) : fitImage(t, natural, viewport);
+}
+
+/** Drag / arrow-key pan: shift by a delta and stop at the picture's edge. */
+export function panImageBy(
+  t: ImageTransform,
+  dx: number,
+  dy: number,
+  natural: ImageSize,
+  viewport: ImageSize,
+): ImageTransform {
+  return clampImagePan({ ...t, x: t.x + dx, y: t.y + dy }, natural, viewport);
+}
+
+/** Trim binary-float noise so the CSS reads "scale(0.3)", not "scale(0.30000000000000004)". */
+function cssNumber(v: number): number {
+  return Number.isFinite(v) ? Number(v.toFixed(4)) : 0;
+}
+
+/**
+ * The single CSS transform both render tiers wear.
+ *
+ * ORDER IS LOAD-BEARING. CSS applies a transform list right-to-left against the
+ * element's own axes, so the mirror written LAST is applied FIRST — mirroring
+ * the picture about its own horizontal axis before the rotation turns it. Move
+ * the mirror ahead of the rotate and "flip horizontal" on a picture turned 90
+ * degrees mirrors it vertically on screen, which is not what the button says.
+ */
+export function imageTransformCss(t: ImageTransform): string {
+  const sx = t.flipH ? -1 : 1;
+  const sy = t.flipV ? -1 : 1;
+  return (
+    `translate(${cssNumber(t.x)}px, ${cssNumber(t.y)}px) ` +
+    `scale(${cssNumber(t.zoom)}) ` +
+    `rotate(${t.rotation}deg) ` +
+    `scale(${sx}, ${sy})`
+  );
+}
+
+/** The toolbar's zoom readout, in whole percent. */
+export function imageZoomPercent(t: ImageTransform): number {
+  return Math.round((Number.isFinite(t.zoom) ? t.zoom : 1) * 100);
+}
+
+/** How much one full wheel notch (deltaY ≈ 100) magnifies. */
+const WHEEL_ZOOM_PER_NOTCH = 1.2;
+/** Cap on a single event's effect, in notches — high-resolution wheels and
+ *  trackpad flings report deltaY in the thousands and would otherwise slam
+ *  straight to the end of the range in one gesture. Three notches (1.2^3, about
+ *  1.73x) keeps the biggest single event short of a doubling. */
+const WHEEL_MAX_NOTCHES = 3;
+
+/**
+ * The zoom one wheel event asks for. Multiplicative, so a notch moves by the
+ * same RATIO at 0.2x as at 12x — an additive step crawls when zoomed in and
+ * lurches when zoomed out — and so scrolling back down returns exactly where it
+ * started.
+ */
+export function wheelZoomTarget(zoom: number, deltaY: number): number {
+  const from = clampImageZoom(zoom);
+  if (!Number.isFinite(deltaY) || deltaY === 0) return from;
+  const notches = Math.max(
+    -WHEEL_MAX_NOTCHES,
+    Math.min(WHEEL_MAX_NOTCHES, -deltaY / 100),
+  );
+  return clampImageZoom(from * Math.pow(WHEEL_ZOOM_PER_NOTCH, notches));
+}

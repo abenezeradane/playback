@@ -2268,17 +2268,50 @@ body {
   justify-content: center;
   padding: 84px 48px 96px;
   position: relative;
+  /* img-001: a picture zoomed past the window is CLIPPED to this box rather
+     than spilling over the header and the tools bar. This box is also the frame
+     every pan/zoom coordinate is measured against (a ResizeObserver watches it),
+     so its padding is deliberately part of the geometry: the picture fits inside
+     the chrome, not underneath it. */
+  overflow: hidden;
+  touch-action: none;
 }
 
-/* Both the decoded canvas and the native <img> fallback letterbox-contain
-   the frame within the viewer at any window size (the canvas carries the
-   frame's intrinsic size as its width/height attributes, so max-* keeps the
-   aspect ratio). A subtle checkerboard shows through transparent GIF/PNG. */
+/* img-001: the one transform wrapper both render tiers live in. Its width and
+   height are set imperatively to the picture's NATURAL pixel size, which is what
+   makes the transform's scale an absolute zoom — "100%" really is 100%. */
+.imgview__surface {
+  position: relative;
+  flex: 0 0 auto;
+  transform-origin: 50% 50%;
+  /* Deliberately NOT `will-change: transform`. This element is sized to the
+     picture's NATURAL pixels, so promoting it to its own layer would ask the
+     compositor for a texture the full size of the photo — some 6000x4000 for a
+     24MP image, most of it scaled far down and off-screen. Left unpromoted,
+     Chromium rasterizes at the effective on-screen scale instead, which is the
+     entire point of fitting the picture to the window. */
+}
+
+/* Grab affordance, but only while there is something to drag TO — a picture
+   that fits the window entirely is not pannable and must not pretend to be. */
+.imgview__viewer[data-canpan="true"] .imgview__surface {
+  cursor: grab;
+}
+
+.imgview__viewer[data-canpan="true"] .imgview__surface:active {
+  cursor: grabbing;
+}
+
+/* Both the decoded canvas and the native <img> fallback fill the transform
+   surface, which is itself sized to the picture's natural pixels — so the
+   letterboxing that used to be max-width/max-height here is now the "fit" zoom
+   the transform carries (img-001). A subtle checkerboard shows through
+   transparent GIF/PNG. */
 .imgview__canvas,
 .imgview__img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
+  display: block;
+  width: 100%;
+  height: 100%;
   border-radius: var(--radius-md);
   border: 1px solid var(--hairline);
   background-color: #0c0d0f;
@@ -2347,14 +2380,67 @@ body {
   padding-right: 4px;
 }
 
-/* Transport visibility by mode: only an animated (frame-decoded) image gets the
-   play / frame-step / speed transport. A static frame or the native fallback
-   hides the whole bar (a still image / native GIF has nothing to drive). */
-.imgview[data-mode="static"] .imgview__controls,
-.imgview[data-mode="native"] .imgview__controls,
+/* img-001: the bar's three groups, separated by hairlines. */
+.imgview__tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.imgview__tools + .imgview__tools {
+  padding-left: 10px;
+  border-left: 1px solid var(--hairline-soft);
+}
+
+/* A toggle that is currently ON (fit, or an active mirror). */
+.imgview__controls .iconbtn[data-on="true"] {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--on-dark);
+}
+
+#img-zoom-level {
+  font-variant-numeric: tabular-nums;
+  min-width: 58px;
+  justify-content: center;
+}
+
+/* Visibility by mode. The TRANSPORT is the animated-image half: only a
+   frame-decoded animation can be played, stepped or slowed, so a static frame
+   or the native fallback hides that group — but keeps the zoom and orientation
+   groups, which apply to every picture (img-001 changed this; the whole bar
+   used to disappear along with the transport). */
+.imgview[data-mode="static"] .imgview__tools--transport,
+.imgview[data-mode="native"] .imgview__tools--transport,
+.imgview[data-mode="loading"] .imgview__tools--transport,
+.imgview[data-mode="error"] .imgview__tools--transport {
+  display: none;
+}
+
+/* No picture, no tools: nothing to zoom or turn while loading or after a
+   failure, and the error message is the only thing worth reading. */
 .imgview[data-mode="loading"] .imgview__controls,
 .imgview[data-mode="error"] .imgview__controls {
   display: none;
+}
+
+/* img-001: fade the whole image chrome together when the mouse goes idle and
+   take the cursor with it, so a photo can be looked at with nothing over it.
+   Mirrors .stage[data-idle="true"] in the player. Pointer events go with the
+   opacity — invisible buttons must not still be clickable. */
+.imgview[data-idle="true"] .overlay-top,
+.imgview[data-idle="true"] .imgview__controls,
+.imgview[data-idle="true"] .imgview__navbtn {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.imgview[data-idle="true"] {
+  cursor: none;
+}
+
+.imgview .overlay-top,
+.imgview__controls {
+  transition: opacity 220ms ease;
 }
 
 .imgview[data-mode="error"] .imgview__canvas,
