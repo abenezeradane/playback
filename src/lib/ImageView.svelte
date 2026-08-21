@@ -102,11 +102,19 @@
            (alt=""), and fullscreen is already reachable from the keyboard via F, so a
            keyboard handler here would be a redundant tab stop. Mirrors the
            video-surface div in Player.svelte. -->
+      <!-- draggable="false" is load-bearing, not tidiness. An <img> is natively
+           draggable in Chromium: pressing on one and moving starts an HTML5
+           image drag, which CANCELS the pointer stream (a pointercancel arrives
+           instead of pointermove) and so kills the pan before it begins. The
+           <canvas> tier is immune because a canvas is not draggable, which is
+           exactly why a drag test that only used a PNG passed while
+           click-and-drag panning was broken for every ordinary photo. -->
       <img
         id="img-el"
         class="imgview__img"
         alt=""
         role="presentation"
+        draggable="false"
         hidden={ui.imgElHidden}
         bind:this={els.imgEl}
         onclick={onImageClick}
