@@ -63,6 +63,7 @@ import {
   fileExtension,
   isTransportStreamPath,
   compareNatural,
+  naturalSortKey,
   sortPathsNatural,
   orderGalleryEntries,
   galleryMeta,
@@ -2145,3 +2146,49 @@ describe("image file actions — baking orientation into a copy (img-002)", () =
     expect(orientationDrawMatrix(nat, 90, true, false)).toEqual([0, -1, -1, 0, 300, 400]);
   });
 });
+
+describe("naturalSortKey", () => {
+  // The whole point of the key: sorting BY IT must equal sorting by the
+  // comparator, or the tag view's SQL ordering silently disagrees with every
+  // other list in the app.
+  const NAMES = [
+    "clip2.mp4", "clip10.mp4", "clip1.mp4", "Clip2.mp4", "CLIP1.mp4",
+    "page03.png", "page3.png", "page30.png",
+    "007.jpg", "7.jpg", "70.jpg",
+    "a1.jpg", "ab.jpg", "a!.jpg", "a.jpg", "a:.jpg",
+    "IMG_20240819123456789.jpg", "IMG_2.jpg",
+    "", "1", "z",
+  ];
+
+  it("orders exactly like compareNatural", () => {
+    const byKey = [...NAMES].sort((a, b) => {
+      const ka = naturalSortKey(a);
+      const kb = naturalSortKey(b);
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
+    const byComparator = [...NAMES].sort(compareNatural);
+    expect(byKey).toEqual(byComparator);
+  });
+
+  it("puts clip2 before clip10 (the reason the key exists)", () => {
+    expect(naturalSortKey("clip2.mp4") < naturalSortKey("clip10.mp4")).toBe(true);
+  });
+
+  it("keeps a digit run ordered against punctuation the way the comparator does", () => {
+    // '!' (0x21) sorts before a digit; ':' (0x3A) sorts after one. The key's
+    // length prefix is itself a digit character, which is what preserves this.
+    expect(naturalSortKey("a!.jpg") < naturalSortKey("a1.jpg")).toBe(true);
+    expect(naturalSortKey("a1.jpg") < naturalSortKey("a:.jpg")).toBe(true);
+  });
+
+  it("breaks a case-insensitive tie the same way the comparator does", () => {
+    expect(Math.sign(compareNatural("A.jpg", "a.jpg"))).toBe(
+      naturalSortKey("A.jpg") < naturalSortKey("a.jpg") ? -1 : 1,
+    );
+  });
+
+  it("does not emit U+0000, which SQLite string functions treat as a terminator", () => {
+    expect(naturalSortKey("clip1.mp4")).not.toContain(" ");
+  });
+});
+
