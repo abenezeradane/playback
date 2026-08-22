@@ -47,10 +47,15 @@ pub(crate) fn open_db(path: &Path) -> Result<Connection, String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("tags: mkdir: {e}"))?;
     }
     let conn = Connection::open(path).map_err(|e| format!("tags: open: {e}"))?;
-    // WAL survives an abrupt exit without the reader/writer stalls the default
-    // rollback journal has; NORMAL is the documented companion for WAL.
-    conn.pragma_update(None, "journal_mode", "WAL")
+    // PRAGMA journal_mode returns the mode it actually ended up in, and SQLite
+    // can decline the switch silently. pragma_update alone would report success
+    // in exactly that case, so read the result back and insist on WAL.
+    let mode: String = conn
+        .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
         .map_err(|e| format!("tags: wal: {e}"))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(format!("tags: journal_mode is {mode}, not WAL"));
+    }
     conn.pragma_update(None, "synchronous", "NORMAL")
         .map_err(|e| format!("tags: sync: {e}"))?;
     conn.pragma_update(None, "foreign_keys", true)
@@ -71,10 +76,16 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         ));
     }
     if version < 1 {
-        conn.execute_batch(SCHEMA_V1)
-            .map_err(|e| format!("tags: create: {e}"))?;
-        conn.pragma_update(None, "user_version", 1)
-            .map_err(|e| format!("tags: stamp: {e}"))?;
+        // One transaction: SQLite DDL is transactional, so either every table
+        // and the user_version stamp land together, or none of them do. Without
+        // this, a failure partway leaves tables on disk with user_version still
+        // 0, and the next open re-runs the batch and dies on "table already
+        // exists" — a database wedged permanently.
+        let sql = format!("BEGIN;\n{SCHEMA_V1}\nPRAGMA user_version = 1;\nCOMMIT;");
+        if let Err(e) = conn.execute_batch(&sql) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(format!("tags: create: {e}"));
+        }
     }
     Ok(())
 }
@@ -145,5 +156,24 @@ mod tests {
         }
         let err = open_db(&path).unwrap_err();
         assert!(err.contains("newer"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn the_connection_is_actually_in_wal_mode() {
+        // Not a tautology: pragma_update reports success even when SQLite
+        // declines the switch, so this reads the mode back from the connection.
+        let conn = open_db(&temp_db("wal")).unwrap();
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert!(mode.eq_ignore_ascii_case("wal"), "journal_mode was {mode}");
+    }
+
+    #[test]
+    fn foreign_keys_are_enforced() {
+        let conn = open_db(&temp_db("fk")).unwrap();
+        let attempted = conn.execute("INSERT INTO item_tags (item_id, tag_id) VALUES (1, 1)", []);
+        assert!(
+            attempted.is_err(),
+            "a join row pointing at an item and tag that do not exist must be refused"
+        );
     }
 }
