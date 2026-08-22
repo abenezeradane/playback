@@ -90,6 +90,186 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+use rusqlite::params;
+
+/// Upper bound on a tag name, mirrored by MAX_TAG_NAME in src/player-core.ts.
+/// This side is the authority; the TypeScript one is a courtesy that avoids a
+/// doomed round trip.
+pub(crate) const MAX_TAG_NAME: usize = 64;
+/// Upper bound on how many tags one item may carry.
+pub(crate) const MAX_TAGS_PER_ITEM: i64 = 64;
+
+/// The item a tag is attached to. `archive` is "" for a real file or folder on
+/// disk; otherwise `path` is the path INSIDE that archive.
+pub(crate) struct ItemRef<'a> {
+    pub archive: &'a str,
+    pub path: &'a str,
+    pub kind: &'a str,
+    pub name: &'a str,
+    pub sort_key: &'a str,
+}
+
+/// Validate a tag name and return `(display, folded)`.
+///
+/// `folded` is the identity: trimmed, inner whitespace collapsed, lowercased.
+/// Rust owns this so there is exactly one authority on when two spellings are
+/// the same tag — the TypeScript side cleans input but never decides identity.
+pub(crate) fn fold_tag(raw: &str) -> Result<(String, String), String> {
+    let display = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if display.is_empty() {
+        return Err("a tag needs a name".to_string());
+    }
+    if display.chars().count() > MAX_TAG_NAME {
+        return Err("that tag name is too long".to_string());
+    }
+    if display.chars().any(char::is_control) {
+        return Err("that tag name has characters that are not allowed".to_string());
+    }
+    let folded = display.to_lowercase();
+    Ok((display, folded))
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Apply `tag` to `item`, creating the item row and the tag as needed. Returns
+/// the item's full tag list afterwards — the frontend renders what this returns
+/// rather than keeping an optimistic copy that could drift.
+pub(crate) fn apply_tag(
+    conn: &Connection,
+    item: &ItemRef,
+    tag: &str,
+) -> Result<Vec<String>, String> {
+    let (display, folded) = fold_tag(tag)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("tags: tx: {e}"))?;
+
+    tx.execute(
+        "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(archive, path) DO UPDATE SET
+           kind = excluded.kind, name = excluded.name, sort_key = excluded.sort_key",
+        params![item.archive, item.path, item.kind, item.name, item.sort_key, now_secs()],
+    )
+    .map_err(|e| format!("tags: upsert item: {e}"))?;
+
+    let item_id: i64 = tx
+        .query_row(
+            "SELECT id FROM items WHERE archive = ?1 AND path = ?2",
+            params![item.archive, item.path],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("tags: item id: {e}"))?;
+
+    // The cap counts only NEW tags: re-applying one an item already carries is a
+    // no-op and must not fail just because the item is full.
+    let already: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM item_tags it JOIN tags t ON t.id = it.tag_id
+             WHERE it.item_id = ?1 AND t.folded = ?2",
+            params![item_id, folded],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("tags: already: {e}"))?;
+    if already == 0 {
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM item_tags WHERE item_id = ?1",
+                params![item_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("tags: count: {e}"))?;
+        if count >= MAX_TAGS_PER_ITEM {
+            return Err("that item already has as many tags as it can hold".to_string());
+        }
+    }
+
+    tx.execute(
+        "INSERT INTO tags (name, folded, created_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(folded) DO NOTHING",
+        params![display, folded, now_secs()],
+    )
+    .map_err(|e| format!("tags: upsert tag: {e}"))?;
+
+    let tag_id: i64 = tx
+        .query_row("SELECT id FROM tags WHERE folded = ?1", params![folded], |r| r.get(0))
+        .map_err(|e| format!("tags: tag id: {e}"))?;
+
+    tx.execute(
+        "INSERT INTO item_tags (item_id, tag_id) VALUES (?1, ?2)
+         ON CONFLICT(item_id, tag_id) DO NOTHING",
+        params![item_id, tag_id],
+    )
+    .map_err(|e| format!("tags: link: {e}"))?;
+
+    tx.commit().map_err(|e| format!("tags: commit: {e}"))?;
+    tags_for(conn, item.archive, item.path)
+}
+
+/// Remove `tag` from the item, deleting the item row if that was its last tag.
+/// Returns the item's remaining tags.
+pub(crate) fn unapply_tag(
+    conn: &Connection,
+    archive: &str,
+    path: &str,
+    tag: &str,
+) -> Result<Vec<String>, String> {
+    let (_, folded) = fold_tag(tag)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("tags: tx: {e}"))?;
+
+    tx.execute(
+        "DELETE FROM item_tags
+         WHERE item_id = (SELECT id FROM items WHERE archive = ?1 AND path = ?2)
+           AND tag_id  = (SELECT id FROM tags  WHERE folded = ?3)",
+        params![archive, path, folded],
+    )
+    .map_err(|e| format!("tags: unlink: {e}"))?;
+
+    // An item row exists ONLY to carry tags.
+    tx.execute(
+        "DELETE FROM items
+         WHERE archive = ?1 AND path = ?2
+           AND NOT EXISTS (SELECT 1 FROM item_tags WHERE item_id = items.id)",
+        params![archive, path],
+    )
+    .map_err(|e| format!("tags: prune item: {e}"))?;
+
+    tx.commit().map_err(|e| format!("tags: commit: {e}"))?;
+    tags_for(conn, archive, path)
+}
+
+/// The tags on one item, ordered by their folded name so the chips are stable.
+pub(crate) fn tags_for(
+    conn: &Connection,
+    archive: &str,
+    path: &str,
+) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.name FROM tags t
+             JOIN item_tags it ON it.tag_id = t.id
+             JOIN items i      ON i.id = it.item_id
+             WHERE i.archive = ?1 AND i.path = ?2
+             ORDER BY t.folded",
+        )
+        .map_err(|e| format!("tags: prepare: {e}"))?;
+    let rows = stmt
+        .query_map(params![archive, path], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("tags: query: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("tags: row: {e}"))?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +355,106 @@ mod tests {
             attempted.is_err(),
             "a join row pointing at an item and tag that do not exist must be refused"
         );
+    }
+
+    fn item<'a>(path: &'a str, name: &'a str) -> ItemRef<'a> {
+        ItemRef { archive: "", path, kind: "image", name, sort_key: name }
+    }
+
+    #[test]
+    fn apply_then_read_back_returns_the_tag() {
+        let conn = open_db(&temp_db("apply")).unwrap();
+        let tags = apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "Keep").unwrap();
+        assert_eq!(tags, vec!["Keep".to_string()]);
+        assert_eq!(tags_for(&conn, "", "C:\\p\\a.jpg").unwrap(), vec!["Keep".to_string()]);
+    }
+
+    #[test]
+    fn tag_identity_folds_case_and_whitespace_but_displays_what_was_typed_first() {
+        let conn = open_db(&temp_db("fold")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "Trip 2024").unwrap();
+        apply_tag(&conn, &item("C:\\p\\b.jpg", "b.jpg"), "TRIP 2024").unwrap();
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "case must not create a second tag");
+        let shown: String = conn.query_row("SELECT name FROM tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(shown, "Trip 2024", "the first spelling is the one displayed");
+    }
+
+    #[test]
+    fn applying_the_same_tag_twice_is_a_no_op() {
+        let conn = open_db(&temp_db("twice")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
+        let tags = apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
+        assert_eq!(tags, vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn the_same_inner_path_in_two_archives_is_two_items() {
+        // The composite key is the whole reason an archive page can be tagged.
+        let conn = open_db(&temp_db("archives")).unwrap();
+        let a = ItemRef { archive: "C:\\c\\v1.cbz", path: "ch1/p1.jpg", kind: "image", name: "p1.jpg", sort_key: "p1.jpg" };
+        let b = ItemRef { archive: "C:\\c\\v2.cbz", path: "ch1/p1.jpg", kind: "image", name: "p1.jpg", sort_key: "p1.jpg" };
+        apply_tag(&conn, &a, "keep").unwrap();
+        apply_tag(&conn, &b, "toss").unwrap();
+        assert_eq!(tags_for(&conn, "C:\\c\\v1.cbz", "ch1/p1.jpg").unwrap(), vec!["keep".to_string()]);
+        assert_eq!(tags_for(&conn, "C:\\c\\v2.cbz", "ch1/p1.jpg").unwrap(), vec!["toss".to_string()]);
+    }
+
+    #[test]
+    fn removing_the_last_tag_removes_the_item_row() {
+        // An item exists only to carry tags; without this the table grows forever.
+        let conn = open_db(&temp_db("orphan")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "edit").unwrap();
+        unapply_tag(&conn, "", "C:\\p\\a.jpg", "keep").unwrap();
+        let items: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(items, 1, "one tag remains, so the row must stay");
+        let left = unapply_tag(&conn, "", "C:\\p\\a.jpg", "edit").unwrap();
+        assert!(left.is_empty());
+        let items: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(items, 0, "the last tag went, so the row must go");
+    }
+
+    #[test]
+    fn unapplying_a_tag_that_was_never_applied_is_harmless() {
+        let conn = open_db(&temp_db("noop")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
+        let tags = unapply_tag(&conn, "", "C:\\p\\a.jpg", "never").unwrap();
+        assert_eq!(tags, vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn hostile_tag_names_are_rejected() {
+        let conn = open_db(&temp_db("hostile")).unwrap();
+        let it = item("C:\\p\\a.jpg", "a.jpg");
+        assert!(apply_tag(&conn, &it, "   ").is_err(), "empty");
+        assert!(apply_tag(&conn, &it, &"x".repeat(MAX_TAG_NAME + 1)).is_err(), "too long");
+        assert!(apply_tag(&conn, &it, "ke\u{0001}ep").is_err(), "control character");
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "no rejected name may reach the table");
+    }
+
+    #[test]
+    fn an_item_cannot_exceed_the_tag_cap() {
+        let conn = open_db(&temp_db("cap")).unwrap();
+        let it = item("C:\\p\\a.jpg", "a.jpg");
+        for n in 0..MAX_TAGS_PER_ITEM {
+            apply_tag(&conn, &it, &format!("tag{n}")).unwrap();
+        }
+        assert!(apply_tag(&conn, &it, "one-too-many").is_err());
+        // An ALREADY-applied tag must still be accepted at the cap — re-applying
+        // is a no-op, not an overflow.
+        assert!(apply_tag(&conn, &it, "tag0").is_ok());
+    }
+
+    #[test]
+    fn a_quote_in_a_tag_name_is_stored_not_executed() {
+        // Bound parameters, not string building. This is the injection oracle.
+        let conn = open_db(&temp_db("inject")).unwrap();
+        let nasty = "'); DROP TABLE items; --";
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), nasty).unwrap();
+        assert_eq!(tags_for(&conn, "", "C:\\p\\a.jpg").unwrap(), vec![nasty.to_string()]);
+        let items: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(items, 1, "the items table must still exist and hold the row");
     }
 }
