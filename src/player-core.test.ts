@@ -2188,7 +2188,7 @@ describe("naturalSortKey", () => {
   });
 
   it("does not emit U+0000, which SQLite string functions treat as a terminator", () => {
-    expect(naturalSortKey("clip1.mp4")).not.toContain(" ");
+    expect(naturalSortKey("clip1.mp4")).not.toContain("\u0000");
   });
 });
 
