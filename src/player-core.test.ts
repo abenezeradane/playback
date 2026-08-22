@@ -82,6 +82,9 @@ import {
   movePlaylistItem,
   findPlaylist,
   MAX_PLAYLIST_NAME,
+  cleanTagDraft,
+  tagIdentity,
+  MAX_TAG_NAME,
   type PlaylistStore,
   DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
@@ -2194,3 +2197,67 @@ describe("naturalSortKey", () => {
   });
 });
 
+
+describe("cleanTagDraft", () => {
+  it("splits on commas and trims", () => {
+    expect(cleanTagDraft("trip 2024, keep , edit")).toEqual(["trip 2024", "keep", "edit"]);
+  });
+
+  it("collapses inner whitespace", () => {
+    expect(cleanTagDraft("trip    2024")).toEqual(["trip 2024"]);
+  });
+
+  it("drops empty pieces rather than creating blank tags", () => {
+    expect(cleanTagDraft(" , ,keep, ")).toEqual(["keep"]);
+    expect(cleanTagDraft("   ")).toEqual([]);
+  });
+
+  it("de-duplicates case-insensitively within one draft", () => {
+    expect(cleanTagDraft("Keep, keep, KEEP")).toEqual(["Keep"]);
+  });
+
+  it("caps a pasted monster at MAX_TAG_NAME", () => {
+    const out = cleanTagDraft("x".repeat(500));
+    expect(out).toHaveLength(1);
+    expect(out[0]).toHaveLength(MAX_TAG_NAME);
+  });
+
+  it("strips control characters instead of storing them", () => {
+    expect(cleanTagDraft("ke\u0001ep")).toEqual(["ke ep"]);
+  });
+});
+
+describe("tagIdentity", () => {
+  it("identifies a plain file by its path, with no archive", () => {
+    expect(tagIdentity("C:\\photos\\a.jpg", null)).toEqual({
+      archive: "",
+      path: "C:\\photos\\a.jpg",
+    });
+  });
+
+  it("identifies an archive page by the archive plus its INNER path", () => {
+    // The materialized mirror path is disposable cache; the identity must be
+    // the archive and the path inside it, or the tag dies with the cache.
+    const origin = {
+      archive: "C:\\comics\\vol1.cbz",
+      innerDir: "ch1",
+      mirrorDir: "C:\\cache\\pb-ar-abc",
+    };
+    expect(tagIdentity("C:\\cache\\pb-ar-abc\\page01.jpg", origin)).toEqual({
+      archive: "C:\\comics\\vol1.cbz",
+      path: "ch1/page01.jpg",
+    });
+  });
+
+  it("handles a page at the archive root (no inner directory)", () => {
+    const origin = {
+      archive: "C:\\comics\\vol1.cbz",
+      innerDir: "",
+      mirrorDir: "C:\\cache\\pb-ar-abc",
+    };
+    expect(tagIdentity("C:\\cache\\pb-ar-abc\\page01.jpg", origin)).toEqual({
+      archive: "C:\\comics\\vol1.cbz",
+      path: "page01.jpg",
+    });
+  });
+});

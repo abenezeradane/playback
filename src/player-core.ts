@@ -1115,6 +1115,59 @@ export function galleryMeta(
   return parts.length > 0 ? parts.join(" · ") : "0 photos";
 }
 
+/** Upper bound on a tag name (defensive against pasted garbage), mirrored by
+ *  MAX_TAG_NAME in src-tauri/src/tags.rs — Rust is the authority, this is the
+ *  client-side courtesy that stops a doomed round trip. */
+export const MAX_TAG_NAME = 64;
+
+/**
+ * Turn what the user typed into the tags they meant (tags-001).
+ *
+ * Commas separate, so three tags can be typed in one go. Cleaning only: this
+ * decides nothing about identity — Rust folds and de-duplicates against what is
+ * already stored. The in-draft de-duplication here just stops one field from
+ * sending the same tag twice.
+ */
+export function cleanTagDraft(raw: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const piece of raw.split(",")) {
+    const cleaned = piece
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!cleaned) continue;
+    const capped = cleaned.slice(0, MAX_TAG_NAME);
+    const key = capped.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(capped);
+  }
+  return out;
+}
+
+/**
+ * The identity a tag is attached to (tags-001): `{ archive, path }`.
+ *
+ * For a plain file that is its path on disk and an empty archive. For a page
+ * browsed inside an archive it is the ARCHIVE plus the path INSIDE it — never
+ * the materialized mirror path, which lives in a cache directory the 30-day
+ * prune will eventually delete and which would take the tag with it.
+ */
+export function tagIdentity(
+  path: string,
+  origin: ArchiveOrigin | null | undefined,
+): { archive: string; path: string } {
+  if (!origin || !origin.archive) return { archive: "", path };
+  const cut = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  const leaf = cut >= 0 ? path.slice(cut + 1) : path;
+  return {
+    archive: origin.archive,
+    path: origin.innerDir ? `${origin.innerDir}/${leaf}` : leaf,
+  };
+}
+
 /** Index of `path` in `queue` (exact match), or -1 when it is not present. */
 export function currentIndexOf(queue: string[], path: string): number {
   return queue.indexOf(path);
