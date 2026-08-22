@@ -44,6 +44,12 @@ libloading = "0.8"
 # the user's clipboard. Only copy_image_to_clipboard can, and only a picture.
 tauri-plugin-clipboard-manager = "2"
 kamadak-exif = "0.6"
+# tags-001: the tag index. SQLite is compiled INTO the exe (`bundled`), so there
+# is no runtime DLL and no system dependency; the build already compiles C source
+# for unrar, so this needs no toolchain that was not already required. Every
+# statement lives in tags.rs — tauri-plugin-sql is deliberately NOT used, because
+# it would hand the WebView an arbitrary-SQL bridge.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 # Child-window z-order management for the mpv wid embed (push mpv's child HWND
