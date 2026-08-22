@@ -996,21 +996,21 @@ export function compareNatural(a: string, b: string): number {
  * (tags-001). SQL cannot page through a comparator, so the tag store keeps a
  * precomputed key per item and orders by that.
  *
- * Digit runs are emitted length-prefixed — two hex digits of length, then the
+ * Digit runs are emitted length-prefixed — three decimal digits of length, then the
  * digits with leading zeros stripped — so `page7` sorts before `page10`.
- * Because that prefix is ITSELF a digit character for any run shorter than 16
- * digits, a digit run keeps its position relative to letters and punctuation
- * exactly as `compareNatural` orders it; a fixed-width zero pad would break the
- * moment a real filename carried a longer number (a 17-digit timestamp does).
+ * Because that prefix is ITSELF a digit character for every run length from 0 to 999,
+ * a digit run keeps its position relative to letters and punctuation exactly as
+ * `compareNatural` orders it; a fixed-width zero pad would break the moment a real
+ * filename carried a longer number (a 17-digit timestamp does).
  *
  * The key ends with U+0001 and the RAW name, which reproduces the comparator's
  * case-sensitive tie-break and keeps the order total. U+0001 (not U+0000: an
  * embedded NUL is a hazard in SQLite TEXT; not a space: a space is a legal
  * filename character) sorts below every character a Windows filename may hold.
  *
- * Accepted limit: a digit run longer than 255 digits is emitted with an "ff"
- * prefix, so two such runs fall back to the raw-name tie-break. No filename
- * sorts by a 256-digit number.
+ * Accepted limit: a digit run longer than 999 digits clamps its prefix length,
+ * so two such runs fall back to the raw-name tie-break. No filename sorts by a
+ * 1000-digit number.
  */
 export function naturalSortKey(name: string): string {
   const lower = name.toLowerCase();
@@ -1022,15 +1022,15 @@ export function naturalSortKey(name: string): string {
       let j = i;
       while (j < lower.length && lower[j] >= "0" && lower[j] <= "9") j++;
       const digits = lower.slice(i, j).replace(/^0+(?=\d)/, "");
-      const len = Math.min(digits.length, 255);
-      out += len.toString(16).padStart(2, "0") + digits;
+      const len = Math.min(digits.length, 999);
+      out += String(len).padStart(3, "0") + digits;
       i = j;
     } else {
       out += c;
       i++;
     }
   }
-  return `${out}${name}`;
+  return `${out}\u0001${name}`;
 }
 
 /** Sort file paths into natural order (a fresh array; the input is not mutated). */

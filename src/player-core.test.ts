@@ -2158,6 +2158,8 @@ describe("naturalSortKey", () => {
     "a1.jpg", "ab.jpg", "a!.jpg", "a.jpg", "a:.jpg",
     "IMG_20240819123456789.jpg", "IMG_2.jpg",
     "", "1", "z",
+    "9".repeat(160) + ".jpg", ":.jpg", "9".repeat(200) + ".jpg", "123.jpg",
+    "9".repeat(1000) + ".jpg",
   ];
 
   it("orders exactly like compareNatural", () => {
