@@ -3581,7 +3581,13 @@ export async function doImageInfo(): Promise<void> {
     path: id.path,
   }).catch(() => [] as string[]);
   if (token !== imgToken || !ui.imgInfoOpen) return;
-  if (tags.length > 0) rows.push({ label: "Tags", value: tags.join(", ") });
+  if (tags.length > 0) {
+    rows.push({ label: "Tags", value: tags.join(", ") });
+    // A fresh array, not a mutation of the one already assigned: ui is a $state
+    // proxy, and pushing to the raw local array it wraps changes the data
+    // without notifying anything, so the panel would never re-render.
+    ui.imgInfoRows = [...rows];
+  }
   // The panel's whole point is WHICH rows are there — a picture with no EXIF
   // must not grow camera rows out of nothing. Emitting the labels makes that
   // exactly assertable by the smoke, instead of leaving it to be guessed at
