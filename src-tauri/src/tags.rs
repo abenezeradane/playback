@@ -567,9 +567,36 @@ mod tests {
     #[test]
     fn the_limit_is_clamped() {
         let conn = open_db(&temp_db("suggest-limit")).unwrap();
-        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
-        // An absurd limit must not become an absurd query.
-        assert_eq!(suggest_tags(&conn, "", u32::MAX).unwrap().len(), 1);
+        // MAX_LIMIT + 1 tags, each with one member, built in ONE transaction:
+        // 1001 apply_tag calls would be 1001 transactions and needlessly slow.
+        let tx = conn.unchecked_transaction().unwrap();
+        for n in 0..(MAX_LIMIT + 1) {
+            tx.execute(
+                "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+                 VALUES ('', ?1, 'image', 'x.jpg', 'x.jpg', 0)",
+                params![format!("C:\\p\\{n}.jpg")],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO tags (name, folded, created_at) VALUES (?1, ?1, 0)",
+                params![format!("tag{n}")],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO item_tags (item_id, tag_id)
+                 VALUES ((SELECT id FROM items WHERE path = ?1), (SELECT id FROM tags WHERE folded = ?2))",
+                params![format!("C:\\p\\{n}.jpg"), format!("tag{n}")],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        // Verify the clamp works: requesting u32::MAX tags should return exactly MAX_LIMIT.
+        assert_eq!(
+            suggest_tags(&conn, "", u32::MAX).unwrap().len(),
+            MAX_LIMIT as usize,
+            "suggest_tags must clamp to MAX_LIMIT"
+        );
+        // Verify zero limit returns empty result.
         assert!(suggest_tags(&conn, "", 0).unwrap().is_empty());
     }
 }
