@@ -4143,7 +4143,13 @@ button.shortcuts__backdrop {
 .tagpop__suggestion-count { font-variant-numeric: tabular-nums; opacity: 0.6; font-size: 0.8rem; }
 
 .gallery-tile__tag {
-  position: absolute; right: 0.4rem; top: 0.4rem;
+  /* Below the duration badge, not on it: .gallery-tile__duration owns the
+     top-right corner and is deliberately always visible, because the running
+     time is what you scan a grid of clips for. Top-left is the folder/archive
+     badge and the bottom edge is the filename strip, so the right edge below
+     the duration is the free corner — and it sits in the same place on every
+     tile kind, whether or not that tile has a duration to show. */
+  position: absolute; right: 0.4rem; top: 2.4rem;
   display: grid; place-items: center; width: 1.6rem; height: 1.6rem;
   border-radius: 0.4rem; background: rgb(0 0 0 / 0.55);
   opacity: 0; transition: opacity 120ms ease;
