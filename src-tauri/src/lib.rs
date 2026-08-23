@@ -220,6 +220,12 @@ fn engine_pref_path() -> Option<PathBuf> {
     hwaccel_pref_path().map(|p| p.with_file_name("engine"))
 }
 
+/// Where the tag index lives (tags-001) — beside the other prefs, under the app
+/// identifier. Resolved HERE, never passed in from the WebView.
+pub(crate) fn tags_db_path() -> Option<PathBuf> {
+    hwaccel_pref_path().map(|p| p.with_file_name("tags.db"))
+}
+
 /// Normalize a stored/requested engine value; anything unrecognized is the
 /// default ("native" since native-003 — a missing DLL is still safe: the
 /// frontend probes availability and degrades to the web engine). Pure +
@@ -1671,6 +1677,7 @@ pub fn run() {
         .manage(LaunchPath(launch))
         .manage(AllowList::default())
         .manage(player::PlayerState::default())
+        .manage(tags::TagsDb::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         // img-002: the image clipboard write. Only write_image is used; the
@@ -1716,6 +1723,10 @@ pub fn run() {
             reveal_in_explorer,
             image_info,
             copy_image_to_clipboard,
+            tags::tags_for_item,
+            tags::tag_apply,
+            tags::tag_unapply,
+            tags::tag_suggest,
             player::player_engine_status,
             player::player_load,
             player::player_stop,

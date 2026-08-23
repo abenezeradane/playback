@@ -3,6 +3,7 @@
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 /// The schema version this binary understands. Bump it, and add a migration
 /// step below, whenever the schema changes.
@@ -92,6 +93,46 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 }
 
 use rusqlite::params;
+
+/// The tag database connection, opened on first use.
+///
+/// Lazy on purpose: a database that cannot be opened (a full disk, a locked
+/// profile) must degrade to "tagging does not work" rather than stopping the app
+/// from starting. The Arc is what lets a command hand the connection to
+/// `spawn_blocking`, which needs an owned, 'static value.
+#[derive(Default, Clone)]
+pub(crate) struct TagsDb(pub Arc<Mutex<Option<Connection>>>);
+
+/// Run `f` against the open connection, opening it if this is the first call.
+fn with_db<T, F>(db: &TagsDb, f: F) -> Result<T, String>
+where
+    F: FnOnce(&Connection) -> Result<T, String>,
+{
+    let mut guard = db.0.lock().map_err(|_| "tags: lock poisoned".to_string())?;
+    if guard.is_none() {
+        let path = crate::tags_db_path().ok_or_else(|| "tags: no config directory".to_string())?;
+        *guard = Some(open_db(&path)?);
+    }
+    let conn = guard.as_ref().expect("just opened");
+    f(conn)
+}
+
+/// Move the work onto the blocking pool.
+///
+/// The same reasoning as archive.rs's `blocking`: an `async fn` whose body never
+/// yields still pins a runtime worker for the whole call, and the popover can
+/// fire a suggestion query on every keystroke. `spawn_blocking` is the pool built
+/// for work that sits and computes.
+async fn blocking<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(_) => Err("tags: worker failed".to_string()),
+    }
+}
 
 /// Upper bound on a tag name, mirrored by MAX_TAG_NAME in src/player-core.ts.
 /// This side is the authority; the TypeScript one is a courtesy that avoids a
@@ -321,6 +362,100 @@ pub(crate) fn suggest_tags(
         out.push(row.map_err(|e| format!("tags: suggest row: {e}"))?);
     }
     Ok(out)
+}
+
+/// The path that must exist on disk for an item to be taggable. For a page
+/// inside an archive that is the ARCHIVE itself: the page is a cache artifact
+/// that the 30-day prune may already have deleted.
+pub(crate) fn disk_target<'a>(archive: &'a str, path: &'a str) -> &'a str {
+    if archive.is_empty() {
+        path
+    } else {
+        archive
+    }
+}
+
+/// The tags on one item. `archive` is "" for a real file or folder.
+#[tauri::command]
+pub(crate) async fn tags_for_item(
+    db: tauri::State<'_, TagsDb>,
+    archive: String,
+    path: String,
+) -> Result<Vec<String>, String> {
+    let db = db.inner().clone();
+    blocking(move || with_db(&db, |conn| tags_for(conn, &archive, &path)))
+        .await
+        .map_err(|e| crate::ipc_error("tags_for_item", e, "could not read tags"))
+}
+
+/// Apply one tag to one item; returns the item's tags afterwards.
+#[tauri::command]
+pub(crate) async fn tag_apply(
+    db: tauri::State<'_, TagsDb>,
+    archive: String,
+    path: String,
+    kind: String,
+    name: String,
+    sort_key: String,
+    tag: String,
+) -> Result<Vec<String>, String> {
+    let db = db.inner().clone();
+    // fold_tag's message is written for a person to read and leaks nothing, so
+    // it is the one error passed through verbatim — the user must be told WHY a
+    // name was refused.
+    let (_, _) = fold_tag(&tag)?;
+    // The store must not accumulate rows for things that were never real. The
+    // check lives HERE rather than in apply_tag so the database layer stays
+    // filesystem-free and its tests need no fixtures on disk.
+    let target = disk_target(&archive, &path);
+    if std::fs::metadata(target).is_err() {
+        return Err(crate::ipc_error(
+            "tag_apply: target missing",
+            target,
+            "that file is no longer there",
+        ));
+    }
+    blocking(move || {
+        with_db(&db, |conn| {
+            let item = ItemRef {
+                archive: &archive,
+                path: &path,
+                kind: &kind,
+                name: &name,
+                sort_key: &sort_key,
+            };
+            apply_tag(conn, &item, &tag)
+        })
+    })
+    .await
+    .map_err(|e| crate::ipc_error("tag_apply", e, "could not save that tag"))
+}
+
+/// Remove one tag from one item; returns the item's remaining tags.
+#[tauri::command]
+pub(crate) async fn tag_unapply(
+    db: tauri::State<'_, TagsDb>,
+    archive: String,
+    path: String,
+    tag: String,
+) -> Result<Vec<String>, String> {
+    let db = db.inner().clone();
+    blocking(move || with_db(&db, |conn| unapply_tag(conn, &archive, &path, &tag)))
+        .await
+        .map_err(|e| crate::ipc_error("tag_unapply", e, "could not remove that tag"))
+}
+
+/// Tags starting with `prefix`, most-used first, for the popover's autocomplete.
+#[tauri::command]
+pub(crate) async fn tag_suggest(
+    db: tauri::State<'_, TagsDb>,
+    prefix: String,
+    limit: u32,
+) -> Result<Vec<TagSummary>, String> {
+    let db = db.inner().clone();
+    blocking(move || with_db(&db, |conn| suggest_tags(conn, &prefix, limit)))
+        .await
+        .map_err(|e| crate::ipc_error("tag_suggest", e, "could not read tags"))
 }
 
 #[cfg(test)]
@@ -562,6 +697,23 @@ mod tests {
         )
         .unwrap();
         assert!(suggest_tags(&conn, "", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_database_sits_beside_the_other_prefs() {
+        // Mirrors the existing hwaccel_pref_path test in lib.rs: the location is
+        // decided in Rust, so nothing in the WebView can name a database file.
+        let path = crate::tags_db_path().expect("no config dir");
+        assert!(path.ends_with(PathBuf::from(crate::APP_IDENTIFIER).join("tags.db")));
+    }
+
+    #[test]
+    fn the_disk_target_is_the_archive_for_a_page_inside_one() {
+        // A page inside an archive has no path on disk — the ARCHIVE is what
+        // must exist. Checking the materialized mirror path instead would refuse
+        // a tag whenever the cache had been pruned.
+        assert_eq!(disk_target("", "C:\\p\\a.jpg"), "C:\\p\\a.jpg");
+        assert_eq!(disk_target("C:\\c\\v1.cbz", "ch1/p1.jpg"), "C:\\c\\v1.cbz");
     }
 
     #[test]
