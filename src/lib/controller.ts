@@ -3573,6 +3573,15 @@ export async function doImageInfo(): Promise<void> {
     if (value) rows.push({ label, value });
   }
   ui.imgInfoRows = rows;
+  // tags-001: what this picture is tagged as, without opening the popover. Last
+  // row on purpose — it is the only one that can change while the panel is open.
+  const id = tagIdentity(currentPath, currentArchiveOrigin);
+  const tags = await tauriInvoke<string[]>("tags_for_item", {
+    archive: id.archive,
+    path: id.path,
+  }).catch(() => [] as string[]);
+  if (token !== imgToken || !ui.imgInfoOpen) return;
+  if (tags.length > 0) rows.push({ label: "Tags", value: tags.join(", ") });
   // The panel's whole point is WHICH rows are there — a picture with no EXIF
   // must not grow camera rows out of nothing. Emitting the labels makes that
   // exactly assertable by the smoke, instead of leaving it to be guessed at
