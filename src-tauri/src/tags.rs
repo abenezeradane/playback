@@ -108,6 +108,10 @@ fn with_db<T, F>(db: &TagsDb, f: F) -> Result<T, String>
 where
     F: FnOnce(&Connection) -> Result<T, String>,
 {
+    // A poisoned lock fails every later call for the life of the process. That
+    // is deliberate and matches AllowList's handling in lib.rs: a panic while
+    // holding the connection means we no longer know the database's state, and
+    // failing closed beats writing to it on a guess.
     let mut guard = db.0.lock().map_err(|_| "tags: lock poisoned".to_string())?;
     if guard.is_none() {
         let path = crate::tags_db_path().ok_or_else(|| "tags: no config directory".to_string())?;
@@ -400,22 +404,22 @@ pub(crate) async fn tag_apply(
     tag: String,
 ) -> Result<Vec<String>, String> {
     let db = db.inner().clone();
-    // fold_tag's message is written for a person to read and leaks nothing, so
-    // it is the one error passed through verbatim — the user must be told WHY a
-    // name was refused.
-    let (_, _) = fold_tag(&tag)?;
-    // The store must not accumulate rows for things that were never real. The
-    // check lives HERE rather than in apply_tag so the database layer stays
-    // filesystem-free and its tests need no fixtures on disk.
-    let target = disk_target(&archive, &path);
-    if std::fs::metadata(target).is_err() {
-        return Err(crate::ipc_error(
-            "tag_apply: target missing",
-            target,
-            "that file is no longer there",
-        ));
-    }
+    // fold_tag is pure and its message is written for a person to read, so it is
+    // checked out here and passed through verbatim.
+    fold_tag(&tag)?;
     blocking(move || {
+        // The existence check is a BLOCKING syscall — a network share or a
+        // stalled disk can hold it for a long time — so it belongs on this side
+        // of the hop, not on the async runtime thread. The store must not fill
+        // with rows for paths that were never real.
+        let target = disk_target(&archive, &path);
+        if std::fs::metadata(target).is_err() {
+            return Err(crate::ipc_error(
+                "tag_apply: target missing",
+                target,
+                "that file is no longer there",
+            ));
+        }
         with_db(&db, |conn| {
             let item = ItemRef {
                 archive: &archive,
@@ -426,9 +430,9 @@ pub(crate) async fn tag_apply(
             };
             apply_tag(conn, &item, &tag)
         })
+        .map_err(|e| crate::ipc_error("tag_apply", e, "could not save that tag"))
     })
     .await
-    .map_err(|e| crate::ipc_error("tag_apply", e, "could not save that tag"))
 }
 
 /// Remove one tag from one item; returns the item's remaining tags.
