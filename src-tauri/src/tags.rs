@@ -1,6 +1,7 @@
 //! tags.rs — the tag index (tags-001).
 
 use rusqlite::Connection;
+use serde::Serialize;
 use std::path::Path;
 
 /// The schema version this binary understands. Bump it, and add a migration
@@ -270,6 +271,58 @@ pub(crate) fn tags_for(
     Ok(out)
 }
 
+/// Upper bound on any command's `limit`, applied server-side no matter what the
+/// caller asks for.
+pub(crate) const MAX_LIMIT: u32 = 1000;
+
+/// A tag and how many items carry it.
+#[derive(Serialize)]
+pub(crate) struct TagSummary {
+    pub name: String,
+    pub count: i64,
+}
+
+/// Tags whose folded name starts with `prefix` (all tags when it is empty),
+/// most-used first. Only tags that actually have members are returned.
+pub(crate) fn suggest_tags(
+    conn: &Connection,
+    prefix: &str,
+    limit: u32,
+) -> Result<Vec<TagSummary>, String> {
+    let limit = limit.min(MAX_LIMIT);
+    // LIKE is a pattern language: a typed '%' or '_' would otherwise match
+    // everything. Escape them and declare the escape character.
+    let pattern = format!(
+        "{}%",
+        prefix
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    );
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.name, COUNT(it.item_id) AS n
+             FROM tags t
+             JOIN item_tags it ON it.tag_id = t.id
+             WHERE ?1 = '' OR t.folded LIKE ?2 ESCAPE '\\'
+             GROUP BY t.id
+             ORDER BY n DESC, t.folded ASC
+             LIMIT ?3",
+        )
+        .map_err(|e| format!("tags: prepare suggest: {e}"))?;
+    let rows = stmt
+        .query_map(params![prefix, pattern, limit], |r| {
+            Ok(TagSummary { name: r.get(0)?, count: r.get(1)? })
+        })
+        .map_err(|e| format!("tags: suggest: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("tags: suggest row: {e}"))?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +509,67 @@ mod tests {
         assert_eq!(tags_for(&conn, "", "C:\\p\\a.jpg").unwrap(), vec![nasty.to_string()]);
         let items: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
         assert_eq!(items, 1, "the items table must still exist and hold the row");
+    }
+
+    #[test]
+    fn suggestions_are_ordered_by_use_and_carry_their_counts() {
+        // The count is the point: it is what stops a user creating "landscape"
+        // when 4,000 things already say "landscapes".
+        let conn = open_db(&temp_db("suggest")).unwrap();
+        for n in 0..3 {
+            let p = format!("C:\\p\\{n}.jpg");
+            apply_tag(&conn, &item(&p, "x.jpg"), "landscapes").unwrap();
+        }
+        apply_tag(&conn, &item("C:\\p\\z.jpg", "z.jpg"), "landfill").unwrap();
+
+        let all = suggest_tags(&conn, "", 10).unwrap();
+        assert_eq!(all[0].name, "landscapes");
+        assert_eq!(all[0].count, 3);
+        assert_eq!(all[1].name, "landfill");
+        assert_eq!(all[1].count, 1);
+
+        let filtered = suggest_tags(&conn, "lands", 10).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "landscapes");
+    }
+
+    #[test]
+    fn suggestion_prefixes_match_case_insensitively() {
+        let conn = open_db(&temp_db("suggest-case")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "Trip 2024").unwrap();
+        assert_eq!(suggest_tags(&conn, "trip", 10).unwrap().len(), 1);
+        assert_eq!(suggest_tags(&conn, "TRIP", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_wildcard_in_the_prefix_is_a_literal_not_a_pattern() {
+        // '%' must match a percent sign, not every tag — otherwise typing it
+        // silently returns the whole library.
+        let conn = open_db(&temp_db("suggest-wild")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
+        assert!(suggest_tags(&conn, "%", 10).unwrap().is_empty());
+        assert!(suggest_tags(&conn, "_", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_untagged_tag_never_appears() {
+        // Nothing creates a bare tag today, but the JOIN must be an inner one so
+        // a tag with no members cannot show up with a count of zero.
+        let conn = open_db(&temp_db("suggest-bare")).unwrap();
+        conn.execute(
+            "INSERT INTO tags (name, folded, created_at) VALUES ('Ghost', 'ghost', 1)",
+            [],
+        )
+        .unwrap();
+        assert!(suggest_tags(&conn, "", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_limit_is_clamped() {
+        let conn = open_db(&temp_db("suggest-limit")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
+        // An absurd limit must not become an absurd query.
+        assert_eq!(suggest_tags(&conn, "", u32::MAX).unwrap().len(), 1);
+        assert!(suggest_tags(&conn, "", 0).unwrap().is_empty());
     }
 }
