@@ -21,6 +21,7 @@
     doImageCopy,
     doImageReveal,
     doImageInfo,
+    openTagPopover,
   } from "./controller";
 </script>
 
@@ -219,6 +220,9 @@
       </button>
       <button id="img-info" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgInfoOpen} title="Image info (I)" aria-label="Image info" onclick={() => void doImageInfo()}>
         <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 16v-4" /><circle cx="12" cy="8.2" r="1" /></svg>
+      </button>
+      <button id="btn-img-tag" class="glass-btn" type="button" title="Tags (#)" aria-label="Tags" onclick={openTagPopover}>
+        <svg class="ic" viewBox="0 0 24 24"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /><circle cx="7.5" cy="7.5" r="1.5" /></svg>
       </button>
     </div>
   </div>

@@ -72,6 +72,7 @@
         <ul class="keys">
           <li><span>This help</span><span class="keys__caps"><kbd class="kbd">?</kbd></span></li>
           <li><span>Close panel / help</span><span class="keys__caps"><kbd class="kbd">Esc</kbd></span></li>
+          <li><span>Tags</span><span class="keys__caps"><kbd class="kbd">#</kbd></span></li>
         </ul>
       </div>
     </div>

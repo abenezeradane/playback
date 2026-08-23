@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
-  import { goBack, openGalleryItem, galleryTile } from "./controller";
+  import { goBack, openGalleryItem, galleryTile, openTagPopover } from "./controller";
   import { galleryMeta } from "../player-core";
   import type { GalleryItem } from "./state.svelte";
 
@@ -140,6 +140,22 @@
                 <span class="gallery-tile__duration">{item.durationLabel}</span>
               {/if}
             {/if}
+            <!-- tags-001: the grid's own way in. The tile is itself a <button>,
+                 so this is a SPAN with a click handler rather than a nested
+                 button, which is invalid HTML and swallows the tile's own
+                 activation. -->
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <span
+              class="gallery-tile__tag"
+              title="Tags (#)"
+              onclick={(e) => {
+                e.stopPropagation();
+                ui.galleryIndex = i;
+                openTagPopover();
+              }}
+            >
+              <svg class="ic" viewBox="0 0 24 24"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /><circle cx="7.5" cy="7.5" r="1.5" /></svg>
+            </span>
             <span class="gallery-tile__name">{item.name}</span>
           </button>
         {/each}

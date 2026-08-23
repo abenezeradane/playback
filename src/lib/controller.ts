@@ -4116,6 +4116,9 @@ function handleGalleryKey(e: KeyboardEvent): boolean {
     case "End":
       focusGalleryTile(ui.galleryItems.length - 1);
       return true;
+    case "#":
+      openTagPopover();
+      return true;
     default:
       return false;
   }
@@ -4603,6 +4606,14 @@ function handleImageKey(e: KeyboardEvent): boolean {
       e.preventDefault();
       void doImageInfo();
       return true;
+    // tags-001: '#' rather than 't' — the player already binds 't' to the
+    // chapters panel, and one gesture that means the same thing everywhere beats
+    // a different key per surface. Never the ONLY way in: '#' sits on different
+    // physical keys across layouts, so every surface also has a button.
+    case "#":
+      e.preventDefault();
+      openTagPopover();
+      return true;
     default:
       break;
   }
@@ -4947,6 +4958,15 @@ function wireKeyboard(): void {
       }
     }
 
+    // tags-001: the popover is a LAYER over the image and gallery views, whose
+    // Esc backs out of the view entirely (ux-001). Without this, Esc while
+    // tagging would navigate away and drop the popover with it.
+    if (ui.tagPopoverOpen && e.key === "Escape") {
+      e.preventDefault();
+      closeTagPopover();
+      return;
+    }
+
     // ux-001: Esc backs out one level from the still-image and gallery views,
     // which previously swallowed it entirely (the only way out was the mouse).
     // The player's own Esc cascade below is untouched — it has layers (panels,
@@ -5076,6 +5096,12 @@ function wireKeyboard(): void {
           togglePanel();
         }
         break;
+      case "#":
+        if (playerVisible()) {
+          e.preventDefault();
+          openTagPopover();
+        }
+        break;
       case "]":
         if (playerVisible()) {
           e.preventDefault();
@@ -5129,6 +5155,7 @@ function wireKeyboard(): void {
           ui.settingsOpen ||
           ui.queueOpen ||
           ui.playlistEditorOpen ||
+          ui.tagPopoverOpen ||
           ui.moreOpen;
         if (hadPanel) {
           setShortcutsOpen(false);
@@ -5136,6 +5163,7 @@ function wireKeyboard(): void {
           setPanelOpen(false);
           setQueueOpen(false);
           setMoreOpen(false);
+          closeTagPopover();
           closePlaylistEditor();
         } else if (ui.nextPromptOpen) {
           closeNextPrompt();
