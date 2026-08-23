@@ -4109,7 +4109,10 @@ button.shortcuts__backdrop {
    it holds one field and a short list, and a full-width dialog for a text box
    reads as heavier than the action is. */
 .tagpop__panel { max-width: 30rem; }
-.tagpop__body { display: flex; flex-direction: column; gap: 0.75rem; padding: 1rem 1.25rem 1.25rem; }
+/* Same containment .pl-editor__body uses, and for the same reason: the
+   .shortcuts panel clips its overflow, and an item may carry up to 64 tags of
+   up to 64 characters each. */
+.tagpop__body { display: flex; flex-direction: column; gap: 0.75rem; padding: 1rem 1.25rem 1.25rem; max-height: min(70vh, 560px); overflow-y: auto; }
 .tagpop__chips { display: flex; flex-wrap: wrap; gap: 0.4rem; min-height: 1.75rem; }
 .tagpop__chip {
   display: inline-flex; align-items: center; gap: 0.35rem;
@@ -4120,6 +4123,7 @@ button.shortcuts__backdrop {
 }
 .tagpop__chip:hover { background: rgb(255 255 255 / 0.14); }
 .tagpop__chip .ic { width: 0.8rem; height: 0.8rem; opacity: 0.7; }
+.tagpop__chip-name { overflow-wrap: anywhere; }
 .tagpop__empty { font-size: 0.85rem; opacity: 0.55; }
 .tagpop__input {
   width: 100%; padding: 0.5rem 0.65rem; border-radius: 0.5rem;

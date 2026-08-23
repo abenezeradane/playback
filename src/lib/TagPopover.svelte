@@ -25,11 +25,11 @@
     }
     if (e.key === "Enter") {
       e.preventDefault();
+      // Only a row the user actually arrowed onto counts as chosen. Otherwise
+      // Enter commits exactly what was typed — and an empty field does nothing.
       const picked = ui.tagSuggestions[ui.tagSuggestIndex];
-      // Enter takes the highlighted suggestion when the field matches nothing
-      // else — otherwise it creates exactly what was typed.
-      if (picked && ui.tagDraft.trim() === "") void applySuggestion(picked.name);
-      else void commitTagDraft();
+      if (picked) void applySuggestion(picked.name);
+      else if (ui.tagDraft.trim() !== "") void commitTagDraft();
       return;
     }
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -37,9 +37,14 @@
       const n = ui.tagSuggestions.length;
       if (n === 0) return;
       const step = e.key === "ArrowDown" ? 1 : -1;
-      ui.tagSuggestIndex = (ui.tagSuggestIndex + step + n) % n;
+      const cur = ui.tagSuggestIndex;
+      // From "nothing selected", Down goes to the first row and Up to the last.
+      ui.tagSuggestIndex = cur < 0 ? (step === 1 ? 0 : n - 1) : (cur + step + n) % n;
       return;
     }
+    // Chips render in the store's order (alphabetical by folded name), not by
+    // when they were added, so this removes the LAST CHIP SHOWN rather than the
+    // most recent one. That is what someone watching the chip row would predict.
     if (e.key === "Backspace" && ui.tagDraft === "" && ui.tagTargetTags.length > 0) {
       e.preventDefault();
       void removeTagFromTarget(ui.tagTargetTags[ui.tagTargetTags.length - 1]);

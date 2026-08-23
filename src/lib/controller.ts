@@ -3672,7 +3672,10 @@ async function refreshSuggestions(prefix: string): Promise<void> {
   }).catch(() => null);
   if (!suggestions || !ui.tagPopoverOpen) return;
   ui.tagSuggestions = suggestions;
-  ui.tagSuggestIndex = suggestions.length > 0 ? 0 : -1;
+  // -1, not 0: nothing is highlighted until the user explicitly arrows onto a
+  // row. With a row pre-highlighted, Enter pressed straight after opening would
+  // apply the library's most-used tag to whatever happens to be on screen.
+  ui.tagSuggestIndex = -1;
 }
 
 /** Field input: re-query suggestions against the token being typed. */
