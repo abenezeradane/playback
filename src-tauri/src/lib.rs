@@ -1763,7 +1763,7 @@ pub fn run() {
 /// Explorer, which does not parse it: handed one, Explorer silently opens a
 /// window on Documents and selects nothing. A wrong result with no error, so
 /// the prefix comes off before the path is passed on.
-fn strip_extended_prefix(path: &str) -> String {
+pub(crate) fn strip_extended_prefix(path: &str) -> String {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{rest}");
     }

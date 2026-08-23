@@ -3706,10 +3706,11 @@ export async function commitTagDraft(): Promise<void> {
   const tags = cleanTagDraft(ui.tagDraft);
   if (tags.length === 0) return;
   const target = ui.tagTarget;
+  if (!target) return;
   const failed: string[] = [];
   let reason = "";
   for (const tag of tags) {
-    const err = await applyOne(tag);
+    const err = await applyOne(tag, target);
     if (err) {
       failed.push(tag);
       reason = err;
@@ -3728,19 +3729,25 @@ export async function commitTagDraft(): Promise<void> {
 /** Apply the highlighted suggestion (Enter on the list, or a click). */
 export async function applySuggestion(name: string): Promise<void> {
   const target = ui.tagTarget;
-  const err = await applyOne(name);
+  if (!target) return;
+  const err = await applyOne(name, target);
   if (ui.tagTarget !== target) return;
   ui.tagError = err;
   ui.tagDraft = "";
   void refreshSuggestions("");
 }
 
-/** Apply one tag. Returns "" on success, or the reason it was refused — the
- *  CALLER decides what to surface, because a multi-tag commit must not let the
- *  last tag's outcome erase an earlier one's failure. */
-async function applyOne(tag: string): Promise<string> {
-  const target = ui.tagTarget;
-  if (!target) return "";
+/** Apply one tag to `target`. Returns "" on success, or the reason it was
+ *  refused — the CALLER decides what to surface, because a multi-tag commit must
+ *  not let the last tag's outcome erase an earlier one's failure.
+ *
+ *  The target is a PARAMETER, not re-read from `ui`: a batch captures it once and
+ *  every tag in that batch must land on the item the user pointed at. Re-reading
+ *  here meant that a popover which closed and reopened on another item between
+ *  two round trips wrote the remaining tags to the NEW item — and `tag_apply`
+ *  does a blocking `fs::metadata` first, so a network share widens that window
+ *  to seconds. */
+async function applyOne(tag: string, target: TagTarget): Promise<string> {
   try {
     const tags = await tauriInvoke<string[]>("tag_apply", {
       archive: target.archive,
@@ -5170,7 +5177,6 @@ function wireKeyboard(): void {
           ui.settingsOpen ||
           ui.queueOpen ||
           ui.playlistEditorOpen ||
-          ui.tagPopoverOpen ||
           ui.moreOpen;
         if (hadPanel) {
           setShortcutsOpen(false);
@@ -5178,7 +5184,6 @@ function wireKeyboard(): void {
           setPanelOpen(false);
           setQueueOpen(false);
           setMoreOpen(false);
-          closeTagPopover();
           closePlaylistEditor();
         } else if (ui.nextPromptOpen) {
           closeNextPrompt();

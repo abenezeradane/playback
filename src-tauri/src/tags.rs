@@ -379,6 +379,41 @@ pub(crate) fn disk_target<'a>(archive: &'a str, path: &'a str) -> &'a str {
     }
 }
 
+/// The identity an item is stored under, with the path canonicalized so the
+/// same file cannot land in two rows because it was reached by a differently
+/// spelled path (a lowercase drive letter, a mapped drive, a junction, an
+/// 8.3 short name — all of which Windows treats as the same file).
+///
+/// For a page inside an archive the ARCHIVE is what exists on disk, so that is
+/// what gets canonicalized; the inner path is not a filesystem path and is left
+/// exactly as it is.
+///
+/// A path that cannot be canonicalized (the file is gone, the drive is
+/// unplugged) falls back to what the caller gave, so reading the tags of a
+/// missing file still finds the row that was written when it was present.
+///
+/// `fs::canonicalize` is a BLOCKING syscall, so every caller must invoke this
+/// INSIDE the `blocking(...)` closure, never on the async runtime thread.
+///
+/// All three commands that take an item identity must apply this identically:
+/// a read that skipped it would miss the row a write created.
+pub(crate) fn canonical_identity(archive: &str, path: &str) -> (String, String) {
+    // canonicalize returns the `\\?\C:\...` verbatim form, which must never be
+    // what gets stored — the same file would then differ from every path the
+    // rest of the app hands us.
+    fn resolve(raw: &str) -> String {
+        match std::fs::canonicalize(raw) {
+            Ok(p) => crate::strip_extended_prefix(&p.to_string_lossy()),
+            Err(_) => raw.to_string(),
+        }
+    }
+    if archive.is_empty() {
+        (String::new(), resolve(path))
+    } else {
+        (resolve(archive), path.to_string())
+    }
+}
+
 /// The tags on one item. `archive` is "" for a real file or folder.
 #[tauri::command]
 pub(crate) async fn tags_for_item(
@@ -387,9 +422,15 @@ pub(crate) async fn tags_for_item(
     path: String,
 ) -> Result<Vec<String>, String> {
     let db = db.inner().clone();
-    blocking(move || with_db(&db, |conn| tags_for(conn, &archive, &path)))
-        .await
-        .map_err(|e| crate::ipc_error("tags_for_item", e, "could not read tags"))
+    blocking(move || {
+        // canonicalize is a blocking syscall, so it happens on THIS side of the
+        // hop — and it must match what tag_apply stored, or the read misses the
+        // row the write created.
+        let (archive, path) = canonical_identity(&archive, &path);
+        with_db(&db, |conn| tags_for(conn, &archive, &path))
+    })
+    .await
+    .map_err(|e| crate::ipc_error("tags_for_item", e, "could not read tags"))
 }
 
 /// Apply one tag to one item; returns the item's tags afterwards.
@@ -420,6 +461,11 @@ pub(crate) async fn tag_apply(
                 "that file is no longer there",
             ));
         }
+        // Canonicalize AFTER the existence check (both are blocking syscalls and
+        // both belong here): the store's key must be the resolved path, or the
+        // same file tagged through two spellings becomes two rows with two
+        // separate tag sets — silently losing tagging work.
+        let (archive, path) = canonical_identity(&archive, &path);
         with_db(&db, |conn| {
             let item = ItemRef {
                 archive: &archive,
@@ -444,9 +490,13 @@ pub(crate) async fn tag_unapply(
     tag: String,
 ) -> Result<Vec<String>, String> {
     let db = db.inner().clone();
-    blocking(move || with_db(&db, |conn| unapply_tag(conn, &archive, &path, &tag)))
-        .await
-        .map_err(|e| crate::ipc_error("tag_unapply", e, "could not remove that tag"))
+    blocking(move || {
+        // Same identity as tag_apply wrote, resolved on the blocking side.
+        let (archive, path) = canonical_identity(&archive, &path);
+        with_db(&db, |conn| unapply_tag(conn, &archive, &path, &tag))
+    })
+    .await
+    .map_err(|e| crate::ipc_error("tag_unapply", e, "could not remove that tag"))
 }
 
 /// Tags starting with `prefix`, most-used first, for the popover's autocomplete.
@@ -754,5 +804,244 @@ mod tests {
         );
         // Verify zero limit returns empty result.
         assert!(suggest_tags(&conn, "", 0).unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Path identity (canonical_identity)
+    // -----------------------------------------------------------------------
+
+    /// Tag `spelled` the way the command layer does: canonicalize first, then
+    /// store under whatever identity that produced.
+    fn apply_via(conn: &Connection, spelled: &str, tag: &str) -> Vec<String> {
+        let (archive, path) = canonical_identity("", spelled);
+        let name = Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let it = ItemRef {
+            archive: &archive,
+            path: &path,
+            kind: "image",
+            name: &name,
+            sort_key: &name,
+        };
+        apply_tag(conn, &it, tag).unwrap()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn two_spellings_of_one_file_are_one_row_with_one_tag_set() {
+        // The failure this prevents: C:\photos\a.jpg and c:\photos\a.jpg landing
+        // as two rows with SEPARATE tag sets, which the user experiences as "my
+        // tags are gone". Windows treats both spellings as the same file, so the
+        // store has to as well. (Windows-only because case-insensitivity is a
+        // property of this filesystem, not of the code.)
+        let db_path = temp_db("canon-case");
+        let dir = db_path.parent().unwrap().to_path_buf();
+        let file = dir.join("Photo.JPG");
+        std::fs::write(&file, b"pixels").unwrap();
+
+        let spelled_a = file.to_string_lossy().to_string();
+        // The same file reached by a differently spelled path: lowercased drive
+        // letter, directories and extension. Windows opens the identical file.
+        let spelled_b = spelled_a.to_lowercase();
+        assert_ne!(spelled_a, spelled_b, "the two spellings must actually differ");
+
+        let conn = open_db(&db_path).unwrap();
+        apply_via(&conn, &spelled_a, "keep");
+        let both = apply_via(&conn, &spelled_b, "print");
+        assert_eq!(
+            both,
+            vec!["keep".to_string(), "print".to_string()],
+            "the second spelling must land on the row the first one created"
+        );
+
+        let items: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(items, 1, "two spellings of one file must not be two rows");
+
+        // The read side resolves identically, whichever spelling is asked for.
+        for spelled in [&spelled_a, &spelled_b] {
+            let (archive, path) = canonical_identity("", spelled);
+            assert_eq!(
+                tags_for(&conn, &archive, &path).unwrap(),
+                vec!["keep".to_string(), "print".to_string()],
+                "reading through {spelled} missed the row"
+            );
+        }
+
+        // And what is stored is the plain path, never canonicalize's `\\?\` form.
+        let stored: String = conn.query_row("SELECT path FROM items", [], |r| r.get(0)).unwrap();
+        assert!(
+            !stored.starts_with(r"\\?\"),
+            "the extended-length prefix must be stripped before storing: {stored}"
+        );
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_canonicalized_falls_back_unchanged() {
+        // A file on an unplugged drive still has to read back the tags it was
+        // given while it was present, so an unresolvable path keeps exactly the
+        // spelling it arrived with rather than becoming an error or an empty key.
+        let missing = "C:\\definitely\\not\\here\\ghost.jpg";
+        assert_eq!(
+            canonical_identity("", missing),
+            (String::new(), missing.to_string())
+        );
+
+        let conn = open_db(&temp_db("canon-missing")).unwrap();
+        apply_via(&conn, missing, "keep");
+        let (archive, path) = canonical_identity("", missing);
+        assert_eq!(
+            tags_for(&conn, &archive, &path).unwrap(),
+            vec!["keep".to_string()],
+            "a lookup through the fallback must still find the row"
+        );
+    }
+
+    #[test]
+    fn an_archive_item_canonicalizes_the_archive_and_leaves_the_inner_path() {
+        // The inner path is not a filesystem path — there is nothing on disk to
+        // resolve it against, and rewriting it would only corrupt the identity.
+        let db_path = temp_db("canon-archive");
+        let dir = db_path.parent().unwrap().to_path_buf();
+        let cbz = dir.join("Volume1.CBZ");
+        std::fs::write(&cbz, b"stand-in for an archive").unwrap();
+        let real = cbz.to_string_lossy().to_string();
+
+        let (canon_archive, inner) = canonical_identity(&real, "ch1/page01.jpg");
+        assert_eq!(inner, "ch1/page01.jpg", "the inner path must be untouched");
+        assert!(
+            !canon_archive.starts_with(r"\\?\"),
+            "the extended-length prefix must be stripped: {canon_archive}"
+        );
+        assert!(
+            canon_archive.to_lowercase().ends_with("volume1.cbz"),
+            "the archive must still name the same file: {canon_archive}"
+        );
+
+        #[cfg(windows)]
+        {
+            let (from_lower, inner_lower) =
+                canonical_identity(&real.to_lowercase(), "ch1/page01.jpg");
+            assert_eq!(from_lower, canon_archive, "two spellings name one archive");
+            assert_eq!(inner_lower, "ch1/page01.jpg");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Scale
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn suggestions_stay_quick_on_a_large_library() {
+        // tag_suggest runs on EVERY keystroke, and its predicate
+        // (`?1 = '' OR t.folded LIKE ?2 ESCAPE '\'`) cannot use an index: the OR
+        // with a non-indexable term forces a scan, and the ESCAPE clause disables
+        // SQLite's LIKE optimization outright. GROUP BY ... ORDER BY n DESC then
+        // materializes every group before LIMIT applies. Until this test the only
+        // evidence for that design was a two-tag store, while the library it was
+        // chosen for is expected to exceed 100,000 items.
+        //
+        // The bound is deliberately GENEROUS: the purpose is to catch a
+        // catastrophic scan, not to police milliseconds. A tight bound on a debug
+        // build would flake and then get deleted, which is worse than no test.
+        const TAGS: usize = 500;
+        const ROWS: usize = 200_000;
+        const ITEMS: usize = 30_000;
+
+        /// A handful of real-looking neighbours share one prefix, so the "lan"
+        /// probe measures a filter that actually matches something.
+        fn tag_name(j: usize) -> String {
+            if j % 50 == 0 {
+                format!("landscape {}", j / 50)
+            } else {
+                format!("tag{j:04}")
+            }
+        }
+
+        let conn = open_db(&temp_db("suggest-scale")).unwrap();
+        let built = std::time::Instant::now();
+
+        // ONE transaction, like the clamp test above: 200,000 separate commits
+        // would make this fixture take minutes instead of seconds.
+        let tx = conn.unchecked_transaction().unwrap();
+        {
+            let mut ins_item = tx
+                .prepare(
+                    "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+                     VALUES ('', ?1, 'image', ?2, ?2, 0)",
+                )
+                .unwrap();
+            for i in 0..ITEMS {
+                let name = format!("{i:05}.jpg");
+                ins_item.execute(params![format!("C:\\lib\\{name}"), name]).unwrap();
+            }
+            let mut ins_tag = tx
+                .prepare("INSERT INTO tags (name, folded, created_at) VALUES (?1, ?1, 0)")
+                .unwrap();
+            for j in 0..TAGS {
+                ins_tag.execute(params![tag_name(j)]).unwrap();
+            }
+        }
+
+        // Tag j is carried by `count_j` items on a Zipf-ish curve — a few tags on
+        // a large share of the library, a long tail on almost nothing, which is
+        // what makes ORDER BY n DESC do real work. The rotating start offset only
+        // keeps the fixture from stacking all 500 tags onto item 0; the per-item
+        // spread is not what this measures.
+        let harmonic: f64 = (1..=TAGS).map(|j| 1.0 / j as f64).sum();
+        let mut rows = 0usize;
+        {
+            let mut link = tx
+                .prepare("INSERT INTO item_tags (item_id, tag_id) VALUES (?1, ?2)")
+                .unwrap();
+            for j in 0..TAGS {
+                let count = ((ROWS as f64 / ((j + 1) as f64 * harmonic)).round() as usize)
+                    .clamp(1, ITEMS);
+                let offset = (j * 977) % ITEMS;
+                for k in 0..count {
+                    // Rows are 1-based rowids, and (item_id, tag_id) stays unique
+                    // because each tag walks distinct items exactly once.
+                    let item_id = ((offset + k) % ITEMS + 1) as i64;
+                    link.execute(params![item_id, (j + 1) as i64]).unwrap();
+                    rows += 1;
+                }
+            }
+        }
+        tx.commit().unwrap();
+        println!(
+            "fixture: {TAGS} tags, {ITEMS} items, {rows} item_tags rows in {:?}",
+            built.elapsed()
+        );
+
+        let t0 = std::time::Instant::now();
+        let all = suggest_tags(&conn, "", 20).unwrap();
+        let all_elapsed = t0.elapsed();
+        let t1 = std::time::Instant::now();
+        let filtered = suggest_tags(&conn, "lan", 20).unwrap();
+        let lan_elapsed = t1.elapsed();
+
+        println!("suggest_tags(\"\", 20)    over {rows} item_tags rows: {all_elapsed:?}");
+        println!("suggest_tags(\"lan\", 20) over {rows} item_tags rows: {lan_elapsed:?}");
+
+        assert_eq!(all.len(), 20, "the unfiltered probe must fill its limit");
+        assert!(
+            !filtered.is_empty(),
+            "the prefix probe must match the landscape family"
+        );
+        assert!(
+            filtered.iter().all(|t| t.name.to_lowercase().starts_with("lan")),
+            "the prefix filter must not leak unrelated tags"
+        );
+
+        let budget = std::time::Duration::from_secs(2);
+        assert!(
+            all_elapsed < budget,
+            "suggest_tags(\"\") took {all_elapsed:?} on {rows} rows, over the {budget:?} budget"
+        );
+        assert!(
+            lan_elapsed < budget,
+            "suggest_tags(\"lan\") took {lan_elapsed:?} on {rows} rows, over the {budget:?} budget"
+        );
     }
 }

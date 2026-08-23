@@ -1008,8 +1008,11 @@ export function compareNatural(a: string, b: string): number {
  * embedded NUL is a hazard in SQLite TEXT; not a space: a space is a legal
  * filename character) sorts below every character a Windows filename may hold.
  *
- * Accepted limit: a digit run longer than 999 digits clamps its prefix length,
- * so two such runs fall back to the raw-name tie-break. No filename sorts by a
+ * Accepted limit: a digit run longer than 999 digits clamps its prefix length, so
+ * the length prefix no longer separates such runs and the digits themselves decide
+ * the comparison lexicographically. The relative order of two runs past 999 digits
+ * is therefore UNSPECIFIED — it can disagree with `compareNatural` (1000 nines and
+ * 1001 eights order one way here and the other way there). No filename sorts by a
  * 1000-digit number.
  */
 export function naturalSortKey(name: string): string {
