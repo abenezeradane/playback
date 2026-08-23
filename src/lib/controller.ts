@@ -11,7 +11,14 @@
  * GIF timing) stay delegated to the pure, unit-tested functions in player-core.
  */
 import { tick } from "svelte";
-import { ui, els, type RecentFile, type QueueItem, type GalleryItem } from "./state.svelte";
+import {
+  ui,
+  els,
+  type RecentFile,
+  type QueueItem,
+  type GalleryItem,
+  type TagTarget,
+} from "./state.svelte";
 import { initPerf, mark as perfMark, span as perfSpan, recordIpc } from "./perf";
 import {
   createInitialState,
@@ -113,6 +120,9 @@ import {
   imageZoomPercent,
   type ImageTransform,
   type ImageSize,
+  naturalSortKey,
+  cleanTagDraft,
+  tagIdentity,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -3580,6 +3590,144 @@ function flashImageAction(text: string): void {
   imgActionFlashTimer = window.setTimeout(() => {
     ui.imgActionFlash = "";
   }, 1400);
+}
+
+// ---------------------------------------------------------------------------
+// Tags (tags-001)
+// ---------------------------------------------------------------------------
+// The store is native (SQLite, src-tauri/src/tags.rs). Everything here is glue:
+// work out WHICH item the user means from the active view, call the command, and
+// render exactly what Rust returns. No local tag cache — the popover is open for
+// seconds at a time and the round trip is an indexed lookup.
+
+/** The item the active view is showing, or null when nothing is taggable. */
+function currentTagTarget(): TagTarget | null {
+  if (imageViewActive() && currentPath) {
+    const id = tagIdentity(currentPath, currentArchiveOrigin);
+    return { ...id, kind: "image", name: basename(currentPath) };
+  }
+  if (playerVisible() && currentPath) {
+    const id = tagIdentity(currentPath, currentArchiveOrigin);
+    return { ...id, kind: "video", name: basename(currentPath) };
+  }
+  if (ui.view === "gallery") {
+    const item = ui.galleryItems[ui.galleryIndex < 0 ? 0 : ui.galleryIndex];
+    if (!item) return null;
+    return { archive: item.archive, path: item.path, kind: item.kind, name: item.name };
+  }
+  return null;
+}
+
+/** Open the popover for whatever the active view is showing. */
+export function openTagPopover(): void {
+  const target = currentTagTarget();
+  if (!target) return;
+  ui.tagTarget = target;
+  ui.tagTargetTags = [];
+  ui.tagDraft = "";
+  ui.tagSuggestions = [];
+  ui.tagSuggestIndex = -1;
+  ui.tagError = "";
+  ui.tagPopoverOpen = true;
+  perfMark("tags.open", `${target.kind}:${target.name}`);
+  void refreshTargetTags();
+  void refreshSuggestions("");
+}
+
+export function closeTagPopover(): void {
+  if (!ui.tagPopoverOpen) return;
+  ui.tagPopoverOpen = false;
+  ui.tagTarget = null;
+  ui.tagDraft = "";
+  ui.tagSuggestions = [];
+  ui.tagError = "";
+  perfMark("tags.close");
+}
+
+async function refreshTargetTags(): Promise<void> {
+  const target = ui.tagTarget;
+  if (!target) return;
+  const tags = await tauriInvoke<string[]>("tags_for_item", {
+    archive: target.archive,
+    path: target.path,
+  }).catch(() => null);
+  // A target change while the call was in flight must not overwrite the new one.
+  if (!tags || ui.tagTarget !== target) return;
+  ui.tagTargetTags = tags;
+  // The smoke reads this: it is the machine-readable proof of WHICH tags an item
+  // carries, rather than a guess from how wide the chip row looks.
+  perfMark("tags.list", tags.join("|"));
+}
+
+async function refreshSuggestions(prefix: string): Promise<void> {
+  const suggestions = await tauriInvoke<{ name: string; count: number }[]>("tag_suggest", {
+    prefix,
+    limit: 20,
+  }).catch(() => null);
+  if (!suggestions || !ui.tagPopoverOpen) return;
+  ui.tagSuggestions = suggestions;
+  ui.tagSuggestIndex = suggestions.length > 0 ? 0 : -1;
+}
+
+/** Field input: re-query suggestions against the token being typed. */
+export function onTagDraftInput(value: string): void {
+  ui.tagDraft = value;
+  ui.tagError = "";
+  const token = value.split(",").pop() ?? "";
+  void refreshSuggestions(token.trim());
+}
+
+/** Apply every tag in the draft (commas separate), then clear the field. */
+export async function commitTagDraft(): Promise<void> {
+  const tags = cleanTagDraft(ui.tagDraft);
+  if (tags.length === 0) return;
+  for (const tag of tags) await applyOne(tag);
+  ui.tagDraft = "";
+  void refreshSuggestions("");
+}
+
+/** Apply the highlighted suggestion (Enter on the list, or a click). */
+export async function applySuggestion(name: string): Promise<void> {
+  await applyOne(name);
+  ui.tagDraft = "";
+  void refreshSuggestions("");
+}
+
+async function applyOne(tag: string): Promise<void> {
+  const target = ui.tagTarget;
+  if (!target) return;
+  try {
+    const tags = await tauriInvoke<string[]>("tag_apply", {
+      archive: target.archive,
+      path: target.path,
+      kind: target.kind,
+      name: target.name,
+      sortKey: naturalSortKey(target.name),
+      tag,
+    });
+    if (ui.tagTarget !== target) return;
+    ui.tagTargetTags = tags;
+    ui.tagError = "";
+    perfMark("tags.apply", `${tag}=>${tags.join("|")}`);
+  } catch (err) {
+    // Rust refuses a name the user must be told about (too long, control
+    // characters); showing it beats a chip silently not appearing.
+    ui.tagError = String(err);
+    perfMark("tags.reject", String(err));
+  }
+}
+
+export async function removeTagFromTarget(tag: string): Promise<void> {
+  const target = ui.tagTarget;
+  if (!target) return;
+  const tags = await tauriInvoke<string[]>("tag_unapply", {
+    archive: target.archive,
+    path: target.path,
+    tag,
+  }).catch(() => null);
+  if (!tags || ui.tagTarget !== target) return;
+  ui.tagTargetTags = tags;
+  perfMark("tags.remove", `${tag}=>${tags.join("|")}`);
 }
 
 // ---------------------------------------------------------------------------

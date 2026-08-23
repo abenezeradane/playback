@@ -68,6 +68,15 @@ export interface GalleryItem {
   archive: string;
 }
 
+/** The item a tag is being applied to (tags-001). `archive` is "" for a real
+ *  file or folder; otherwise `path` is the path INSIDE that archive. */
+export interface TagTarget {
+  archive: string;
+  path: string;
+  kind: "folder" | "image" | "video" | "archive";
+  name: string;
+}
+
 /** The active surface — mirrors the former `#app[data-state]` switch. */
 export type View = "empty" | "playing" | "image" | "live-unavailable" | "gallery";
 
@@ -235,6 +244,20 @@ export const ui = $state({
   // Brief confirmation for an action with no visible result of its own; copying
   // changes nothing on screen, so without this there is no way to tell it worked.
   imgActionFlash: "",
+
+  // --- Tags (tags-001) ---
+  // The popover is mounted once and driven from here. `tagTarget` is the item
+  // being tagged — a photo, a video, a folder, an archive, or a page inside one
+  // (which carries the archive's real path in `archive` and an INNER path).
+  // `tagTargetTags` is always what Rust last returned, never an optimistic local
+  // guess, so the chips cannot drift from the store.
+  tagPopoverOpen: false,
+  tagTarget: null as TagTarget | null,
+  tagTargetTags: [] as string[],
+  tagDraft: "",
+  tagSuggestions: [] as { name: string; count: number }[],
+  tagSuggestIndex: -1,
+  tagError: "",
 
   // --- Photo sibling nav + gallery (gallery-001) ---
   // The other images in the current photo's folder, in natural sort order —
