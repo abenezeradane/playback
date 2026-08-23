@@ -3611,7 +3611,13 @@ function currentTagTarget(): TagTarget | null {
     return { ...id, kind: "video", name: basename(currentPath) };
   }
   if (ui.view === "gallery") {
-    const item = ui.galleryItems[ui.galleryIndex < 0 ? 0 : ui.galleryIndex];
+    // -1 means no tile has ever been focused (ux-004: the grid's cursor starts
+    // unset). Tagging tile 0 on a hunch would tag something the user never
+    // pointed at, in a folder that may hold thousands — decline instead. Every
+    // real entry point sets the cursor first: the arrow keys move it, and the
+    // tile's own tag button sets it before opening the popover.
+    if (ui.galleryIndex < 0) return null;
+    const item = ui.galleryItems[ui.galleryIndex];
     if (!item) return null;
     return { archive: item.archive, path: item.path, kind: item.kind, name: item.name };
   }
@@ -3677,25 +3683,46 @@ export function onTagDraftInput(value: string): void {
   void refreshSuggestions(token.trim());
 }
 
-/** Apply every tag in the draft (commas separate), then clear the field. */
+/** Apply every tag in the draft (commas separate). */
 export async function commitTagDraft(): Promise<void> {
   const tags = cleanTagDraft(ui.tagDraft);
   if (tags.length === 0) return;
-  for (const tag of tags) await applyOne(tag);
-  ui.tagDraft = "";
+  const target = ui.tagTarget;
+  const failed: string[] = [];
+  let reason = "";
+  for (const tag of tags) {
+    const err = await applyOne(tag);
+    if (err) {
+      failed.push(tag);
+      reason = err;
+    }
+  }
+  // The popover may have moved on, or closed, while the batch was applying.
+  if (ui.tagTarget !== target) return;
+  // Keep the refused tags in the field so they can be corrected, and clear the
+  // ones that saved. A batch that reports nothing when its third tag was
+  // refused is lying by omission.
+  ui.tagDraft = failed.join(", ");
+  ui.tagError = failed.length === 0 ? "" : reason;
   void refreshSuggestions("");
 }
 
 /** Apply the highlighted suggestion (Enter on the list, or a click). */
 export async function applySuggestion(name: string): Promise<void> {
-  await applyOne(name);
+  const target = ui.tagTarget;
+  const err = await applyOne(name);
+  if (ui.tagTarget !== target) return;
+  ui.tagError = err;
   ui.tagDraft = "";
   void refreshSuggestions("");
 }
 
-async function applyOne(tag: string): Promise<void> {
+/** Apply one tag. Returns "" on success, or the reason it was refused — the
+ *  CALLER decides what to surface, because a multi-tag commit must not let the
+ *  last tag's outcome erase an earlier one's failure. */
+async function applyOne(tag: string): Promise<string> {
   const target = ui.tagTarget;
-  if (!target) return;
+  if (!target) return "";
   try {
     const tags = await tauriInvoke<string[]>("tag_apply", {
       archive: target.archive,
@@ -3705,15 +3732,15 @@ async function applyOne(tag: string): Promise<void> {
       sortKey: naturalSortKey(target.name),
       tag,
     });
-    if (ui.tagTarget !== target) return;
-    ui.tagTargetTags = tags;
-    ui.tagError = "";
     perfMark("tags.apply", `${tag}=>${tags.join("|")}`);
+    // The popover may have moved to another item while this was in flight.
+    if (ui.tagTarget !== target) return "";
+    ui.tagTargetTags = tags;
+    return "";
   } catch (err) {
-    // Rust refuses a name the user must be told about (too long, control
-    // characters); showing it beats a chip silently not appearing.
-    ui.tagError = String(err);
-    perfMark("tags.reject", String(err));
+    const reason = String(err);
+    perfMark("tags.reject", reason);
+    return reason;
   }
 }
 
