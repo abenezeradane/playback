@@ -1,7 +1,13 @@
 <script lang="ts">
   import { ui } from "./state.svelte";
-  import { goBack, openGalleryItem, galleryTile, openTagPopover } from "./controller";
-  import { galleryMeta } from "../player-core";
+  import {
+    goBack,
+    openGalleryItem,
+    galleryTile,
+    openTagPopover,
+    pruneMissingFromTag,
+  } from "./controller";
+  import { galleryMeta, tagMeta } from "../player-core";
   import type { GalleryItem } from "./state.svelte";
 
   // The header counts each kind rather than assuming block boundaries: gallery-003
@@ -23,6 +29,18 @@
     if (kind === "archive") return `Archive: ${name}`;
     return name;
   }
+
+  /**
+   * The tag header's meta line (tags-002). `tagMeta` counts items only — never
+   * missing, which would cost a full scan of the tag on every open — so the
+   * cap notice is appended here, from what the grid actually loaded, rather
+   * than silently truncating.
+   */
+  function tagMetaLine(total: number, capped: boolean, shown: number): string {
+    const base = tagMeta(total);
+    if (!capped) return base;
+    return `${base} · showing the first ${shown.toLocaleString("en-US")} of ${total.toLocaleString("en-US")}`;
+  }
 </script>
 
 <!-- ========= GALLERY GRID (gallery-001, gallery-002, gallery-003) ========= -->
@@ -40,11 +58,20 @@
     </button>
     <div class="overlay-top__title">
       <div class="overlay-top__heading">
-        <span id="gallery-title" class="title-main">{ui.galleryFolder || "Gallery"}</span>
+        {#if ui.galleryTag}
+          <!-- tags-002: a tag view is a grid like any other, but it is scoped by
+               tag rather than by folder — the title says so, the way gallery-002's
+               crumb trail says which folder a sub-gallery sits in. -->
+          <span id="gallery-title" class="title-main">Tag · {ui.galleryTag}</span>
+        {:else}
+          <span id="gallery-title" class="title-main">{ui.galleryFolder || "Gallery"}</span>
+        {/if}
       </div>
       <span id="gallery-meta" class="title-sub">
         {#if ui.galleryLoading}
           Loading…
+        {:else if ui.galleryTag}
+          {tagMetaLine(ui.galleryTagTotal, ui.galleryTagCapped, ui.galleryItems.length)}
         {:else}
           <!-- gallery-002: once you are inside a sub-gallery, the trail says where
                that folder sits — the folder name alone is ambiguous when several
@@ -57,6 +84,21 @@
         {/if}
       </span>
     </div>
+    {#if ui.galleryTag}
+      <!-- tags-002: pruning counts before it deletes (pruneMissingFromTag makes
+           two calls on purpose) and only ever removes the TAG, never the file —
+           a file on an unplugged drive comes back when the drive does. -->
+      <button
+        id="gallery-prune"
+        class="glass-btn"
+        type="button"
+        title="Remove missing…"
+        aria-label="Remove missing files from this tag"
+        onclick={() => void pruneMissingFromTag()}
+      >
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+      </button>
+    {/if}
   </header>
 
   <div class="gallery__body">
@@ -85,8 +127,10 @@
             class:gallery-tile--folder={item.kind === "folder"}
             class:gallery-tile--video={item.kind === "video"}
             class:gallery-tile--archive={item.kind === "archive"}
+            class:gallery-tile--missing={item.missing}
             title={tileLabel(item.kind, item.name)}
             aria-label={tileLabel(item.kind, item.name)}
+            aria-disabled={item.missing ? "true" : undefined}
             tabindex={i === (ui.galleryIndex < 0 ? 0 : ui.galleryIndex) ? 0 : -1}
             use:galleryTile={i}
             onclick={() => openGalleryItem(item)}
@@ -139,6 +183,12 @@
               {#if item.durationLabel}
                 <span class="gallery-tile__duration">{item.durationLabel}</span>
               {/if}
+            {/if}
+            {#if item.missing}
+              <!-- tags-002: the duration badge owns top-right, the folder/archive
+                   badge owns top-left, and the filename strip owns the bottom
+                   edge — bottom-left is the one corner none of them claim. -->
+              <span class="gallery-tile__missing" aria-hidden="true">Missing</span>
             {/if}
             <!-- tags-001: the grid's own way in. The tile is itself a <button>,
                  so this is a SPAN with a click handler rather than a nested

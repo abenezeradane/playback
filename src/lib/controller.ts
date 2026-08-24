@@ -3889,6 +3889,45 @@ export async function openGalleryForTag(tag: string): Promise<void> {
 }
 
 /**
+ * Remove the members of the current tag whose files are gone (tags-002).
+ *
+ * Two calls on purpose: the first counts without changing anything, so the
+ * confirmation can state a real number, and the second acts only if the user
+ * agrees. Tags are never removed as a side effect of browsing — a file on an
+ * unplugged drive comes back when the drive does.
+ */
+export async function pruneMissingFromTag(): Promise<void> {
+  const tag = ui.galleryTag;
+  if (!tag) return;
+  const count = await tauriInvoke<number>("tag_prune_missing", { tag, apply: false }).catch(
+    () => -1,
+  );
+  if (count < 0) {
+    ui.galleryError = "Could not check this tag for missing files.";
+    return;
+  }
+  perfMark("tag.prune.count", String(count));
+  if (count === 0) {
+    ui.imgActionFlash = "Nothing is missing from this tag.";
+    return;
+  }
+  const ok = window.confirm(
+    `${count} tagged ${count === 1 ? "item is" : "items are"} no longer on disk.\n\n` +
+      `Remove ${count === 1 ? "it" : "them"} from "${tag}"? The files themselves are not touched.`,
+  );
+  if (!ok) return;
+  const removed = await tauriInvoke<number>("tag_prune_missing", { tag, apply: true }).catch(
+    () => -1,
+  );
+  if (removed < 0) {
+    ui.galleryError = "Could not remove the missing files from this tag.";
+    return;
+  }
+  perfMark("tag.prune.applied", String(removed));
+  await openGalleryForTag(tag); // reload so the grid matches the store
+}
+
+/**
  * Authorize the folders a page's items live in, and only those.
  *
  * The asset-protocol scope and the IPC read gate are both per-directory, so a
@@ -4626,6 +4665,12 @@ async function materializeArchiveLevel(
  * nav stack first, so Back walks the trail back out one level at a time.
  */
 export function openGalleryItem(item: GalleryItem): void {
+  // tags-002: a missing tile is shown, never opened — the file may come back
+  // (an unplugged drive), and there is nothing to view until it does. Refused
+  // here rather than via a `disabled` attribute on the tile button, so the
+  // tile stays focusable and the roving-tabindex grid keeps every index
+  // reachable by keyboard.
+  if (item.missing) return;
   // ux-004: record which tile this was, so Back restores the cursor onto it.
   const index = ui.galleryItems.indexOf(item);
   if (index >= 0) ui.galleryIndex = index;

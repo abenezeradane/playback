@@ -4250,3 +4250,33 @@ button.shortcuts__backdrop {
   max-height: min(50vh, 440px);
   overflow-y: auto;
 }
+
+/* ---------- Missing tag tiles + prune (tags-002, task 9) ---------- */
+/* A tag member whose file is gone from disk. Tags are never auto-deleted — a
+   file on an unplugged drive comes back when the drive does — so the tile
+   stays in the grid, dimmed, rather than vanishing. */
+.gallery-tile--missing .gallery-tile__img,
+.gallery-tile--missing .gallery-tile__placeholder,
+.gallery-tile--missing .gallery-tile__glyph {
+  opacity: 0.35;
+}
+
+/* The duration badge owns the top-right corner, the folder/archive badge owns
+   the top-left, and the filename strip owns the bottom edge (see
+   .gallery-tile__tag above) — bottom-left is the one corner none of them
+   claim, so the label sits there, clear of the name strip beneath it. */
+.gallery-tile__missing {
+  position: absolute;
+  left: 8px;
+  bottom: 40px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.68);
+  color: var(--warning);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
