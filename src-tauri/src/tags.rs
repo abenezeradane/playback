@@ -765,6 +765,10 @@ pub(crate) fn delete_tag_members(
         .map_err(|e| format!("tags: delete members item: {e}"))?;
     }
     tx.commit().map_err(|e| format!("tags: delete members commit: {e}"))?;
+    // The count is what phase 2 identified, not rows-affected. The three-phase
+    // split releases the lock between the scan and this delete, so a concurrent
+    // untag could make an id stale — the delete stays a safe no-op, but the
+    // number reported to the UI can overstate by that much.
     Ok(ids.len() as u32)
 }
 
@@ -1731,41 +1735,107 @@ mod tests {
     #[test]
     fn the_two_phase_prune_matches_the_inline_one() {
         // tag_member_paths + delete_tag_members must remove exactly what
-        // prune_missing would, or the command and the tested function disagree.
+        // prune_missing would — including the safety property that matters most
+        // on a delete path: an item another tag still carries must survive.
+        // Mirrors a_prune_touches_only_the_named_tag's shape (one item shared by
+        // two tags, one item carried only by the pruned tag) so a broken
+        // NOT EXISTS guard actually shows up here, and it builds a SECOND,
+        // independently fixtured store to run prune_missing on, so the two
+        // paths are compared by outcome, not by SQL text merely looking alike.
+        fn build_fixture(conn: &Connection) {
+            conn.execute(
+                "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+                 VALUES ('', 'C:\\nope\\shared.jpg', 'image', 'shared.jpg', 'a', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+                 VALUES ('', 'C:\\nope\\keeponly.jpg', 'image', 'keeponly.jpg', 'b', 0)",
+                [],
+            )
+            .unwrap();
+            for tag in ["keep", "edit"] {
+                conn.execute(
+                    "INSERT INTO tags (name, folded, created_at) VALUES (?1, ?1, 0)",
+                    params![tag],
+                )
+                .unwrap();
+            }
+            // shared.jpg carries both tags; keeponly.jpg carries only `keep`.
+            for (path, tag) in [
+                ("C:\\nope\\shared.jpg", "keep"),
+                ("C:\\nope\\shared.jpg", "edit"),
+                ("C:\\nope\\keeponly.jpg", "keep"),
+            ] {
+                conn.execute(
+                    "INSERT INTO item_tags (item_id, tag_id)
+                     VALUES ((SELECT id FROM items WHERE path = ?1),
+                             (SELECT id FROM tags WHERE folded = ?2))",
+                    params![path, tag],
+                )
+                .unwrap();
+            }
+        }
+
+        // Store 1: the two-phase path under test.
         let conn = open_db(&temp_db("prune-split")).unwrap();
-        conn.execute(
-            "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
-             VALUES ('', 'C:\\nope\\gone.jpg', 'image', 'gone.jpg', 'a', 0)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO tags (name, folded, created_at) VALUES ('keep', 'keep', 0)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO item_tags (item_id, tag_id)
-             VALUES ((SELECT id FROM items WHERE path = 'C:\\nope\\gone.jpg'),
-                     (SELECT id FROM tags WHERE folded = 'keep'))",
-            [],
-        )
-        .unwrap();
+        build_fixture(&conn);
 
         let rows = tag_member_paths(&conn, "keep").unwrap();
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2, "both items carry keep");
         let gone: Vec<i64> = rows
             .iter()
             .filter(|(_, a, p)| std::fs::metadata(disk_target(a, p)).is_err())
             .map(|(id, _, _)| *id)
             .collect();
-        assert_eq!(gone.len(), 1);
-        assert_eq!(delete_tag_members(&conn, "keep", &gone).unwrap(), 1);
-        assert_eq!(tag_page(&conn, "keep", 10, 0).unwrap().total, 0);
-        let orphans: i64 = conn
-            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+        assert_eq!(gone.len(), 2, "both files are missing from disk");
+        assert_eq!(delete_tag_members(&conn, "keep", &gone).unwrap(), 2);
+
+        assert_eq!(tag_page(&conn, "keep", 10, 0).unwrap().total, 0, "keep is now empty");
+        assert_eq!(
+            tag_page(&conn, "edit", 10, 0).unwrap().total,
+            1,
+            "edit must keep its member — pruning keep must not delete a row edit still carries"
+        );
+        let shared_survives: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE path = 'C:\\nope\\shared.jpg'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(orphans, 0, "the item row went with its last tag");
+        assert_eq!(shared_survives, 1, "shared.jpg is still carried by edit");
+        let keeponly_gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM items WHERE path = 'C:\\nope\\keeponly.jpg'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(keeponly_gone, 0, "keeponly.jpg lost its only tag, so its row went with it");
+
+        // Store 2: an INDEPENDENT database with the identical fixture, pruned
+        // through prune_missing instead — the actual comparison the name
+        // promises, not just two blocks of assertions that happen to agree.
+        let conn2 = open_db(&temp_db("prune-split-inline")).unwrap();
+        build_fixture(&conn2);
+        assert_eq!(prune_missing(&conn2, "keep", true).unwrap(), 2);
+
+        assert_eq!(
+            tag_page(&conn, "keep", 10, 0).unwrap().total,
+            tag_page(&conn2, "keep", 10, 0).unwrap().total,
+            "the two paths must leave `keep` in the same state"
+        );
+        assert_eq!(
+            tag_page(&conn, "edit", 10, 0).unwrap().total,
+            tag_page(&conn2, "edit", 10, 0).unwrap().total,
+            "the two paths must leave `edit` in the same state"
+        );
+        let items_1: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        let items_2: i64 = conn2.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(items_1, items_2, "the two paths must leave the same surviving item rows");
+        assert_eq!(items_1, 1, "only the shared item, still held by edit, remains");
     }
 
     // -----------------------------------------------------------------------
