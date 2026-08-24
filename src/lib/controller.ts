@@ -3932,6 +3932,7 @@ export function closeTagIndex(): void {
   ui.tagIndexOpen = false;
   ui.tagIndexQuery = "";
   ui.tagIndexRows = [];
+  tagIndexToken++; // a response already in flight must not repopulate a closed list
 }
 
 export function onTagIndexQuery(value: string): void {
@@ -3939,13 +3940,19 @@ export function onTagIndexQuery(value: string): void {
   void refreshTagIndex(value.trim());
 }
 
+/** Bumped on every index query so a slower, older response cannot overwrite a
+ *  newer one's rows — a shorter prefix can genuinely take longer to serve than
+ *  the narrower one typed after it, and the stale list would not self-correct. */
+let tagIndexToken = 0;
+
 async function refreshTagIndex(query: string): Promise<void> {
+  const token = ++tagIndexToken;
   const rows = await tauriInvoke<{ name: string; count: number }[]>("tag_list", {
     query,
     limit: 200,
     offset: 0,
   }).catch(() => null);
-  if (!rows || !ui.tagIndexOpen) return;
+  if (!rows || !ui.tagIndexOpen || token !== tagIndexToken) return;
   ui.tagIndexRows = rows;
 }
 
@@ -5353,6 +5360,7 @@ function wireKeyboard(): void {
           ui.settingsOpen ||
           ui.queueOpen ||
           ui.playlistEditorOpen ||
+          ui.tagIndexOpen ||
           ui.moreOpen;
         if (hadPanel) {
           setShortcutsOpen(false);
@@ -5360,6 +5368,7 @@ function wireKeyboard(): void {
           setPanelOpen(false);
           setQueueOpen(false);
           setMoreOpen(false);
+          closeTagIndex();
           closePlaylistEditor();
         } else if (ui.nextPromptOpen) {
           closeNextPrompt();
