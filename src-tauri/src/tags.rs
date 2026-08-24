@@ -695,6 +695,148 @@ pub(crate) fn prune_missing(conn: &Connection, tag: &str, apply: bool) -> Result
     Ok(gone.len() as u32)
 }
 
+/// The (id, archive, path) of every member of `tag`, for a caller that wants to
+/// stat them WITHOUT holding the database lock (tags-002).
+///
+/// `prune_missing` does its scan inline, which is fine for a test but not for a
+/// command: statting thousands of members — some possibly on a disconnected
+/// network share — while holding the shared connection would block every other
+/// tag command for the duration.
+pub(crate) fn tag_member_paths(
+    conn: &Connection,
+    tag: &str,
+) -> Result<Vec<(i64, String, String)>, String> {
+    let (_, folded) = fold_tag(tag)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.id, i.archive, i.path
+             FROM items i
+             JOIN item_tags it ON it.item_id = i.id
+             JOIN tags t       ON t.id = it.tag_id
+             WHERE t.folded = ?1",
+        )
+        .map_err(|e| format!("tags: prepare member paths: {e}"))?;
+    let rows = stmt
+        .query_map(params![folded], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })
+        .map_err(|e| format!("tags: member paths scan: {e}"))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("tags: member paths row: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Delete the given item ids from `tag`, in one transaction, dropping any item
+/// row whose LAST tag this was. Returns how many were removed.
+///
+/// Scoped exactly as `prune_missing`: the `item_tags` row goes first, so the
+/// `NOT EXISTS` guard on the `items` delete sees this transaction's own delete
+/// and fires only when no tag at all remains.
+pub(crate) fn delete_tag_members(
+    conn: &Connection,
+    tag: &str,
+    ids: &[i64],
+) -> Result<u32, String> {
+    let (_, folded) = fold_tag(tag)?;
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("tags: delete members tx: {e}"))?;
+    for id in ids {
+        tx.execute(
+            "DELETE FROM item_tags
+             WHERE item_id = ?1 AND tag_id = (SELECT id FROM tags WHERE folded = ?2)",
+            params![id, folded],
+        )
+        .map_err(|e| format!("tags: delete members unlink: {e}"))?;
+        // An items row exists only to carry tags — but only delete it when this
+        // was its last one, or a prune of `keep` would destroy `edit`'s member.
+        tx.execute(
+            "DELETE FROM items
+             WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM item_tags WHERE item_id = ?1)",
+            params![id],
+        )
+        .map_err(|e| format!("tags: delete members item: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("tags: delete members commit: {e}"))?;
+    Ok(ids.len() as u32)
+}
+
+/// The tag library for the Home chips and the all-tags index.
+#[tauri::command]
+pub(crate) async fn tag_list(
+    db: tauri::State<'_, TagsDb>,
+    query: String,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<TagSummary>, String> {
+    let db = db.inner().clone();
+    blocking(move || with_db(&db, |conn| list_tags(conn, &query, limit, offset)))
+        .await
+        .map_err(|e| crate::ipc_error("tag_list", e, "could not read tags"))
+}
+
+/// One page of a tag's members, with the total and a per-row missing flag.
+#[tauri::command]
+pub(crate) async fn tag_items(
+    db: tauri::State<'_, TagsDb>,
+    tag: String,
+    limit: u32,
+    offset: u32,
+) -> Result<TagPage, String> {
+    let db = db.inner().clone();
+    // fold_tag's message is written for a person to read, so it is checked here
+    // and passed through verbatim rather than being flattened by ipc_error.
+    fold_tag(&tag)?;
+    blocking(move || with_db(&db, |conn| tag_page(conn, &tag, limit, offset)))
+        .await
+        .map_err(|e| crate::ipc_error("tag_items", e, "could not read that tag"))
+}
+
+/// Count — and optionally remove — the members of a tag whose file is gone.
+/// The frontend calls this twice: once to confirm, once to act.
+///
+/// Split into three phases so the slow part never runs under the database lock
+/// (tags-002 review of Task 3's `prune_missing`, which stats inline while
+/// `with_db` holds the shared connection): a large tag whose files sit on a
+/// slow or disconnected network share would otherwise block every other tag
+/// command — typeahead, applying a chip, counts — for the whole scan.
+#[tauri::command]
+pub(crate) async fn tag_prune_missing(
+    db: tauri::State<'_, TagsDb>,
+    tag: String,
+    apply: bool,
+) -> Result<u32, String> {
+    let db = db.inner().clone();
+    fold_tag(&tag)?;
+    blocking(move || {
+        // Phase 1 — read the candidates under the lock.
+        let rows = with_db(&db, |conn| tag_member_paths(conn, &tag))?;
+        // Phase 2 — stat them with the lock RELEASED. These syscalls are the
+        // slow part and need no database at all; holding the connection across
+        // them would freeze every other tag command, and a disconnected network
+        // share can make that tens of seconds.
+        let gone: Vec<i64> = rows
+            .into_iter()
+            .filter(|(_, archive, path)| std::fs::metadata(disk_target(archive, path)).is_err())
+            .map(|(id, _, _)| id)
+            .collect();
+        if !apply || gone.is_empty() {
+            return Ok(gone.len() as u32);
+        }
+        // Phase 3 — delete under the lock, bounded to what phase 2 identified.
+        with_db(&db, |conn| delete_tag_members(conn, &tag, &gone))
+    })
+    .await
+    .map_err(|e| crate::ipc_error("tag_prune_missing", e, "could not check that tag"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1584,5 +1726,96 @@ mod tests {
         // must survive — pruning one tag must not delete another tag's member.
         assert_eq!(tag_page(&conn, "keep", 10, 0).unwrap().total, 0);
         assert_eq!(tag_page(&conn, "edit", 10, 0).unwrap().total, 1);
+    }
+
+    #[test]
+    fn the_two_phase_prune_matches_the_inline_one() {
+        // tag_member_paths + delete_tag_members must remove exactly what
+        // prune_missing would, or the command and the tested function disagree.
+        let conn = open_db(&temp_db("prune-split")).unwrap();
+        conn.execute(
+            "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+             VALUES ('', 'C:\\nope\\gone.jpg', 'image', 'gone.jpg', 'a', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (name, folded, created_at) VALUES ('keep', 'keep', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO item_tags (item_id, tag_id)
+             VALUES ((SELECT id FROM items WHERE path = 'C:\\nope\\gone.jpg'),
+                     (SELECT id FROM tags WHERE folded = 'keep'))",
+            [],
+        )
+        .unwrap();
+
+        let rows = tag_member_paths(&conn, "keep").unwrap();
+        assert_eq!(rows.len(), 1);
+        let gone: Vec<i64> = rows
+            .iter()
+            .filter(|(_, a, p)| std::fs::metadata(disk_target(a, p)).is_err())
+            .map(|(id, _, _)| *id)
+            .collect();
+        assert_eq!(gone.len(), 1);
+        assert_eq!(delete_tag_members(&conn, "keep", &gone).unwrap(), 1);
+        assert_eq!(tag_page(&conn, "keep", 10, 0).unwrap().total, 0);
+        let orphans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0, "the item row went with its last tag");
+    }
+
+    // -----------------------------------------------------------------------
+    // Deep-offset paging benchmark
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_deep_tag_page_stays_quick_on_a_large_tag() {
+        // ~40,000 members in one tag: the size the spec's DOM window exists for.
+        let conn = open_db(&temp_db("page-bench")).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO tags (name, folded, created_at) VALUES ('bench', 'bench', 0)",
+            [],
+        )
+        .unwrap();
+        for n in 0..40_000 {
+            let path = format!("C:\\p\\{n:06}.jpg");
+            tx.execute(
+                "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+                 VALUES ('', ?1, 'image', 'x.jpg', ?2, 0)",
+                params![path, format!("{n:06}")],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO item_tags (item_id, tag_id)
+                 VALUES ((SELECT id FROM items WHERE path = ?1),
+                         (SELECT id FROM tags WHERE folded = 'bench'))",
+                params![path],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        // Every row is missing from disk here, so this also times the per-page
+        // stat — the real cost the page pays.
+        let first = std::time::Instant::now();
+        let head = tag_page(&conn, "bench", 500, 0).unwrap();
+        let head_ms = first.elapsed();
+        let second = std::time::Instant::now();
+        let deep = tag_page(&conn, "bench", 500, 39_000).unwrap();
+        let deep_ms = second.elapsed();
+
+        println!("tag_page first 500 of {}: {head_ms:?}", head.total);
+        println!("tag_page 500 at offset 39000: {deep_ms:?}");
+        assert_eq!(head.items.len(), 500);
+        assert_eq!(deep.items.len(), 500);
+        // Generous on purpose: this catches a catastrophic scan, it does not
+        // police milliseconds, and a tight bound would flake and be deleted.
+        assert!(head_ms < std::time::Duration::from_secs(5), "first page took {head_ms:?}");
+        assert!(deep_ms < std::time::Duration::from_secs(5), "deep page took {deep_ms:?}");
     }
 }
