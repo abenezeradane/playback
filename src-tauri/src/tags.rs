@@ -785,6 +785,24 @@ mod tests {
     }
 
     #[test]
+    fn suggestion_escape_order_survives_a_backslash_next_to_a_wildcard() {
+        // The bare "%"/"_" cases above pass under a REVERSED escape order too,
+        // so they cannot guard the ordering. This one can: with the backslash
+        // escaped first, the query below matches the tag; escape `%` first and
+        // the backslash it inserts gets doubled, producing a pattern that
+        // demands TWO literal backslashes and matches nothing. Now that
+        // suggest_tags shares like_prefix with list_tags, one helper needs one
+        // guard exercised from both call sites.
+        let conn = open_db(&temp_db("suggest-escape-order")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "a\\%b").unwrap();
+        apply_tag(&conn, &item("C:\\p\\b.jpg", "b.jpg"), "plain").unwrap();
+
+        let hit = suggest_tags(&conn, "a\\%", 10).unwrap();
+        assert_eq!(hit.len(), 1, "a backslash-then-percent prefix must match its tag");
+        assert_eq!(hit[0].name, "a\\%b");
+    }
+
+    #[test]
     fn an_untagged_tag_never_appears() {
         // Nothing creates a bare tag today, but the JOIN must be an inner one so
         // a tag with no members cannot show up with a count of zero.
@@ -1142,6 +1160,22 @@ mod tests {
     }
 
     #[test]
+    fn the_escape_order_survives_a_backslash_next_to_a_wildcard() {
+        // The bare "%"/"_" cases pass under a REVERSED escape order too, so they
+        // cannot guard the ordering. This one can: with the backslash escaped
+        // first, the query below matches the tag; escape `%` first and the
+        // backslash it inserts gets doubled, producing a pattern that demands
+        // TWO literal backslashes and matches nothing.
+        let conn = open_db(&temp_db("list-escape-order")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "a\\%b").unwrap();
+        apply_tag(&conn, &item("C:\\p\\b.jpg", "b.jpg"), "plain").unwrap();
+
+        let hit = list_tags(&conn, "a\\%", 10, 0).unwrap();
+        assert_eq!(hit.len(), 1, "a backslash-then-percent prefix must match its tag");
+        assert_eq!(hit[0].name, "a\\%b");
+    }
+
+    #[test]
     fn the_tag_list_never_shows_a_tag_with_no_members() {
         let conn = open_db(&temp_db("list-bare")).unwrap();
         conn.execute(
@@ -1155,8 +1189,38 @@ mod tests {
     #[test]
     fn the_tag_list_limit_is_clamped() {
         let conn = open_db(&temp_db("list-limit")).unwrap();
-        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
-        assert_eq!(list_tags(&conn, "", u32::MAX, 0).unwrap().len(), 1);
+        // MAX_LIMIT + 1 tags, each with one member, built in ONE transaction:
+        // 1001 apply_tag calls would be 1001 transactions and needlessly slow.
+        // A single tag would pass this assertion whether or not the clamp ran
+        // at all, so this mirrors the_limit_is_clamped's bulk fixture above.
+        let tx = conn.unchecked_transaction().unwrap();
+        for n in 0..(MAX_LIMIT + 1) {
+            tx.execute(
+                "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+                 VALUES ('', ?1, 'image', 'x.jpg', 'x.jpg', 0)",
+                params![format!("C:\\p\\{n}.jpg")],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO tags (name, folded, created_at) VALUES (?1, ?1, 0)",
+                params![format!("tag{n}")],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO item_tags (item_id, tag_id)
+                 VALUES ((SELECT id FROM items WHERE path = ?1), (SELECT id FROM tags WHERE folded = ?2))",
+                params![format!("C:\\p\\{n}.jpg"), format!("tag{n}")],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        // Verify the clamp works: requesting u32::MAX tags should return exactly MAX_LIMIT.
+        assert_eq!(
+            list_tags(&conn, "", u32::MAX, 0).unwrap().len(),
+            MAX_LIMIT as usize,
+            "list_tags must clamp to MAX_LIMIT"
+        );
+        // Verify zero limit returns empty result.
         assert!(list_tags(&conn, "", 0, 0).unwrap().is_empty());
     }
 }
