@@ -1008,6 +1008,12 @@ function galleryNavEntry(): NavEntry {
   // so Back into an archive restores the level rather than the parent folder.
   const archive = ui.galleryArchive;
   const inner = ui.galleryInner;
+  // tags-002: a tag view is a grid like any other, but its scoping lives in
+  // these fields — restoring without them shows the right tiles under the wrong
+  // heading and loses the tag, exactly as gallery-004 found for archives.
+  const tag = ui.galleryTag;
+  const tagTotal = ui.galleryTagTotal;
+  const tagCapped = ui.galleryTagCapped;
   const scrollTop = document.querySelector(".gallery__body")?.scrollTop ?? 0;
   const cursor = ui.galleryIndex; // ux-004: come back to the tile you opened
   return {
@@ -1025,6 +1031,9 @@ function galleryNavEntry(): NavEntry {
       ui.galleryPath = path;
       ui.galleryArchive = archive;
       ui.galleryInner = inner;
+      ui.galleryTag = tag;
+      ui.galleryTagTotal = tagTotal;
+      ui.galleryTagCapped = tagCapped;
       ui.galleryCrumbs = crumbs;
       ui.galleryError = "";
       ui.galleryLoading = false;
@@ -4337,6 +4346,9 @@ export async function openGalleryForFolder(
   ui.galleryPath = path;
   ui.galleryArchive = ""; // gallery-004: a real folder is not inside an archive
   ui.galleryInner = "";
+  ui.galleryTag = "";
+  ui.galleryTagTotal = 0;
+  ui.galleryTagCapped = false;
   ui.galleryCrumbs = opts.crumbs ?? [label];
   ui.galleryError = "";
   ui.galleryLoading = true;
@@ -4397,6 +4409,9 @@ export async function openArchiveGallery(
   ui.galleryPath = archive;
   ui.galleryArchive = archive;
   ui.galleryInner = inner;
+  ui.galleryTag = "";
+  ui.galleryTagTotal = 0;
+  ui.galleryTagCapped = false;
   ui.galleryCrumbs = opts.crumbs ?? [basename(archive)];
   ui.galleryError = "";
   ui.galleryLoading = true;
