@@ -66,6 +66,10 @@ export interface GalleryItem {
   kind: "folder" | "image" | "video" | "archive";
   durationLabel: string;
   archive: string;
+  /** tags-002: true when this item's file is gone from disk. Only a TAG view
+   *  sets it — a folder listing can only contain files that exist. A missing
+   *  tile renders dimmed and does not open. */
+  missing?: boolean;
 }
 
 /** The item a tag is being applied to (tags-001). `archive` is "" for a real
@@ -258,6 +262,22 @@ export const ui = $state({
   tagSuggestions: [] as { name: string; count: number }[],
   tagSuggestIndex: -1,
   tagError: "",
+
+  // --- Tag browsing (tags-002) ---
+  // When non-empty, the gallery grid is showing a TAG rather than a folder or an
+  // archive — `galleryTag` is the tag's display name. `galleryTagTotal` is the
+  // store's own count, which may exceed what is loaded. `galleryTagCapped` is
+  // true when the view is showing only the first TAG_VIEW_CAP members, so the
+  // header can say so rather than quietly truncating.
+  galleryTag: "",
+  galleryTagTotal: 0,
+  galleryTagCapped: false,
+  // The all-tags index overlay (Home's "All tags…").
+  tagIndexOpen: false,
+  tagIndexQuery: "",
+  tagIndexRows: [] as { name: string; count: number }[],
+  // Home's Tags section: the most-used tags, loaded once when Home is shown.
+  tagLibrary: [] as { name: string; count: number }[],
 
   // --- Photo sibling nav + gallery (gallery-001) ---
   // The other images in the current photo's folder, in natural sort order —

@@ -123,6 +123,9 @@ import {
   naturalSortKey,
   cleanTagDraft,
   tagIdentity,
+  TAG_PAGE_SIZE,
+  TAG_VIEW_CAP,
+  pageRange,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -3782,6 +3785,119 @@ export async function removeTagFromTarget(tag: string): Promise<void> {
   perfMark("tags.remove", `${tag}=>${tags.join("|")}`);
 }
 
+/** One member of a tag as the store returns it (tags-002). */
+interface TaggedItem {
+  archive: string;
+  path: string;
+  kind: GalleryItem["kind"];
+  name: string;
+  missing: boolean;
+}
+
+/**
+ * Open the gallery grid scoped to a TAG (tags-002).
+ *
+ * The shape mirrors `openGalleryForFolder` deliberately: to everything below —
+ * the tiles, the thumbnail pipeline, the keyboard cursor, Back — a tag view is
+ * just a grid with a different source, which is why this needs no second grid.
+ *
+ * Members are fetched a page at a time and, for now, stopped at TAG_VIEW_CAP.
+ * The header says so when it happens; the sliding window that removes the cap
+ * arrives later in this plan.
+ */
+export async function openGalleryForTag(tag: string): Promise<void> {
+  perfMark("tag.open", tag);
+  const token = ++galleryToken;
+  ui.galleryItems = [];
+  ui.galleryFolder = tag;
+  ui.galleryPath = "";
+  ui.galleryArchive = "";
+  ui.galleryInner = "";
+  ui.galleryTag = tag;
+  ui.galleryTagTotal = 0;
+  ui.galleryTagCapped = false;
+  ui.galleryCrumbs = [];
+  ui.galleryError = "";
+  ui.galleryLoading = true;
+  ui.emptyError = "";
+  setPanelOpen(false);
+  setShortcutsOpen(false);
+  ui.tagIndexOpen = false;
+  ui.view = "gallery";
+  document.title = `${tag} — Playback`;
+  try {
+    const first = await tauriInvoke<{ total: number; offset: number; items: TaggedItem[] }>(
+      "tag_items",
+      { tag, limit: TAG_PAGE_SIZE, offset: 0 },
+    );
+    if (galleryToken !== token) return; // superseded by a newer open
+    ui.galleryTagTotal = first.total;
+
+    const collected: TaggedItem[] = [...first.items];
+    // Pull further pages up to the cap. The store's ordering is total and
+    // stable, so paging cannot repeat or skip a row.
+    const wanted = Math.min(first.total, TAG_VIEW_CAP);
+    let page = 1;
+    while (collected.length < wanted) {
+      const { offset, limit } = pageRange(page, TAG_PAGE_SIZE, wanted);
+      if (limit <= 0) break;
+      const next = await tauriInvoke<{ total: number; offset: number; items: TaggedItem[] }>(
+        "tag_items",
+        { tag, limit, offset },
+      );
+      if (galleryToken !== token) return;
+      if (next.items.length === 0) break;
+      collected.push(...next.items);
+      page++;
+    }
+    ui.galleryTagCapped = first.total > collected.length;
+
+    await authorizePageDirs(collected);
+    if (galleryToken !== token) return;
+
+    ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
+    // Same ordering constraint as openGalleryForFolder: reset the thumbnail
+    // pipeline BEFORE the items land, or tiles that already mounted never
+    // request a thumbnail and shimmer forever.
+    startGalleryThumbs(token);
+    ui.galleryItems = collected.map((i) => ({
+      path: i.path,
+      name: i.name,
+      kind: i.kind,
+      thumbSrc: "",
+      durationLabel: "",
+      archive: i.archive,
+      missing: i.missing,
+    }));
+    perfMark("tag.items", `${collected.length}/${first.total}`);
+    if (first.total === 0) ui.galleryError = "Nothing carries this tag yet.";
+  } catch (err) {
+    if (galleryToken === token) ui.galleryError = `Could not open this tag: ${String(err)}`;
+  } finally {
+    if (galleryToken === token) ui.galleryLoading = false;
+  }
+}
+
+/**
+ * Authorize the folders a page's items live in, and only those.
+ *
+ * The asset-protocol scope and the IPC read gate are both per-directory, so a
+ * tag spanning drives needs its directories opened as they are reached. This
+ * deliberately does NOT authorize the whole store at startup: the read gate
+ * widens for what the user is actually looking at.
+ */
+async function authorizePageDirs(items: TaggedItem[]): Promise<void> {
+  const dirs = new Set<string>();
+  for (const it of items) {
+    if (it.missing) continue; // nothing to authorize for a file that is gone
+    // An archive page is served from the archive's own directory.
+    const onDisk = it.archive || it.path;
+    const cut = Math.max(onDisk.lastIndexOf("\\"), onDisk.lastIndexOf("/"));
+    if (cut > 0) dirs.add(onDisk.slice(0, cut));
+  }
+  for (const dir of dirs) await authorizeMediaDir(dir);
+}
+
 // ---------------------------------------------------------------------------
 // Gallery grid (gallery-001)
 //
@@ -3809,6 +3925,9 @@ function toGalleryItems(nodes: GalleryNode[], archive = ""): GalleryItem[] {
     thumbSrc: "",
     durationLabel: "",
     archive,
+    // tags-002: a folder/archive listing can only contain files that exist,
+    // so this is always false here — only a tag view's builder sets it.
+    missing: false,
   }));
 }
 
