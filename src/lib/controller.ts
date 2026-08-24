@@ -5504,6 +5504,8 @@ export function init(): void {
   void loadLaunchFile();
   void wireSecondInstance();
   renderRecents();
+  void loadTagLibrary(); // tags-002: the shelf must be populated on the FIRST
+                         // Home paint, not only after a navigation back to it
   renderPlaylists();
   renderTimestamps();
   render();
