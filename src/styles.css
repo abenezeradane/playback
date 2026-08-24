@@ -4280,3 +4280,8 @@ button.shortcuts__backdrop {
   text-transform: uppercase;
   pointer-events: none;
 }
+
+/* The prune action belongs at the far end of the tag header, away from the
+   title it would otherwise crowd. Styling the new button by id rather than
+   adding a wrapper class keeps the existing header markup untouched. */
+#gallery-prune { margin-left: auto; }
