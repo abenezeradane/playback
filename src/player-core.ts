@@ -1171,6 +1171,42 @@ export function tagIdentity(
   };
 }
 
+/** Rows per `tag_items` request (tags-002). Large enough that scrolling rarely
+ *  waits, small enough that one page's missing-file stat stays cheap. */
+export const TAG_PAGE_SIZE = 500;
+
+/** The most tiles the tag view puts in the DOM before the sliding window takes
+ *  over (tags-002). Until then this is a hard cap, and the header says so. */
+export const TAG_VIEW_CAP = 2000;
+
+/** Which page holds an absolute index. A negative index (the grid's cursor
+ *  before any tile is focused) means the first page, not an error. */
+export function pageForIndex(index: number, pageSize: number): number {
+  if (index <= 0) return 0;
+  return Math.floor(index / pageSize);
+}
+
+/** The `{ offset, limit }` to request for a page, clipped to `total` so the last
+ *  page does not ask for rows that cannot exist. A page past the end yields a
+ *  limit of 0, which the caller can skip without a round trip. */
+export function pageRange(
+  page: number,
+  pageSize: number,
+  total: number,
+): { offset: number; limit: number } {
+  const offset = Math.max(0, page) * pageSize;
+  if (offset >= total) return { offset, limit: 0 };
+  return { offset, limit: Math.min(pageSize, total - offset) };
+}
+
+/** The tag header's meta line. Deliberately counts ITEMS only — a global missing
+ *  count would cost a full filesystem scan of the tag on every open. */
+export function tagMeta(total: number): string {
+  if (total <= 0) return "No items";
+  if (total === 1) return "1 item";
+  return `${total.toLocaleString("en-US")} items`;
+}
+
 /** Index of `path` in `queue` (exact match), or -1 when it is not present. */
 export function currentIndexOf(queue: string[], path: string): number {
   return queue.indexOf(path);

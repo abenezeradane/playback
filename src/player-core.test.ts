@@ -85,6 +85,9 @@ import {
   cleanTagDraft,
   tagIdentity,
   MAX_TAG_NAME,
+  pageForIndex,
+  pageRange,
+  tagMeta,
   type PlaylistStore,
   DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
@@ -2259,5 +2262,35 @@ describe("tagIdentity", () => {
       archive: "C:\\comics\\vol1.cbz",
       path: "page01.jpg",
     });
+  });
+});
+
+describe("tag page arithmetic", () => {
+  it("maps an absolute index to the page holding it", () => {
+    expect(pageForIndex(0, 500)).toBe(0);
+    expect(pageForIndex(499, 500)).toBe(0);
+    expect(pageForIndex(500, 500)).toBe(1);
+    expect(pageForIndex(1234, 500)).toBe(2);
+  });
+
+  it("treats a negative index as the first page rather than throwing", () => {
+    // The grid's cursor is -1 until a tile is focused, and that value reaches
+    // here through the sibling-navigation path.
+    expect(pageForIndex(-1, 500)).toBe(0);
+  });
+
+  it("clips the last page to the total", () => {
+    expect(pageRange(0, 500, 1200)).toEqual({ offset: 0, limit: 500 });
+    expect(pageRange(2, 500, 1200)).toEqual({ offset: 1000, limit: 200 });
+  });
+
+  it("returns an empty range for a page past the end", () => {
+    expect(pageRange(9, 500, 1200)).toEqual({ offset: 4500, limit: 0 });
+  });
+
+  it("formats the tag header's count with a thousands separator", () => {
+    expect(tagMeta(0)).toBe("No items");
+    expect(tagMeta(1)).toBe("1 item");
+    expect(tagMeta(1248)).toBe("1,248 items");
   });
 });
