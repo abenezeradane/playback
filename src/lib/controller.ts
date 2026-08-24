@@ -3888,6 +3888,21 @@ export async function openGalleryForTag(tag: string): Promise<void> {
   }
 }
 
+/** Brief confirmation over the grid, for a gallery action with no visible result
+ *  of its own (a zero-missing prune changes nothing on screen, so without this
+ *  it is impossible to tell whether the button did anything). Mirrors
+ *  `flashImageAction` — its own timer, because the image viewer's field is
+ *  rendered nowhere in this view and would otherwise linger to surface stale on
+ *  some later photo. */
+let galleryFlashTimer: number | undefined;
+function flashGalleryAction(text: string): void {
+  ui.galleryFlash = text;
+  window.clearTimeout(galleryFlashTimer);
+  galleryFlashTimer = window.setTimeout(() => {
+    ui.galleryFlash = "";
+  }, 1400);
+}
+
 /**
  * Remove the members of the current tag whose files are gone (tags-002).
  *
@@ -3908,7 +3923,7 @@ export async function pruneMissingFromTag(): Promise<void> {
   }
   perfMark("tag.prune.count", String(count));
   if (count === 0) {
-    ui.imgActionFlash = "Nothing is missing from this tag.";
+    flashGalleryAction("Nothing is missing from this tag.");
     return;
   }
   const ok = window.confirm(

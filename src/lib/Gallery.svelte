@@ -212,4 +212,12 @@
       </div>
     {/if}
   </div>
+
+  {#if ui.galleryFlash}
+    <!-- tags-002: a zero-missing prune changes nothing in the grid, so it says so
+         here — mirrors ImageView's .imgview__flash, but bottom-centred rather
+         than screen-centred: the header sits at the top of this view and the
+         grid's first row starts right under it, so the bottom is the free space. -->
+    <div class="gallery__flash" role="status">{ui.galleryFlash}</div>
+  {/if}
 </section>

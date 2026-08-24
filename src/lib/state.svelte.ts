@@ -293,6 +293,12 @@ export const ui = $state({
   galleryFolder: "",
   galleryLoading: false,
   galleryError: "",
+  // tags-002: brief confirmation for a gallery action whose result is otherwise
+  // invisible — the zero-missing prune being the case in point. The image viewer
+  // has its own (imgActionFlash); a view must not borrow another view's, because
+  // nothing here renders that one and the value would linger until some later
+  // photo surfaced it out of context.
+  galleryFlash: "",
   // gallery-002: the folder path the grid is currently showing, and the trail of
   // folder names from wherever this gallery journey started down to it — the
   // header's breadcrumb, so a nested sub-gallery says where it sits.

@@ -4285,3 +4285,28 @@ button.shortcuts__backdrop {
    title it would otherwise crowd. Styling the new button by id rather than
    adding a wrapper class keeps the existing header markup untouched. */
 #gallery-prune { margin-left: auto; }
+
+/* Same look as .imgview__flash (a pill toast over the content), but anchored to
+   the bottom rather than the centre: the gallery header sits in normal flow at
+   the top of this view (unlike the image viewer's floating overlay-top), and
+   the grid's first row of tiles starts right under it, so centring here would
+   land the toast on live content instead of the free space below it. Sits
+   directly in <section class="gallery">, whose position:absolute is this
+   element's containing block, so "bottom" here is the bottom of the whole
+   view — the same edge .gallery__body's flex fill already reaches. */
+.gallery__flash {
+  position: absolute;
+  left: 50%;
+  bottom: 32px;
+  transform: translateX(-50%);
+  z-index: 6;
+  padding: 10px 18px;
+  border-radius: var(--radius-full);
+  background: rgba(13, 13, 13, 0.82);
+  border: 1px solid var(--hairline-soft);
+  backdrop-filter: blur(18px);
+  color: var(--on-dark);
+  font-size: 13px;
+  letter-spacing: 0.2px;
+  pointer-events: none;
+}
