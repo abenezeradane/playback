@@ -556,6 +556,85 @@ pub(crate) async fn tag_suggest(
         .map_err(|e| crate::ipc_error("tag_suggest", e, "could not read tags"))
 }
 
+/// One member of a tag, as the grid needs it. `missing` is filled in for the
+/// rows in THIS page only — statting a whole tag on every open would cost a full
+/// filesystem scan of a library that may hold tens of thousands of members.
+#[derive(Serialize)]
+pub(crate) struct TaggedItem {
+    pub archive: String,
+    pub path: String,
+    pub kind: String,
+    pub name: String,
+    pub missing: bool,
+}
+
+/// A page of a tag, plus the total so the header can say "1,248 items" without
+/// fetching them all.
+#[derive(Serialize)]
+pub(crate) struct TagPage {
+    pub total: i64,
+    pub offset: i64,
+    pub items: Vec<TaggedItem>,
+}
+
+/// One page of a tag's members, ordered `sort_key, path, id`.
+///
+/// That ordering is total and stable, which is what lets the caller page without
+/// a row appearing twice or falling between pages. The filesystem is touched
+/// only for the rows being returned.
+pub(crate) fn tag_page(
+    conn: &Connection,
+    tag: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<TagPage, String> {
+    let (_, folded) = fold_tag(tag)?;
+    let limit = limit.min(MAX_LIMIT);
+
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM item_tags it
+             JOIN tags t ON t.id = it.tag_id
+             WHERE t.folded = ?1",
+            params![folded],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("tags: page total: {e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.archive, i.path, i.kind, i.name
+             FROM items i
+             JOIN item_tags it ON it.item_id = i.id
+             JOIN tags t       ON t.id = it.tag_id
+             WHERE t.folded = ?1
+             ORDER BY i.sort_key, i.path, i.id
+             LIMIT ?2 OFFSET ?3",
+        )
+        .map_err(|e| format!("tags: prepare page: {e}"))?;
+    let rows = stmt
+        .query_map(params![folded, limit, offset], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| format!("tags: page: {e}"))?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        let (archive, path, kind, name) = row.map_err(|e| format!("tags: page row: {e}"))?;
+        // For a page inside an archive the ARCHIVE is what must exist: the
+        // extracted page is a cache artifact a 30-day prune may already have
+        // deleted, and its absence says nothing about the tag.
+        let missing = std::fs::metadata(disk_target(&archive, &path)).is_err();
+        items.push(TaggedItem { archive, path, kind, name, missing });
+    }
+    Ok(TagPage { total, offset: offset as i64, items })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1222,5 +1301,127 @@ mod tests {
         );
         // Verify zero limit returns empty result.
         assert!(list_tags(&conn, "", 0, 0).unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // tag_page
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_tag_page_is_ordered_and_carries_the_total() {
+        let conn = open_db(&temp_db("page")).unwrap();
+        // sort_key is what ORDER BY uses; give them keys that differ from
+        // insertion order so a missing ORDER BY would be visible.
+        for (path, key) in [("C:\\p\\c.jpg", "c"), ("C:\\p\\a.jpg", "a"), ("C:\\p\\b.jpg", "b")] {
+            let it = ItemRef { archive: "", path, kind: "image", name: "x.jpg", sort_key: key };
+            apply_tag(&conn, &it, "keep").unwrap();
+        }
+        let page = tag_page(&conn, "keep", 10, 0).unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(page.offset, 0);
+        assert_eq!(
+            page.items.iter().map(|i| i.path.as_str()).collect::<Vec<_>>(),
+            vec!["C:\\p\\a.jpg", "C:\\p\\b.jpg", "C:\\p\\c.jpg"]
+        );
+    }
+
+    #[test]
+    fn paging_a_tag_visits_every_row_exactly_once() {
+        // The property that matters: no row appears on two pages, none is skipped.
+        let conn = open_db(&temp_db("page-walk")).unwrap();
+        for n in 0..25 {
+            let path = format!("C:\\p\\{n:03}.jpg");
+            let it = ItemRef {
+                archive: "",
+                path: &path,
+                kind: "image",
+                name: "x.jpg",
+                sort_key: &format!("{n:03}"),
+            };
+            apply_tag(&conn, &it, "keep").unwrap();
+        }
+        let mut seen = Vec::new();
+        let mut offset = 0u32;
+        loop {
+            let page = tag_page(&conn, "keep", 7, offset).unwrap();
+            if page.items.is_empty() {
+                break;
+            }
+            for i in &page.items {
+                seen.push(i.path.clone());
+            }
+            offset += 7;
+        }
+        assert_eq!(seen.len(), 25, "every row exactly once");
+        let mut deduped = seen.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(deduped.len(), 25, "no row visited twice");
+    }
+
+    #[test]
+    fn a_tag_page_reports_which_rows_are_missing_from_disk() {
+        let conn = open_db(&temp_db("page-missing")).unwrap();
+        // One real file, one that never existed.
+        let dir = std::env::temp_dir().join(format!("pb-tags-page-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.jpg");
+        std::fs::write(&real, b"x").unwrap();
+        let real_s = real.to_string_lossy().to_string();
+
+        let a = ItemRef { archive: "", path: &real_s, kind: "image", name: "real.jpg", sort_key: "a" };
+        let b = ItemRef { archive: "", path: "C:\\nope\\gone.jpg", kind: "image", name: "gone.jpg", sort_key: "b" };
+        apply_tag(&conn, &a, "keep").unwrap();
+        // apply_tag refuses a target that is not there, so insert the missing row
+        // directly — this is the state left behind when a tagged file is deleted.
+        conn.execute(
+            "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+             VALUES ('', ?1, 'image', 'gone.jpg', 'b', 0)",
+            params![b.path],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO item_tags (item_id, tag_id)
+             VALUES ((SELECT id FROM items WHERE path = ?1), (SELECT id FROM tags WHERE folded = 'keep'))",
+            params![b.path],
+        )
+        .unwrap();
+
+        let page = tag_page(&conn, "keep", 10, 0).unwrap();
+        assert_eq!(page.total, 2);
+        assert!(!page.items[0].missing, "the real file is present");
+        assert!(page.items[1].missing, "the deleted file is reported missing");
+    }
+
+    #[test]
+    fn an_archive_page_is_missing_only_when_the_ARCHIVE_is_gone() {
+        // The extracted page lives in a cache a prune deletes; the archive is
+        // what actually has to exist.
+        let conn = open_db(&temp_db("page-archive")).unwrap();
+        let dir = std::env::temp_dir().join(format!("pb-tags-arch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cbz = dir.join("vol1.cbz");
+        std::fs::write(&cbz, b"x").unwrap();
+        let cbz_s = cbz.to_string_lossy().to_string();
+
+        let it = ItemRef {
+            archive: &cbz_s,
+            path: "ch1/page01.jpg",
+            kind: "image",
+            name: "page01.jpg",
+            sort_key: "a",
+        };
+        apply_tag(&conn, &it, "keep").unwrap();
+        let page = tag_page(&conn, "keep", 10, 0).unwrap();
+        assert!(!page.items[0].missing, "the archive exists, so the page is not missing");
+        assert_eq!(page.items[0].path, "ch1/page01.jpg", "the inner path is preserved");
+    }
+
+    #[test]
+    fn an_unknown_tag_is_an_empty_page_not_an_error() {
+        let conn = open_db(&temp_db("page-unknown")).unwrap();
+        let page = tag_page(&conn, "never-used", 10, 0).unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.items.is_empty());
     }
 }
