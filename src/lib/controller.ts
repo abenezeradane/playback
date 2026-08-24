@@ -1099,6 +1099,7 @@ export function goHome(): void {
   ui.galleryError = "";
   ui.galleryLoading = false;
   renderRecents();
+  void loadTagLibrary(); // tags-002: keep Home's Tags shelf counts current
   document.title = "Playback";
   endClose();
 }
@@ -3905,6 +3906,47 @@ async function authorizePageDirs(items: TaggedItem[]): Promise<void> {
     if (cut > 0) dirs.add(onDisk.slice(0, cut));
   }
   for (const dir of dirs) await authorizeMediaDir(dir);
+}
+
+/** The most-used tags, for Home's Tags section. Loaded when Home is shown, and
+ *  after any tag mutation, so the counts do not go stale behind the user. */
+export async function loadTagLibrary(): Promise<void> {
+  const rows = await tauriInvoke<{ name: string; count: number }[]>("tag_list", {
+    query: "",
+    limit: 24,
+    offset: 0,
+  }).catch(() => null);
+  if (!rows) return;
+  ui.tagLibrary = rows;
+  perfMark("tag.library", String(rows.length));
+}
+
+export function openTagIndex(): void {
+  ui.tagIndexOpen = true;
+  ui.tagIndexQuery = "";
+  ui.tagIndexRows = [];
+  void refreshTagIndex("");
+}
+
+export function closeTagIndex(): void {
+  ui.tagIndexOpen = false;
+  ui.tagIndexQuery = "";
+  ui.tagIndexRows = [];
+}
+
+export function onTagIndexQuery(value: string): void {
+  ui.tagIndexQuery = value;
+  void refreshTagIndex(value.trim());
+}
+
+async function refreshTagIndex(query: string): Promise<void> {
+  const rows = await tauriInvoke<{ name: string; count: number }[]>("tag_list", {
+    query,
+    limit: 200,
+    offset: 0,
+  }).catch(() => null);
+  if (!rows || !ui.tagIndexOpen) return;
+  ui.tagIndexRows = rows;
 }
 
 // ---------------------------------------------------------------------------

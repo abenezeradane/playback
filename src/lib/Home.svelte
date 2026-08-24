@@ -10,6 +10,8 @@
     activatePlaylist,
     openPlaylistEditor,
     deletePlaylist,
+    openGalleryForTag,
+    openTagIndex,
   } from "./controller";
   import { formatTime } from "../player-core";
 
@@ -127,6 +129,30 @@
         <div id="playlist-empty" class="recent__empty" hidden={ui.playlists.length > 0}>
           <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15V6" /><path d="M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" /><path d="M12 12H3" /><path d="M16 6H3" /><path d="M12 18H3" /></svg>
           <span>Build a playlist to queue up videos in your own order.</span>
+        </div>
+      </section>
+
+      <!-- Tags (tags-002): the most-used tags, so the counts beside them are what
+           stop a duplicate tag being created next to one that already has 4,000
+           members. Hidden entirely on a fresh install, which has none. -->
+      <section class="tags" hidden={ui.tagLibrary.length === 0}>
+        <div class="recent__head">
+          <div class="recent__title">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /><circle cx="7.5" cy="7.5" r="1.5" /></svg>
+            Tags
+          </div>
+          <button id="btn-all-tags" class="recent__clear" type="button" onclick={openTagIndex}>
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" /></svg>
+            All tags…
+          </button>
+        </div>
+        <div id="tag-chips-home" class="tags__chips">
+          {#each ui.tagLibrary as t (t.name)}
+            <button type="button" class="tags__chip" title={t.name} onclick={() => void openGalleryForTag(t.name)}>
+              <span class="tags__chip-name">{t.name}</span>
+              <span class="tags__chip-count">{t.count}</span>
+            </button>
+          {/each}
         </div>
       </section>
 

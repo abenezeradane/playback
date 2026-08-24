@@ -4157,3 +4157,96 @@ button.shortcuts__backdrop {
 .gallery-tile:hover .gallery-tile__tag,
 .gallery-tile:focus-visible .gallery-tile__tag { opacity: 1; }
 .gallery-tile__tag .ic { width: 0.9rem; height: 0.9rem; }
+
+/* ---------- Tags shelf on Home + all-tags index (tags-002, task 8) ---------- */
+/* Section wrapper mirrors .recent / .playlists exactly — same flex column, same
+   gap — so it sits in the Home stack without introducing a new rhythm. */
+.tags {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Chips wrap rather than sitting in a fixed grid: unlike a recent/playlist
+   card, a tag name has no fixed width, and the shelf is capped to the top 24
+   rather than paginated, so a wrapping row is the natural fit. */
+.tags__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+/* Same radius and hover treatment as .pl-card / .recent-card: border-color to
+   --hairline-strong, background to --surface-elevated. */
+.tags__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-family: inherit;
+  color: inherit;
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  transition: border-color 120ms ease, background 120ms ease, transform 80ms ease;
+}
+
+.tags__chip:hover {
+  border-color: var(--hairline-strong);
+  background: var(--surface-elevated);
+}
+
+.tags__chip:active {
+  transform: scale(0.97);
+}
+
+.tags__chip-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+  color: var(--ink);
+  max-width: 220px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Same visual language as .pl-card__count: the count is the point, not
+   decoration — it is what tells you landscapes already has 4,000 members
+   before you create landscape beside it. */
+.tags__chip-count {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-full);
+  background: var(--ink);
+  color: var(--canvas);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* This shelf is new, so it is not yet in the curated focus-visible / :active
+   audit list earlier in this file (search "78 buttons"). Same treatment,
+   added here rather than by editing that block. */
+.tags__chip:focus-visible {
+  outline: 2px solid var(--on-dark);
+  outline-offset: 2px;
+}
+
+/* All-tags index (tags-002): reuses .shortcuts + .tagpop__body/.tagpop__input
+   as-is. This is the list's own scroll region — the same technique
+   .tagpop__suggestions uses nested inside that same body, just sized for the
+   index's primary content rather than a short suggestions drop. */
+.tagindex__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: min(50vh, 440px);
+  overflow-y: auto;
+}
