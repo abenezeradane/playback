@@ -327,6 +327,59 @@ pub(crate) struct TagSummary {
     pub count: i64,
 }
 
+/// Escape a user-typed prefix for use with `LIKE ... ESCAPE '\'`.
+///
+/// LIKE is a pattern language: a typed `%` or `_` would otherwise match far more
+/// than the user asked for — `%` alone would return the entire library. The
+/// backslash must be escaped FIRST, or the escapes inserted for `%` and `_`
+/// would themselves be escaped.
+fn like_prefix(prefix: &str) -> String {
+    format!(
+        "{}%",
+        prefix
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
+
+/// The tag library, most-used first, for the Home chips and the all-tags index.
+///
+/// An empty `query` lists every tag; a non-empty one matches on a folded prefix.
+/// Only tags with members can appear — the JOIN is an inner one, so a tag row
+/// with no `item_tags` rows can never surface with a count of zero.
+pub(crate) fn list_tags(
+    conn: &Connection,
+    query: &str,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<TagSummary>, String> {
+    let limit = limit.min(MAX_LIMIT);
+    let pattern = like_prefix(query);
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.name, COUNT(it.item_id) AS n
+             FROM tags t
+             JOIN item_tags it ON it.tag_id = t.id
+             WHERE ?1 = '' OR t.folded LIKE ?2 ESCAPE '\\'
+             GROUP BY t.id
+             ORDER BY n DESC, t.folded ASC
+             LIMIT ?3 OFFSET ?4",
+        )
+        .map_err(|e| format!("tags: prepare list: {e}"))?;
+    let rows = stmt
+        .query_map(params![query, pattern, limit, offset], |r| {
+            Ok(TagSummary { name: r.get(0)?, count: r.get(1)? })
+        })
+        .map_err(|e| format!("tags: list: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("tags: list row: {e}"))?);
+    }
+    Ok(out)
+}
+
 /// Tags whose folded name starts with `prefix` (all tags when it is empty),
 /// most-used first. Only tags that actually have members are returned.
 pub(crate) fn suggest_tags(
@@ -335,16 +388,7 @@ pub(crate) fn suggest_tags(
     limit: u32,
 ) -> Result<Vec<TagSummary>, String> {
     let limit = limit.min(MAX_LIMIT);
-    // LIKE is a pattern language: a typed '%' or '_' would otherwise match
-    // everything. Escape them and declare the escape character.
-    let pattern = format!(
-        "{}%",
-        prefix
-            .to_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    );
+    let pattern = like_prefix(prefix);
     let mut stmt = conn
         .prepare(
             "SELECT t.name, COUNT(it.item_id) AS n
@@ -1043,5 +1087,76 @@ mod tests {
             lan_elapsed < budget,
             "suggest_tags(\"lan\") took {lan_elapsed:?} on {rows} rows, over the {budget:?} budget"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_tags
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_tag_list_is_most_used_first_and_pages() {
+        let conn = open_db(&temp_db("list")).unwrap();
+        // three tags with distinct counts, so the ordering is unambiguous
+        for n in 0..3 {
+            apply_tag(&conn, &item(&format!("C:\\p\\a{n}.jpg"), "a.jpg"), "keep").unwrap();
+        }
+        for n in 0..2 {
+            apply_tag(&conn, &item(&format!("C:\\p\\b{n}.jpg"), "b.jpg"), "edit").unwrap();
+        }
+        apply_tag(&conn, &item("C:\\p\\c.jpg", "c.jpg"), "toss").unwrap();
+
+        let all = list_tags(&conn, "", 10, 0).unwrap();
+        assert_eq!(
+            all.iter().map(|t| (t.name.as_str(), t.count)).collect::<Vec<_>>(),
+            vec![("keep", 3), ("edit", 2), ("toss", 1)]
+        );
+
+        // Paging must be stable: page 2 continues where page 1 stopped.
+        let first = list_tags(&conn, "", 2, 0).unwrap();
+        let second = list_tags(&conn, "", 2, 2).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].name, "toss");
+    }
+
+    #[test]
+    fn the_tag_list_filters_on_a_folded_prefix() {
+        let conn = open_db(&temp_db("list-filter")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "Trip 2024").unwrap();
+        apply_tag(&conn, &item("C:\\p\\b.jpg", "b.jpg"), "trinket").unwrap();
+        apply_tag(&conn, &item("C:\\p\\c.jpg", "c.jpg"), "keep").unwrap();
+
+        assert_eq!(list_tags(&conn, "tri", 10, 0).unwrap().len(), 2);
+        // Case-insensitive, because `folded` is already lowercased.
+        assert_eq!(list_tags(&conn, "TRI", 10, 0).unwrap().len(), 2);
+        assert_eq!(list_tags(&conn, "trip", 10, 0).unwrap()[0].name, "Trip 2024");
+    }
+
+    #[test]
+    fn a_wildcard_in_the_list_query_is_a_literal() {
+        // Same hazard suggest_tags guards: a typed '%' must not list the library.
+        let conn = open_db(&temp_db("list-wild")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
+        assert!(list_tags(&conn, "%", 10, 0).unwrap().is_empty());
+        assert!(list_tags(&conn, "_", 10, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_tag_list_never_shows_a_tag_with_no_members() {
+        let conn = open_db(&temp_db("list-bare")).unwrap();
+        conn.execute(
+            "INSERT INTO tags (name, folded, created_at) VALUES ('Ghost', 'ghost', 1)",
+            [],
+        )
+        .unwrap();
+        assert!(list_tags(&conn, "", 10, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_tag_list_limit_is_clamped() {
+        let conn = open_db(&temp_db("list-limit")).unwrap();
+        apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
+        assert_eq!(list_tags(&conn, "", u32::MAX, 0).unwrap().len(), 1);
+        assert!(list_tags(&conn, "", 0, 0).unwrap().is_empty());
     }
 }
