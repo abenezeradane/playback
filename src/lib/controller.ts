@@ -2175,6 +2175,24 @@ export function openQueueItem(item: QueueItem): void {
  * discarded.
  */
 async function buildPhotoQueue(openedPath: string): Promise<void> {
+  // tags-002: inside a tag view the siblings are the TAG's members, not the
+  // folder's — stepping right must not silently leave the tag. While the view is
+  // capped this list is the tag (up to the cap); when the sliding window lands,
+  // this becomes a paged cursor that fetches the neighbouring page at an edge.
+  if (ui.galleryTag) {
+    if (currentPath !== openedPath) return; // a newer open superseded this one
+    const imageItems = ui.galleryItems.filter(
+      (item) => item.kind === "image" && !item.missing,
+    );
+    const paths = imageItems.map((item) => item.path);
+    ui.photoQueue = imageItems.map((item): QueueItem => ({
+      path: item.path,
+      name: item.name,
+    }));
+    ui.photoIndex = resolveQueueIndex(paths, openedPath);
+    return;
+  }
+
   let paths = await tauriInvoke<string[]>("list_folder_images", { path: openedPath }).catch(
     () => null,
   );
