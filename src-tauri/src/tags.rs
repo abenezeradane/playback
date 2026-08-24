@@ -635,6 +635,66 @@ pub(crate) fn tag_page(
     Ok(TagPage { total, offset: offset as i64, items })
 }
 
+/// Count — and optionally remove — the members of `tag` whose file is gone.
+///
+/// Two-step by design: the caller asks with `apply = false` to get an honest
+/// count for its confirmation, then with `apply = true` to act. Tags are never
+/// removed as a side effect of browsing; a file on an unplugged drive comes back
+/// when the drive does.
+///
+/// Only the named tag is touched. An item carried by another tag keeps its row —
+/// the row is deleted only when the prune took its LAST tag.
+pub(crate) fn prune_missing(conn: &Connection, tag: &str, apply: bool) -> Result<u32, String> {
+    let (_, folded) = fold_tag(tag)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.id, i.archive, i.path
+             FROM items i
+             JOIN item_tags it ON it.item_id = i.id
+             JOIN tags t       ON t.id = it.tag_id
+             WHERE t.folded = ?1",
+        )
+        .map_err(|e| format!("tags: prepare prune: {e}"))?;
+    let rows = stmt
+        .query_map(params![folded], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })
+        .map_err(|e| format!("tags: prune scan: {e}"))?;
+
+    let mut gone = Vec::new();
+    for row in rows {
+        let (id, archive, path) = row.map_err(|e| format!("tags: prune row: {e}"))?;
+        if std::fs::metadata(disk_target(&archive, &path)).is_err() {
+            gone.push(id);
+        }
+    }
+    if !apply || gone.is_empty() {
+        return Ok(gone.len() as u32);
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("tags: prune tx: {e}"))?;
+    for id in &gone {
+        tx.execute(
+            "DELETE FROM item_tags
+             WHERE item_id = ?1 AND tag_id = (SELECT id FROM tags WHERE folded = ?2)",
+            params![id, folded],
+        )
+        .map_err(|e| format!("tags: prune unlink: {e}"))?;
+        // An items row exists only to carry tags — but only delete it when this
+        // was its last one, or a prune of `keep` would destroy `edit`'s member.
+        tx.execute(
+            "DELETE FROM items
+             WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM item_tags WHERE item_id = ?1)",
+            params![id],
+        )
+        .map_err(|e| format!("tags: prune item: {e}"))?;
+    }
+    tx.commit().map_err(|e| format!("tags: prune commit: {e}"))?;
+    Ok(gone.len() as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1423,5 +1483,106 @@ mod tests {
         let page = tag_page(&conn, "never-used", 10, 0).unwrap();
         assert_eq!(page.total, 0);
         assert!(page.items.is_empty());
+    }
+
+    #[test]
+    fn a_dry_run_prune_counts_without_changing_anything() {
+        let conn = open_db(&temp_db("prune-dry")).unwrap();
+        let dir = std::env::temp_dir().join(format!("pb-tags-prune-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.jpg");
+        std::fs::write(&real, b"x").unwrap();
+        let real_s = real.to_string_lossy().to_string();
+        let keep = ItemRef { archive: "", path: &real_s, kind: "image", name: "real.jpg", sort_key: "a" };
+        apply_tag(&conn, &keep, "keep").unwrap();
+        for n in 0..3 {
+            let path = format!("C:\\nope\\gone{n}.jpg");
+            conn.execute(
+                "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+                 VALUES ('', ?1, 'image', 'gone.jpg', ?2, 0)",
+                params![path, format!("b{n}")],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO item_tags (item_id, tag_id)
+                 VALUES ((SELECT id FROM items WHERE path = ?1),
+                         (SELECT id FROM tags WHERE folded = 'keep'))",
+                params![path],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(prune_missing(&conn, "keep", false).unwrap(), 3, "counts the missing");
+        assert_eq!(tag_page(&conn, "keep", 100, 0).unwrap().total, 4, "changed nothing");
+    }
+
+    #[test]
+    fn applying_a_prune_removes_exactly_the_missing_rows() {
+        let conn = open_db(&temp_db("prune-apply")).unwrap();
+        let dir = std::env::temp_dir().join(format!("pb-tags-prune2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.jpg");
+        std::fs::write(&real, b"x").unwrap();
+        let real_s = real.to_string_lossy().to_string();
+        apply_tag(
+            &conn,
+            &ItemRef { archive: "", path: &real_s, kind: "image", name: "real.jpg", sort_key: "a" },
+            "keep",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+             VALUES ('', 'C:\\nope\\gone.jpg', 'image', 'gone.jpg', 'b', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO item_tags (item_id, tag_id)
+             VALUES ((SELECT id FROM items WHERE path = 'C:\\nope\\gone.jpg'),
+                     (SELECT id FROM tags WHERE folded = 'keep'))",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(prune_missing(&conn, "keep", true).unwrap(), 1);
+        let page = tag_page(&conn, "keep", 100, 0).unwrap();
+        assert_eq!(page.total, 1, "only the present file remains");
+        assert!(!page.items[0].missing);
+        // An item row exists only to carry tags: pruning its last tag removes it.
+        let orphans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM items WHERE path = 'C:\\nope\\gone.jpg'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0, "the item row went with its last tag");
+    }
+
+    #[test]
+    fn a_prune_touches_only_the_named_tag() {
+        let conn = open_db(&temp_db("prune-scope")).unwrap();
+        conn.execute(
+            "INSERT INTO items (archive, path, kind, name, sort_key, added_at)
+             VALUES ('', 'C:\\nope\\gone.jpg', 'image', 'gone.jpg', 'a', 0)",
+            [],
+        )
+        .unwrap();
+        for tag in ["keep", "edit"] {
+            conn.execute(
+                "INSERT INTO tags (name, folded, created_at) VALUES (?1, ?1, 0)",
+                params![tag],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO item_tags (item_id, tag_id)
+                 VALUES ((SELECT id FROM items WHERE path = 'C:\\nope\\gone.jpg'),
+                         (SELECT id FROM tags WHERE folded = ?1))",
+                params![tag],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(prune_missing(&conn, "keep", true).unwrap(), 1);
+        // The row is gone from `keep` but still carried by `edit`, so the ITEM
+        // must survive — pruning one tag must not delete another tag's member.
+        assert_eq!(tag_page(&conn, "keep", 10, 0).unwrap().total, 0);
+        assert_eq!(tag_page(&conn, "edit", 10, 0).unwrap().total, 1);
     }
 }
