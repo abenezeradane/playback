@@ -4694,7 +4694,13 @@ async function openArchiveEntry(item: GalleryItem): Promise<boolean> {
       else ui.galleryError = "Could not read that file from the archive.";
       return false;
     }
-    if (item.kind === "image") {
+    // tags-002: the level is materialized ONLY so buildPhotoQueue's FOLDER branch
+    // finds this page's siblings in the mirror directory. A TAG view's queue comes
+    // from the tag instead and that branch never runs, so the whole level would be
+    // extracted and never read — and paid AGAIN on every step, since stepping
+    // re-enters this function. This condition deliberately mirrors the branch
+    // condition in buildPhotoQueue; if that gate changes, change this with it.
+    if (item.kind === "image" && !ui.galleryTag) {
       await materializeArchiveLevel(archive, item.path, token);
     }
     if (token !== galleryToken) return false; // superseded while materializing the level
