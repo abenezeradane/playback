@@ -39,6 +39,11 @@ export interface RulerTick {
 export interface QueueItem {
   path: string;
   name: string;
+  /** tags-002: set only for a queue entry that lives INSIDE an archive — this
+   *  is the archive's real path on disk, and `path` is then the inner path
+   *  (`ch1/page01.jpg`), which is not a file until it is materialized. "" or
+   *  absent for an ordinary file. */
+  archive?: string;
 }
 
 /** One tile in the Gallery grid (gallery-001): a folder image plus its resolved

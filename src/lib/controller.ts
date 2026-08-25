@@ -2180,7 +2180,16 @@ async function buildPhotoQueue(openedPath: string): Promise<void> {
   // capped this list is the tag (up to the cap); when the sliding window lands,
   // this becomes a paged cursor that fetches the neighbouring page at an edge.
   if (ui.galleryTag) {
-    if (currentPath !== openedPath) return; // a newer open superseded this one
+    // tags-002: in a tag view the queue IS the tag and its membership does not
+    // change while browsing, so it is built ONCE on entry and the index is then
+    // owned by doNextPhoto/doPrevPhoto. Rebuilding on every open would re-derive
+    // the index from a path string, which cannot distinguish the same inner path
+    // in two different archives. clearPhotoQueue() (via clearImageView) empties
+    // this when the viewer is torn down, so a later entry rebuilds correctly.
+    if (ui.photoQueue.length > 0) return;
+    // The tag branch is fully synchronous (no await above this point), so a newer
+    // open could never supersede this call mid-flight — unlike the async fetch
+    // below, there is no window in which `currentPath` could have moved on.
     const imageItems = ui.galleryItems.filter(
       (item) => item.kind === "image" && !item.missing,
     );
@@ -2188,8 +2197,11 @@ async function buildPhotoQueue(openedPath: string): Promise<void> {
     ui.photoQueue = imageItems.map((item): QueueItem => ({
       path: item.path,
       name: item.name,
+      archive: item.archive,
     }));
-    ui.photoIndex = resolveQueueIndex(paths, openedPath);
+    const opened = ui.galleryIndex >= 0 ? ui.galleryItems[ui.galleryIndex] : undefined;
+    const byIdentity = opened ? imageItems.indexOf(opened) : -1;
+    ui.photoIndex = byIdentity >= 0 ? byIdentity : resolveQueueIndex(paths, openedPath);
     return;
   }
 
@@ -2215,13 +2227,37 @@ function clearPhotoQueue(): void {
 export function doNextPhoto(): void {
   const i = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
   const item = ui.photoQueue[i];
-  if (item) void loadFromPath(item.path);
+  if (!item) return;
+  ui.photoIndex = i;
+  void openQueuedPhoto(item);
 }
 
 export function doPrevPhoto(): void {
   const i = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
   const item = ui.photoQueue[i];
-  if (item) void loadFromPath(item.path);
+  if (!item) return;
+  ui.photoIndex = i;
+  void openQueuedPhoto(item);
+}
+
+/** Open one photo-queue entry. tags-002: a queue built from a TAG can contain
+ *  pages that live inside an archive, whose `path` is an inner path and not a
+ *  file on disk. Those must go through the same materialize-then-load route the
+ *  gallery uses (openArchiveEntry), or the viewer is handed a path that cannot
+ *  resolve. An ordinary entry loads directly, exactly as before. */
+function openQueuedPhoto(item: QueueItem): void {
+  if (item.archive) {
+    void openArchiveEntry({
+      path: item.path,
+      name: item.name,
+      thumbSrc: "",
+      kind: "image",
+      durationLabel: "",
+      archive: item.archive,
+    });
+    return;
+  }
+  void loadFromPath(item.path);
 }
 
 /**
