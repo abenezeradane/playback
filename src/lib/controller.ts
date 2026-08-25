@@ -982,9 +982,17 @@ let navStack: NavEntry[] = [];
  * drop, a Recent tile, a launch argument, the single-instance handler) starts a
  * NEW journey — the old trail is no longer where "back" should lead. In-app
  * forward moves (a gallery tile, the G hotkey) push instead, so they keep theirs.
+ * It also resets the TAG the gallery was scoped to (tags-002).
  */
 function resetNav(): void {
   navStack = [];
+  // tags-002: a fresh journey also leaves the TAG the gallery was scoped to.
+  // buildPhotoQueue's tag branch keys off ui.galleryTag and reuses an
+  // already-built queue; without this, a file dropped mid-tag-browse is shown
+  // with the previous tag's Prev/Next still attached to it.
+  ui.galleryTag = "";
+  ui.galleryTagTotal = 0;
+  ui.galleryTagCapped = false;
 }
 
 /** Record where the CURRENT view should return to, before navigating forward. */
@@ -2225,29 +2233,25 @@ function clearPhotoQueue(): void {
  *  through the sibling photo queue. Clamps at the ends (no wrap — there is no
  *  "repeat all" concept for a photo browse). */
 export function doNextPhoto(): void {
-  const i = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
-  const item = ui.photoQueue[i];
-  if (!item) return;
-  ui.photoIndex = i;
-  void openQueuedPhoto(item);
+  void stepPhoto(nextIndex(ui.photoIndex, ui.photoQueue.length, false));
 }
 
 export function doPrevPhoto(): void {
-  const i = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
-  const item = ui.photoQueue[i];
-  if (!item) return;
-  ui.photoIndex = i;
-  void openQueuedPhoto(item);
+  void stepPhoto(prevIndex(ui.photoIndex, ui.photoQueue.length, false));
 }
 
-/** Open one photo-queue entry. tags-002: a queue built from a TAG can contain
- *  pages that live inside an archive, whose `path` is an inner path and not a
- *  file on disk. Those must go through the same materialize-then-load route the
- *  gallery uses (openArchiveEntry), or the viewer is handed a path that cannot
- *  resolve. An ordinary entry loads directly, exactly as before. */
-function openQueuedPhoto(item: QueueItem): void {
+/** Open one photo-queue entry and, only if it really opened, make it the current
+ *  one. tags-002: a queue built from a TAG can contain pages inside an archive,
+ *  whose `path` is an inner path and not a file on disk — those go through the
+ *  materialize-then-load route the gallery uses. That route can decline (an
+ *  extraction already in flight, a superseded open, an unreadable page), and an
+ *  index moved for a step that never happened leaves the counter ahead of the
+ *  picture and makes the NEXT press skip a page. */
+async function stepPhoto(i: number): Promise<void> {
+  const item = ui.photoQueue[i];
+  if (!item) return;
   if (item.archive) {
-    void openArchiveEntry({
+    const opened = await openArchiveEntry({
       path: item.path,
       name: item.name,
       thumbSrc: "",
@@ -2255,8 +2259,10 @@ function openQueuedPhoto(item: QueueItem): void {
       durationLabel: "",
       archive: item.archive,
     });
+    if (opened) ui.photoIndex = i;
     return;
   }
+  ui.photoIndex = i;
   void loadFromPath(item.path);
 }
 
@@ -4634,15 +4640,20 @@ export async function openFolderDialog(): Promise<void> {
  *
  * A VIDEO materializes only itself: a level of clips could be many gigabytes, so
  * it plays alone (no play-013 queue).
+ *
+ * Returns whether the open actually completed — `false` at the re-entrancy
+ * guard, either supersede check, or an unreadable entry; `true` only once
+ * `loadFromPath` has been called. tags-002: stepPhoto uses this to decide
+ * whether to move `ui.photoIndex`.
  */
-async function openArchiveEntry(item: GalleryItem): Promise<void> {
+async function openArchiveEntry(item: GalleryItem): Promise<boolean> {
   // Re-entrancy guard: the .prepping overlay only blocks the POINTER, it does not
   // blur focus or mark tiles inert, so a still-focused tile can fire a native
   // Enter/Space click while the overlay is up. Without this, two calls race on
   // the shared ui.prepping flag — whichever finishes first clears it in its
   // `finally` while the other is still mid-materialization, reopening the click
   // surface before the first load has settled.
-  if (ui.prepping) return;
+  if (ui.prepping) return false;
   const archive = item.archive;
   // ux-001 supersede guard. Every other open path here is guarded (galleryToken,
   // imgToken, currentPath); this one was not, and it is the one with the longest
@@ -4667,7 +4678,7 @@ async function openArchiveEntry(item: GalleryItem): Promise<void> {
       archive,
       inner: item.path,
     }).catch(() => null);
-    if (token !== galleryToken) return; // superseded: Esc/Back left this level
+    if (token !== galleryToken) return false; // superseded: Esc/Back left this level
     if (!real) {
       // showError writes ui.emptyError, which renders ONLY in Home.svelte — and
       // the view during an extraction is the gallery, so routing an entry failure
@@ -4675,13 +4686,18 @@ async function openArchiveEntry(item: GalleryItem): Promise<void> {
       // happened. That was the outcome for an encrypted entry, a cap abort and a
       // corrupt page alike. openArchiveGallery already routes LISTING failures to
       // ui.galleryError; entry failures belong on the same surface.
-      ui.galleryError = "Could not read that file from the archive.";
-      return;
+      // tags-002: this path is now reachable from the IMAGE viewer (stepping
+      // through a tag), where ui.galleryError is never rendered. A view must not
+      // write state only another view shows — Task 9 settled that when the prune
+      // flash borrowed ImageView's field.
+      if (ui.view === "image") flashImageAction("Could not read that page from the archive.");
+      else ui.galleryError = "Could not read that file from the archive.";
+      return false;
     }
     if (item.kind === "image") {
       await materializeArchiveLevel(archive, item.path, token);
     }
-    if (token !== galleryToken) return; // superseded while materializing the level
+    if (token !== galleryToken) return false; // superseded while materializing the level
     // gallery-004: record WHERE this page came from before handing the mirror
     // path to loadFromPath, so Recents, the viewer subtitle and the G key all
     // name the archive rather than the cache directory it landed in.
@@ -4693,6 +4709,7 @@ async function openArchiveEntry(item: GalleryItem): Promise<void> {
     // A VIDEO plays alone: a level of clips could be many gigabytes, so there is
     // no play-013 folder queue behind it.
     await loadFromPath(real, false, item.kind === "image" ? {} : { noFolderQueue: true });
+    return true;
   } finally {
     ui.prepping = false;
   }
@@ -5542,7 +5559,10 @@ async function loadLaunchFile(): Promise<void> {
   try {
     const { invoke } = await import("@tauri-apps/api/core");
     const path = await invoke<string | null>("launch_path");
-    if (path) await loadFromPath(path);
+    if (path) {
+      resetNav(); // ux-001: a launch argument starts a fresh journey
+      await loadFromPath(path);
+    }
   } catch {
     /* Not running under Tauri, or no launch file — ignore. */
   }
@@ -5562,7 +5582,10 @@ async function wireSecondInstance(): Promise<void> {
     const { listen } = await import("@tauri-apps/api/event");
     await listen<string>("open-file", (event) => {
       const path = event.payload;
-      if (path) void loadFromPath(path);
+      if (path) {
+        resetNav(); // ux-001: the single-instance handler starts a fresh journey
+        void loadFromPath(path);
+      }
     });
   } catch {
     /* Not running under Tauri — single-instance forwarding is unavailable. */
