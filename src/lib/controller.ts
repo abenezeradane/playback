@@ -2240,26 +2240,42 @@ export function doPrevPhoto(): void {
   void stepPhoto(prevIndex(ui.photoIndex, ui.photoQueue.length, false));
 }
 
-/** Open one photo-queue entry and, only if it really opened, make it the current
- *  one. tags-002: a queue built from a TAG can contain pages inside an archive,
- *  whose `path` is an inner path and not a file on disk — those go through the
- *  materialize-then-load route the gallery uses. That route can decline (an
- *  extraction already in flight, a superseded open, an unreadable page), and an
- *  index moved for a step that never happened leaves the counter ahead of the
- *  picture and makes the NEXT press skip a page. */
+/** Open one photo-queue entry and, unless the open was merely DECLINED, make it
+ *  the current one. tags-002: a queue built from a TAG can contain pages inside an
+ *  archive, whose `path` is an inner path and not a file on disk — those go
+ *  through the materialize-then-load route the gallery uses. That route can
+ *  decline transiently (an extraction already in flight, a superseded open), and
+ *  an index moved for a step that never happened leaves the counter ahead of the
+ *  picture and makes the NEXT press skip a page — so those leave the index alone.
+ *  A page that FAILED to extract is different: that outcome cannot change on
+ *  retry, so the index still moves onto it (there is nothing else to show, but
+ *  the next press must continue past it rather than wall off the rest of the
+ *  tag). */
 async function stepPhoto(i: number): Promise<void> {
   const item = ui.photoQueue[i];
   if (!item) return;
   if (item.archive) {
-    const opened = await openArchiveEntry({
-      path: item.path,
-      name: item.name,
-      thumbSrc: "",
-      kind: "image",
-      durationLabel: "",
-      archive: item.archive,
-    });
-    if (opened) ui.photoIndex = i;
+    let outcome: ArchiveOpen;
+    try {
+      outcome = await openArchiveEntry({
+        path: item.path,
+        name: item.name,
+        thumbSrc: "",
+        kind: "image",
+        durationLabel: "",
+        archive: item.archive,
+      });
+    } catch {
+      // Defensive: nothing throws here today, but a silent unhandled rejection
+      // would leave the viewer looking frozen with no explanation.
+      flashImageAction("Could not read that page from the archive.");
+      return;
+    }
+    // A page that CANNOT be extracted still counts as stepped-onto: the picture
+    // stays on the last good page (there is nothing else to show) but the index
+    // moves, so the next press continues past it. Parking the index on it instead
+    // would make Prev/Next unable to cross that page for the rest of the browse.
+    if (outcome !== "declined") ui.photoIndex = i;
     return;
   }
   ui.photoIndex = i;
@@ -4628,6 +4644,13 @@ export async function openFolderDialog(): Promise<void> {
   }
 }
 
+/** Why an archive open did not put a picture on screen. `declined` is transient —
+ *  an extraction already in flight, or a superseded open — so a caller stepping
+ *  through a queue should leave its index alone and retry the same entry. `failed`
+ *  is terminal: this entry cannot be extracted and never will be, so a stepper must
+ *  move past it or it can never cross that page. */
+type ArchiveOpen = "opened" | "declined" | "failed";
+
 /**
  * Open one photo or clip from inside an archive (gallery-004).
  *
@@ -4641,19 +4664,17 @@ export async function openFolderDialog(): Promise<void> {
  * A VIDEO materializes only itself: a level of clips could be many gigabytes, so
  * it plays alone (no play-013 queue).
  *
- * Returns whether the open actually completed — `false` at the re-entrancy
- * guard, either supersede check, or an unreadable entry; `true` only once
- * `loadFromPath` has been called. tags-002: stepPhoto uses this to decide
- * whether to move `ui.photoIndex`.
+ * Returns why the open did or did not put a picture on screen — see `ArchiveOpen`.
+ * tags-002: stepPhoto uses this to decide whether to move `ui.photoIndex`.
  */
-async function openArchiveEntry(item: GalleryItem): Promise<boolean> {
+async function openArchiveEntry(item: GalleryItem): Promise<ArchiveOpen> {
   // Re-entrancy guard: the .prepping overlay only blocks the POINTER, it does not
   // blur focus or mark tiles inert, so a still-focused tile can fire a native
   // Enter/Space click while the overlay is up. Without this, two calls race on
   // the shared ui.prepping flag — whichever finishes first clears it in its
   // `finally` while the other is still mid-materialization, reopening the click
   // surface before the first load has settled.
-  if (ui.prepping) return false;
+  if (ui.prepping) return "declined";
   const archive = item.archive;
   // ux-001 supersede guard. Every other open path here is guarded (galleryToken,
   // imgToken, currentPath); this one was not, and it is the one with the longest
@@ -4678,7 +4699,7 @@ async function openArchiveEntry(item: GalleryItem): Promise<boolean> {
       archive,
       inner: item.path,
     }).catch(() => null);
-    if (token !== galleryToken) return false; // superseded: Esc/Back left this level
+    if (token !== galleryToken) return "declined"; // superseded: Esc/Back left this level
     if (!real) {
       // showError writes ui.emptyError, which renders ONLY in Home.svelte — and
       // the view during an extraction is the gallery, so routing an entry failure
@@ -4692,7 +4713,7 @@ async function openArchiveEntry(item: GalleryItem): Promise<boolean> {
       // flash borrowed ImageView's field.
       if (ui.view === "image") flashImageAction("Could not read that page from the archive.");
       else ui.galleryError = "Could not read that file from the archive.";
-      return false;
+      return "failed";
     }
     // tags-002: the level is materialized ONLY so buildPhotoQueue's FOLDER branch
     // finds this page's siblings in the mirror directory. A TAG view's queue comes
@@ -4703,7 +4724,7 @@ async function openArchiveEntry(item: GalleryItem): Promise<boolean> {
     if (item.kind === "image" && !ui.galleryTag) {
       await materializeArchiveLevel(archive, item.path, token);
     }
-    if (token !== galleryToken) return false; // superseded while materializing the level
+    if (token !== galleryToken) return "declined"; // superseded while materializing the level
     // gallery-004: record WHERE this page came from before handing the mirror
     // path to loadFromPath, so Recents, the viewer subtitle and the G key all
     // name the archive rather than the cache directory it landed in.
@@ -4715,7 +4736,7 @@ async function openArchiveEntry(item: GalleryItem): Promise<boolean> {
     // A VIDEO plays alone: a level of clips could be many gigabytes, so there is
     // no play-013 folder queue behind it.
     await loadFromPath(real, false, item.kind === "image" ? {} : { noFolderQueue: true });
-    return true;
+    return "opened";
   } finally {
     ui.prepping = false;
   }
