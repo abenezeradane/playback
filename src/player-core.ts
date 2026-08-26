@@ -1199,6 +1199,20 @@ export function pageRange(
   return { offset, limit: Math.min(pageSize, total - offset) };
 }
 
+/** The absolute `[start, end)` slice of a list to keep in the DOM, centred on
+ *  the focused index and clamped to the ends without shrinking (tags-002). */
+export function windowBounds(
+  total: number,
+  focus: number,
+  windowSize: number,
+): { start: number; end: number } {
+  if (total <= windowSize) return { start: 0, end: total };
+  const half = Math.floor(windowSize / 2);
+  const wanted = Math.max(0, focus < 0 ? 0 : focus - half);
+  const start = Math.min(wanted, total - windowSize);
+  return { start, end: start + windowSize };
+}
+
 /** The tag header's meta line. Deliberately counts ITEMS only — a global missing
  *  count would cost a full filesystem scan of the tag on every open. */
 export function tagMeta(total: number): string {

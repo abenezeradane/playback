@@ -131,8 +131,11 @@
             title={tileLabel(item.kind, item.name)}
             aria-label={tileLabel(item.kind, item.name)}
             aria-disabled={item.missing ? "true" : undefined}
-            tabindex={i === (ui.galleryIndex < 0 ? 0 : ui.galleryIndex) ? 0 : -1}
-            use:galleryTile={i}
+            tabindex={ui.galleryWindowStart + i ===
+            (ui.galleryIndex < 0 ? 0 : ui.galleryIndex)
+              ? 0
+              : -1}
+            use:galleryTile={ui.galleryWindowStart + i}
             onclick={() => openGalleryItem(item)}
           >
             <!-- perf-005: thumbSrc is filled in by the background thumbnail pass,
@@ -200,7 +203,11 @@
               title="Tags (#)"
               onclick={(e) => {
                 e.stopPropagation();
-                ui.galleryIndex = i;
+                // tags-002: `i` is a position within `ui.galleryItems` (the
+                // window, once Task 12 lands) — same conversion as every other
+                // cursor write in this file/controller.ts, so this one does not
+                // regress silently when that window lands.
+                ui.galleryIndex = ui.galleryWindowStart + i;
                 openTagPopover();
               }}
             >

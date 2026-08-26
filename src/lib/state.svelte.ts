@@ -317,8 +317,16 @@ export const ui = $state({
   // ux-004: the grid's keyboard cursor. Arrow keys move it, Enter opens it, and
   // it drives a roving tabindex so Tab enters/leaves the grid as ONE stop
   // instead of walking through every tile (a folder of thousands would otherwise
-  // be a tab trap). -1 until the grid is first focused.
+  // be a tab trap). -1 until the grid is first focused. ABSOLUTE — a position in
+  // the full list, not in `galleryItems` (tags-002).
   galleryIndex: -1,
+  // tags-002: the absolute index of `galleryItems[0]`. Every other gallery view
+  // populates the whole list, so this stays 0 for them; only the tag view's
+  // sliding window (Task 12) moves it. Kept here rather than local to that
+  // window so the conversion of the grid's cursor/thumbnail sites to absolute
+  // indices (Task 11) is a no-op today and needs no further change once the
+  // window lands.
+  galleryWindowStart: 0,
 
   // --- Livestream · Unavailable (frame 04b) ---
   liveTitle: "Livestream",

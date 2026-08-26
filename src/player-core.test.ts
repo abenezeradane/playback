@@ -88,6 +88,7 @@ import {
   pageForIndex,
   pageRange,
   tagMeta,
+  windowBounds,
   type PlaylistStore,
   DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
@@ -2292,5 +2293,27 @@ describe("tag page arithmetic", () => {
     expect(tagMeta(0)).toBe("No items");
     expect(tagMeta(1)).toBe("1 item");
     expect(tagMeta(1248)).toBe("1,248 items");
+  });
+});
+
+describe("windowBounds", () => {
+  it("covers the whole list when it fits", () => {
+    expect(windowBounds(800, 0, 1500)).toEqual({ start: 0, end: 800 });
+  });
+
+  it("centres the window on the focused index", () => {
+    expect(windowBounds(40000, 20000, 1500)).toEqual({ start: 19250, end: 20750 });
+  });
+
+  it("clamps at the start without shrinking", () => {
+    expect(windowBounds(40000, 10, 1500)).toEqual({ start: 0, end: 1500 });
+  });
+
+  it("clamps at the end without shrinking", () => {
+    expect(windowBounds(40000, 39990, 1500)).toEqual({ start: 38500, end: 40000 });
+  });
+
+  it("treats an unset cursor as the top of the list", () => {
+    expect(windowBounds(40000, -1, 1500)).toEqual({ start: 0, end: 1500 });
   });
 });

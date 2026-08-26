@@ -1058,7 +1058,11 @@ function galleryNavEntry(): NavEntry {
         // user exactly where they were rather than at the top of the grid.
         if (cursor >= 0) {
           const grid = document.getElementById("gallery-grid");
-          (grid?.children[cursor] as HTMLElement | undefined)?.focus({ preventScroll: true });
+          // Absolute index -> DOM position, converted here at the point of use —
+          // same reasoning as focusGalleryTile (tags-002).
+          (
+            grid?.querySelector(`[data-gallery-index="${cursor}"]`) as HTMLElement | null
+          )?.focus({ preventScroll: true });
         }
       });
     },
@@ -4415,7 +4419,10 @@ function focusGalleryTile(index: number): void {
   ui.galleryIndex = next;
   void tick().then(() => {
     const grid = document.getElementById("gallery-grid");
-    const el = grid?.children[next] as HTMLElement | undefined;
+    // Absolute index -> DOM position, converted here at the point of use rather
+    // than assuming child position n is item n: with a window (Task 12) and
+    // spacer divs, it is not (tags-002).
+    const el = grid?.querySelector(`[data-gallery-index="${next}"]`) as HTMLElement | null;
     el?.focus({ preventScroll: true });
     el?.scrollIntoView({ block: "nearest" });
   });
@@ -4785,8 +4792,11 @@ export function openGalleryItem(item: GalleryItem): void {
   // reachable by keyboard.
   if (item.missing) return;
   // ux-004: record which tile this was, so Back restores the cursor onto it.
+  // `indexOf` is a position WITHIN `ui.galleryItems` (the window, once Task 12
+  // lands) — offset by `galleryWindowStart` to land back on an absolute index,
+  // same as everywhere else the cursor is written (tags-002).
   const index = ui.galleryItems.indexOf(item);
-  if (index >= 0) ui.galleryIndex = index;
+  if (index >= 0) ui.galleryIndex = ui.galleryWindowStart + index;
   // ux-001: remember the grid (items + scroll + cursor) so Back returns to it in
   // place rather than dumping the user on the home screen.
   pushNav(galleryNavEntry());
