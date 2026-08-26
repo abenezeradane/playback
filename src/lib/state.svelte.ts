@@ -75,6 +75,10 @@ export interface GalleryItem {
    *  sets it — a folder listing can only contain files that exist. A missing
    *  tile renders dimmed and does not open. */
   missing?: boolean;
+  /** tags-002: true for a window row whose page has not landed yet. Distinct from
+   *  `missing`: the row is not gone, it is not here YET. Renders as the ordinary
+   *  loading shimmer and refuses to open, tag or fetch a thumbnail. */
+  pending?: boolean;
 }
 
 /** The item a tag is being applied to (tags-001). `archive` is "" for a real

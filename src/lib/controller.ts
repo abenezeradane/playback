@@ -2258,25 +2258,45 @@ function tagRowsAsImages(): TaggedItem[] {
 
 /** Guards `extendPhotoQueueFromTag` against running twice concurrently — two
  *  fast Prev/Next presses landing before the first fetch resolves would
- *  otherwise both walk `ensurePages` over the same unfetched pages. */
+ *  otherwise both walk `ensurePages` over the same unfetched pages. tags-002
+ *  fix-1 (Defect B): `doNextPhoto`/`doPrevPhoto` now check this themselves
+ *  and decline a further press outright while it is set (see below), so in
+ *  practice a second call can no longer reach the `if (extendingPhotoQueue)`
+ *  line below at all — that line stays only as a defensive fallback. */
 let extendingPhotoQueue: Promise<void> | null = null;
 
 /**
- * Pull the rest of a tag into the photo queue when a step has run off the end
- * of what `buildPhotoQueue` could see at open time (tags-002). The initial
+ * Pull ONE more not-yet-loaded page of the tag into the photo queue, in the
+ * direction of travel, when a step has run off the end of what
+ * `buildPhotoQueue` (or a previous extend) could see (tags-002). The initial
  * queue only reflects whatever pages the window had already loaded when the
  * viewer opened — not necessarily the whole tag — so `nextIndex`/`prevIndex`
- * returning -1 here does not yet mean "end of tag", only "end of what's loaded
- * so far". Loads every remaining page once, rebuilds the compacted queue, and
- * relocates the currently-open item by identity so the cursor lands back on
- * the same picture rather than jumping.
+ * returning -1 here does not yet mean "end of tag", only "end of what's
+ * loaded so far".
  *
- * Idempotent: once the whole tag is loaded this is a cheap no-op (`ensurePages`
- * skips every already-loaded page; the rebuild finds nothing new to add), so
- * calling it again at a genuine tag boundary just re-confirms there is nothing
- * more — it does not loop or re-fetch.
+ * tags-002 fix-1 (Defect C): this used to load EVERY remaining page in one
+ * call (`ensurePages(tag, 0, tagRows.length, token)`), which on a
+ * 40,000-item tag is ~80 sequential `tag_items` round trips the first time a
+ * step runs off the loaded window — with nothing on screen to say why.
+ * Loading one page at a time, in `direction`, and stopping the moment the
+ * rebuilt queue actually reaches past the current index in that direction
+ * turns the common case (the very next page holds an image) into a single
+ * round trip. The loop is bounded by the tag's page COUNT, not by "found an
+ * image yet": a stretch of pure video in that direction holds that condition
+ * false forever, so only the page count can be trusted to end the loop —
+ * worst case it walks every remaining page, same as before, but that is now
+ * the exception rather than the rule.
+ *
+ * Preserves the identity-based relocation of `ui.photoIndex` after every
+ * page (not just once at the end): the queue is a filtered list, so its
+ * indices shift as each new page arrives.
+ *
+ * Idempotent: once nothing is left to load in `direction` this is a cheap
+ * no-op (the starting page is already past the tag's edge, so the loop body
+ * never runs), so calling it again at a genuine tag boundary just
+ * re-confirms there is nothing more.
  */
-async function extendPhotoQueueFromTag(): Promise<void> {
+async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
   if (extendingPhotoQueue) return extendingPhotoQueue;
   const tag = ui.galleryTag;
   if (!tag) return;
@@ -2291,19 +2311,40 @@ async function extendPhotoQueueFromTag(): Promise<void> {
   const imgTok = imgToken;
   const current = ui.photoQueue[ui.photoIndex];
   const run = (async () => {
-    await ensurePages(tag, 0, tagRows.length, token).catch(() => {});
-    if (galleryToken !== token || ui.galleryTag !== tag || imgToken !== imgTok) return;
-    const imageItems = tagRowsAsImages();
-    ui.photoQueue = imageItems.map((row): QueueItem => ({
-      path: row.path,
-      name: row.name,
-      archive: row.archive,
-    }));
-    if (current) {
-      const idx = imageItems.findIndex(
-        (row) => (row.archive || "") === (current.archive || "") && row.path === current.path,
-      );
-      if (idx >= 0) ui.photoIndex = idx;
+    const totalPages = Math.max(1, Math.ceil(tagRows.length / TAG_PAGE_SIZE));
+    // Start adjacent to whatever is already loaded, on the side facing
+    // `direction` — not unconditionally at page 0 / the last page, so a Prev
+    // extend does not first walk forward through pages a prior Next extend
+    // already fetched (and vice versa).
+    let page =
+      direction > 0
+        ? tagPagesLoaded.size > 0
+          ? Math.max(...tagPagesLoaded) + 1
+          : 0
+        : tagPagesLoaded.size > 0
+          ? Math.min(...tagPagesLoaded) - 1
+          : totalPages - 1;
+    for (let steps = 0; steps < totalPages && page >= 0 && page < totalPages; steps++, page += direction) {
+      const from = page * TAG_PAGE_SIZE;
+      await ensurePages(tag, from, from + 1, token).catch(() => {});
+      if (galleryToken !== token || ui.galleryTag !== tag || imgToken !== imgTok) return;
+      const imageItems = tagRowsAsImages();
+      ui.photoQueue = imageItems.map((row): QueueItem => ({
+        path: row.path,
+        name: row.name,
+        archive: row.archive,
+      }));
+      if (current) {
+        const idx = imageItems.findIndex(
+          (row) => (row.archive || "") === (current.archive || "") && row.path === current.path,
+        );
+        if (idx >= 0) ui.photoIndex = idx;
+      }
+      const probe =
+        direction > 0
+          ? nextIndex(ui.photoIndex, ui.photoQueue.length, false)
+          : prevIndex(ui.photoIndex, ui.photoQueue.length, false);
+      if (probe >= 0) return; // this page answered the question
     }
   })();
   extendingPhotoQueue = run;
@@ -2326,16 +2367,26 @@ function clearPhotoQueue(): void {
  *
  *  tags-002: in a tag view, running off the end of the CURRENT queue does not
  *  necessarily mean the tag itself has ended — it may only mean the page that
- *  far in has never been fetched (see `buildPhotoQueue`). Pull the rest of the
- *  tag in and retry once before accepting that as the real end. */
+ *  far in has never been fetched (see `buildPhotoQueue`). Pull more of the
+ *  tag in and retry once before accepting that as the real end.
+ *
+ *  tags-002 fix-1 (Defect B): declined outright while a previous press's
+ *  extend is still in flight, rather than computing this press's retry index
+ *  from `ui.photoIndex` before that extend has had a chance to move it — two
+ *  fast presses at the edge of an archive-backed tag (`stepPhoto` awaits
+ *  before writing the index) would otherwise both land on the very same
+ *  target, silently swallowing one of the two presses. That matches
+ *  `stepPhoto`'s own decline contract: the index does not move, so the next
+ *  press is simply this press, retried. */
 export function doNextPhoto(): void {
+  if (extendingPhotoQueue) return;
   const i = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
   if (i >= 0) {
     void stepPhoto(i);
     return;
   }
   if (ui.galleryTag) {
-    void extendPhotoQueueFromTag().then(() => {
+    void extendPhotoQueueFromTag(1).then(() => {
       const retry = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
       if (retry >= 0) void stepPhoto(retry);
     });
@@ -2343,13 +2394,14 @@ export function doNextPhoto(): void {
 }
 
 export function doPrevPhoto(): void {
+  if (extendingPhotoQueue) return;
   const i = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
   if (i >= 0) {
     void stepPhoto(i);
     return;
   }
   if (ui.galleryTag) {
-    void extendPhotoQueueFromTag().then(() => {
+    void extendPhotoQueueFromTag(-1).then(() => {
       const retry = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
       if (retry >= 0) void stepPhoto(retry);
     });
@@ -3842,7 +3894,10 @@ function currentTagTarget(): TagTarget | null {
     // is 0); once the window slides, an unoffset read would tag whatever landed
     // at that array position instead of the tile the user actually pointed at.
     const item = ui.galleryItems[ui.galleryIndex - ui.galleryWindowStart];
-    if (!item) return null;
+    // tags-002 fix-1: a pending tile has no real identity yet (its `path` is a
+    // synthetic "pending:N" marker) — decline rather than let the popover
+    // open against it.
+    if (!item || item.pending) return null;
     return { archive: item.archive, path: item.path, kind: item.kind, name: item.name };
   }
   return null;
@@ -4092,6 +4147,7 @@ async function applyWindow(tag: string, focus: number, token: number): Promise<v
         durationLabel: "",
         archive: "",
         missing: false,
+        pending: true,
       };
     }
     const key = tagItemKey(it.archive, it.path);
@@ -4460,7 +4516,13 @@ function enqueueThumb(index: number): void {
   // today (windowStart is 0); once the window slides, indexing without this offset
   // silently paints one tile's thumbnail onto another.
   const item = ui.galleryItems[index - ui.galleryWindowStart];
-  if (!item || item.thumbSrc) return;
+  // tags-002 fix-1: a pending tile has no real file yet — queuing it would
+  // eventually hand `convertFileSrc` a "pending:N" marker instead of a path.
+  // Once its page lands, applyWindow mints a real item under a DIFFERENT
+  // tagItemKey, so Gallery.svelte's keyed {#each} swaps in a fresh DOM node
+  // rather than patching this one — and that new node's own use:galleryTile
+  // mount re-observes it, enqueueing the real thumbnail then.
+  if (!item || item.thumbSrc || item.pending) return;
   thumbQueue.push(index);
   pumpThumbs();
 }
@@ -5072,7 +5134,9 @@ export function openGalleryItem(item: GalleryItem): void {
   // here rather than via a `disabled` attribute on the tile button, so the
   // tile stays focusable and the roving-tabindex grid keeps every index
   // reachable by keyboard.
-  if (item.missing) return;
+  // tags-002 fix-1: a pending tile (its page has not landed yet) is refused
+  // the same way — its `path` is a synthetic "pending:N" marker, not a file.
+  if (item.missing || item.pending) return;
   // ux-004: record which tile this was, so Back restores the cursor onto it.
   // `indexOf` is a position WITHIN `ui.galleryItems` (the window, once Task 12
   // lands) — offset by `galleryWindowStart` to land back on an absolute index,
