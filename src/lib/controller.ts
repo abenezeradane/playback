@@ -2256,24 +2256,35 @@ function tagRowsAsImages(): TaggedItem[] {
   );
 }
 
-/** Guards `extendPhotoQueueFromTag` against running twice concurrently — two
- *  fast Prev/Next presses landing before the first fetch resolves would
- *  otherwise both walk `ensurePages` over the same unfetched pages. tags-002
- *  fix-1 (Defect B): `doNextPhoto`/`doPrevPhoto` now check this themselves
- *  and decline a further press outright while it is set (see below), so in
- *  practice a second call can no longer reach the `if (extendingPhotoQueue)`
- *  line below at all — that line stays only as a defensive fallback. */
+/** Guards `extendPhotoQueueFromTag` against running twice concurrently within
+ *  the SAME viewing session — two fast Prev/Next presses landing before the
+ *  first fetch resolves would otherwise both walk `ensurePages` over the same
+ *  unfetched pages.
+ *
+ *  What this guard actually guarantees, as of tags-002 fix-3 (Defect A):
+ *  - `doNextPhoto`/`doPrevPhoto` decline a further press outright while an
+ *    extend for their OWN session (`extendingFor`, below) is in flight, so in
+ *    the common case a same-session second call never even reaches here.
+ *  - If one does reach here anyway, and it belongs to the SAME session as the
+ *    in-flight extend, this hands back the SAME promise rather than starting
+ *    a redundant walk over the pages the first call is already fetching.
+ *  - A call from a DIFFERENT session (a different tag opened, the viewer
+ *    closed and a new photo opened, the same tag reopened) is NOT declined
+ *    here: it falls through and starts its own extend. Fix-1's version of
+ *    this guard was unconditional, which relied on doNextPhoto/doPrevPhoto's
+ *    own gate being unconditional too — once fix-2 scoped that gate to the
+ *    session, a different-session call could reach this line while it still
+ *    unconditionally returned whichever promise was in flight, handing a NEW
+ *    session an ABANDONED session's promise and freezing it until that old
+ *    fetch settled. This guard has to be scoped for the same reason the
+ *    stepper gate is. */
 let extendingPhotoQueue: Promise<void> | null = null;
 /** Which viewing session the in-flight `extendingPhotoQueue` belongs to —
  *  `galleryToken`/`imgToken` as they stood when `run` (below) was minted.
- *  tags-002 fix-2 (Defect A): `extendingPhotoQueue` is only ever SET inside a
- *  tag view, but with nothing else checked, an extend abandoned by leaving
- *  that tag (backing out to a folder, opening an unrelated photo) still read
- *  as "in flight" to doNextPhoto/doPrevPhoto — freezing Prev/Next in whatever
- *  unrelated view the user opened next, until the abandoned fetch resolved.
- *  Scoped on the SET side alone is not scoped: the CHECK side must also
- *  confirm the in-flight extend is still the CURRENT session's before
- *  declining a step for it. */
+ *  Read by the stepper gate in doNextPhoto/doPrevPhoto AND by the entry guard
+ *  above: both must agree on what "the current session" means, or scoping one
+ *  and not the other just moves the same freeze to whichever side was left
+ *  unconditional (tags-002 fix-2 scoped the steppers; fix-3 scoped this). */
 let extendingFor: { gallery: number; img: number } | null = null;
 
 /**
@@ -2308,9 +2319,9 @@ let extendingFor: { gallery: number; img: number } | null = null;
  * re-confirms there is nothing more.
  */
 async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
-  if (extendingPhotoQueue) return extendingPhotoQueue;
-  const tag = ui.galleryTag;
-  if (!tag) return;
+  // Captured BEFORE the entry guard (tags-002 fix-3, Defect A) so the guard
+  // can tell "the same session re-entering" apart from "a different session
+  // falling through" — see the doc comment on extendingPhotoQueue above.
   const token = galleryToken;
   // Also captured: the viewer's OWN token, bumped by clearImageView (leaving
   // the viewer) independently of galleryToken (which only moves on a gallery
@@ -2320,33 +2331,47 @@ async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
   // makes the NEXT photo opened (in any tag, or none) skip buildPhotoQueue's
   // "already built" guard and show the wrong siblings.
   const imgTok = imgToken;
+  if (extendingPhotoQueue && extendingFor?.gallery === token && extendingFor?.img === imgTok) {
+    return extendingPhotoQueue;
+  }
+  const tag = ui.galleryTag;
+  if (!tag) return;
   const current = ui.photoQueue[ui.photoIndex];
   const run = (async () => {
     const totalPages = Math.max(1, Math.ceil(tagRows.length / TAG_PAGE_SIZE));
-    // Start adjacent to whatever is already loaded, on the side facing
-    // `direction` — not unconditionally at page 0 / the last page, so a Prev
-    // extend does not first walk forward through pages a prior Next extend
-    // already fetched (and vice versa).
+    // Start adjacent to whatever has already been ATTEMPTED — loaded OR
+    // failed — on the side facing `direction`, not unconditionally at page 0
+    // / the last page: a Prev extend must not first walk forward through
+    // pages a prior Next extend already fetched (and vice versa), and
+    // (tags-002 fix-3, Defect B) a press must not re-seed onto a page that
+    // already failed. That page cannot succeed on retry (the store didn't
+    // change), so recomputing the same starting page forever would wall the
+    // user off at that exact point for the rest of the session. Including
+    // `tagPagesFailed` here means the NEXT press starts past it instead. The
+    // rows inside a page that only ever failed are never loaded into
+    // `tagRows`, so they are skipped by the queue permanently — unavoidable,
+    // since there is nothing to show, but the flash below at least says so.
+    const attempted = new Set<number>([...tagPagesLoaded, ...tagPagesFailed]);
     let page =
       direction > 0
-        ? tagPagesLoaded.size > 0
-          ? Math.max(...tagPagesLoaded) + 1
+        ? attempted.size > 0
+          ? Math.max(...attempted) + 1
           : 0
-        : tagPagesLoaded.size > 0
-          ? Math.min(...tagPagesLoaded) - 1
+        : attempted.size > 0
+          ? Math.min(...attempted) - 1
           : totalPages - 1;
     // tags-002 fix-2 (Defect B): declared OUTSIDE the loop so it survives past
-    // whichever iteration breaks it, for the post-loop check below. A failed
-    // page is never marked loaded (tagPagesLoaded.add sits behind the
-    // successful response inside ensurePages), so leaving this unguarded would
-    // make the loop walk every remaining page on a persistent failure — and
-    // repeat that whole walk on every subsequent press, since nothing ever
-    // gets marked loaded to shrink it.
+    // whichever iteration breaks it, for the post-loop check below.
     let failed = false;
     for (let steps = 0; steps < totalPages && page >= 0 && page < totalPages; steps++, page += direction) {
       const from = page * TAG_PAGE_SIZE;
       await ensurePages(tag, from, from + 1, token).catch(() => {
         failed = true;
+        // Recorded even though `run`'s own staleness check (below) may
+        // discard this whole attempt: a stale session's page really did fail,
+        // and the store hasn't changed just because the user navigated away
+        // — a fresh extend over the same tag should not re-attempt it either.
+        tagPagesFailed.add(page);
       });
       // Staleness wins over failure: a session the user has already left must
       // still return SILENTLY, even if the abandoned fetch also failed — there
@@ -2382,8 +2407,14 @@ async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
   try {
     await run;
   } finally {
-    extendingPhotoQueue = null;
-    extendingFor = null;
+    // Clear only if this run still OWNS the shared slot (tags-002 fix-3,
+    // Defect A): once the entry guard above lets two different sessions run
+    // concurrently, an older session's `finally` firing after a newer one has
+    // already started must not null out the newer session's tracking.
+    if (extendingPhotoQueue === run) {
+      extendingPhotoQueue = null;
+      extendingFor = null;
+    }
   }
 }
 
@@ -2428,10 +2459,12 @@ export function doNextPhoto(): void {
     return;
   }
   if (ui.galleryTag) {
-    void extendPhotoQueueFromTag(1).then(() => {
-      const retry = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
-      if (retry >= 0) void stepPhoto(retry);
-    });
+    void extendPhotoQueueFromTag(1)
+      .then(() => {
+        const retry = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
+        if (retry >= 0) void stepPhoto(retry);
+      })
+      .catch(() => {});
   }
 }
 
@@ -2443,10 +2476,12 @@ export function doPrevPhoto(): void {
     return;
   }
   if (ui.galleryTag) {
-    void extendPhotoQueueFromTag(-1).then(() => {
-      const retry = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
-      if (retry >= 0) void stepPhoto(retry);
-    });
+    void extendPhotoQueueFromTag(-1)
+      .then(() => {
+        const retry = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
+        if (retry >= 0) void stepPhoto(retry);
+      })
+      .catch(() => {});
   }
 }
 
@@ -4104,6 +4139,19 @@ interface TaggedItem {
 let tagRows: (TaggedItem | undefined)[] = [];
 /** Pages already fetched, so scrolling back over one costs no round trip. */
 let tagPagesLoaded = new Set<number>();
+/** Pages a fetch attempt failed on — the `tag_items` IPC call for that page
+ *  rejecting (tags-002 fix-3, Defect B). NOT `authorizePageDirs`: that awaits
+ *  `authorizeMediaDir`, which swallows its own rejection unconditionally
+ *  (see its `.catch()`), so it can never be the source of a page failure
+ *  here — an unreachable directory's files come back `missing: true` on an
+ *  otherwise-successful page instead, and are already filtered out by
+ *  `tagRowsAsImages`. Tracked separately from `tagPagesLoaded` (a failed page
+ *  is never added there) so `extendPhotoQueueFromTag` can seed its next
+ *  starting page past one instead of recomputing the same doomed page on
+ *  every press. Reset alongside `tagPagesLoaded` wherever a tag is (re)opened
+ *  — see `openGalleryForTag` — so reopening the tag retries pages that failed
+ *  before. */
+let tagPagesFailed = new Set<number>();
 /** Tiles kept in the DOM at once. Bounded regardless of how large the tag is.
  *  `TAG_VIEW_CAP` (player-core.ts) stays exported and documented as the
  *  fallback this replaces — reverting is dropping this window and restoring
@@ -4255,6 +4303,7 @@ export async function openGalleryForTag(tag: string): Promise<void> {
     ui.galleryTagTotal = first.total;
     tagRows = new Array(first.total);
     tagPagesLoaded = new Set<number>();
+    tagPagesFailed = new Set<number>();
     first.items.forEach((it, i) => {
       tagRows[i] = it;
     });
