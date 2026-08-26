@@ -2339,26 +2339,21 @@ async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
   const current = ui.photoQueue[ui.photoIndex];
   const run = (async () => {
     const totalPages = Math.max(1, Math.ceil(tagRows.length / TAG_PAGE_SIZE));
-    // Start adjacent to whatever has already been ATTEMPTED — loaded OR
-    // failed — on the side facing `direction`, not unconditionally at page 0
-    // / the last page: a Prev extend must not first walk forward through
-    // pages a prior Next extend already fetched (and vice versa), and
-    // (tags-002 fix-3, Defect B) a press must not re-seed onto a page that
-    // already failed. That page cannot succeed on retry (the store didn't
-    // change), so recomputing the same starting page forever would wall the
-    // user off at that exact point for the rest of the session. Including
-    // `tagPagesFailed` here means the NEXT press starts past it instead. The
-    // rows inside a page that only ever failed are never loaded into
-    // `tagRows`, so they are skipped by the queue permanently — unavoidable,
-    // since there is nothing to show, but the flash below at least says so.
-    const attempted = new Set<number>([...tagPagesLoaded, ...tagPagesFailed]);
+    // Start adjacent to whatever has already been LOADED on the side facing
+    // `direction`, not unconditionally at page 0 / the last page: a Prev
+    // extend must not first walk forward through pages a prior Next extend
+    // already fetched (and vice versa). A page that failed is NOT seeded
+    // past here — it is not in `tagPagesLoaded` — so the next press starts
+    // at that same page again. That is deliberate: a transient failure (a
+    // momentary DB lock, an I/O blip) deserves a retry, and nothing here can
+    // tell a transient failure apart from a permanent one.
     let page =
       direction > 0
-        ? attempted.size > 0
-          ? Math.max(...attempted) + 1
+        ? tagPagesLoaded.size > 0
+          ? Math.max(...tagPagesLoaded) + 1
           : 0
-        : attempted.size > 0
-          ? Math.min(...attempted) - 1
+        : tagPagesLoaded.size > 0
+          ? Math.min(...tagPagesLoaded) - 1
           : totalPages - 1;
     // tags-002 fix-2 (Defect B): declared OUTSIDE the loop so it survives past
     // whichever iteration breaks it, for the post-loop check below.
@@ -2366,12 +2361,15 @@ async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
     for (let steps = 0; steps < totalPages && page >= 0 && page < totalPages; steps++, page += direction) {
       const from = page * TAG_PAGE_SIZE;
       await ensurePages(tag, from, from + 1, token).catch(() => {
+        // The walk stops on the first failure (checked below) rather than
+        // trying the rest of the tag's pages, so a broken store costs one
+        // round trip and one flash per press instead of a walk of the whole
+        // tag. Nothing is recorded past this call's own `failed` flag: the
+        // next press re-seeds from `tagPagesLoaded` (unchanged by a failure)
+        // and so retries this SAME page — a transient failure deserves the
+        // retry, and there is no way to tell one apart from a permanent
+        // failure from here.
         failed = true;
-        // Recorded even though `run`'s own staleness check (below) may
-        // discard this whole attempt: a stale session's page really did fail,
-        // and the store hasn't changed just because the user navigated away
-        // — a fresh extend over the same tag should not re-attempt it either.
-        tagPagesFailed.add(page);
       });
       // Staleness wins over failure: a session the user has already left must
       // still return SILENTLY, even if the abandoned fetch also failed — there
@@ -4139,19 +4137,6 @@ interface TaggedItem {
 let tagRows: (TaggedItem | undefined)[] = [];
 /** Pages already fetched, so scrolling back over one costs no round trip. */
 let tagPagesLoaded = new Set<number>();
-/** Pages a fetch attempt failed on — the `tag_items` IPC call for that page
- *  rejecting (tags-002 fix-3, Defect B). NOT `authorizePageDirs`: that awaits
- *  `authorizeMediaDir`, which swallows its own rejection unconditionally
- *  (see its `.catch()`), so it can never be the source of a page failure
- *  here — an unreachable directory's files come back `missing: true` on an
- *  otherwise-successful page instead, and are already filtered out by
- *  `tagRowsAsImages`. Tracked separately from `tagPagesLoaded` (a failed page
- *  is never added there) so `extendPhotoQueueFromTag` can seed its next
- *  starting page past one instead of recomputing the same doomed page on
- *  every press. Reset alongside `tagPagesLoaded` wherever a tag is (re)opened
- *  — see `openGalleryForTag` — so reopening the tag retries pages that failed
- *  before. */
-let tagPagesFailed = new Set<number>();
 /** Tiles kept in the DOM at once. Bounded regardless of how large the tag is.
  *  `TAG_VIEW_CAP` (player-core.ts) stays exported and documented as the
  *  fallback this replaces — reverting is dropping this window and restoring
@@ -4303,7 +4288,6 @@ export async function openGalleryForTag(tag: string): Promise<void> {
     ui.galleryTagTotal = first.total;
     tagRows = new Array(first.total);
     tagPagesLoaded = new Set<number>();
-    tagPagesFailed = new Set<number>();
     first.items.forEach((it, i) => {
       tagRows[i] = it;
     });
