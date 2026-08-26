@@ -2264,6 +2264,17 @@ function tagRowsAsImages(): TaggedItem[] {
  *  practice a second call can no longer reach the `if (extendingPhotoQueue)`
  *  line below at all — that line stays only as a defensive fallback. */
 let extendingPhotoQueue: Promise<void> | null = null;
+/** Which viewing session the in-flight `extendingPhotoQueue` belongs to —
+ *  `galleryToken`/`imgToken` as they stood when `run` (below) was minted.
+ *  tags-002 fix-2 (Defect A): `extendingPhotoQueue` is only ever SET inside a
+ *  tag view, but with nothing else checked, an extend abandoned by leaving
+ *  that tag (backing out to a folder, opening an unrelated photo) still read
+ *  as "in flight" to doNextPhoto/doPrevPhoto — freezing Prev/Next in whatever
+ *  unrelated view the user opened next, until the abandoned fetch resolved.
+ *  Scoped on the SET side alone is not scoped: the CHECK side must also
+ *  confirm the in-flight extend is still the CURRENT session's before
+ *  declining a step for it. */
+let extendingFor: { gallery: number; img: number } | null = null;
 
 /**
  * Pull ONE more not-yet-loaded page of the tag into the photo queue, in the
@@ -2324,10 +2335,24 @@ async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
         : tagPagesLoaded.size > 0
           ? Math.min(...tagPagesLoaded) - 1
           : totalPages - 1;
+    // tags-002 fix-2 (Defect B): declared OUTSIDE the loop so it survives past
+    // whichever iteration breaks it, for the post-loop check below. A failed
+    // page is never marked loaded (tagPagesLoaded.add sits behind the
+    // successful response inside ensurePages), so leaving this unguarded would
+    // make the loop walk every remaining page on a persistent failure — and
+    // repeat that whole walk on every subsequent press, since nothing ever
+    // gets marked loaded to shrink it.
+    let failed = false;
     for (let steps = 0; steps < totalPages && page >= 0 && page < totalPages; steps++, page += direction) {
       const from = page * TAG_PAGE_SIZE;
-      await ensurePages(tag, from, from + 1, token).catch(() => {});
+      await ensurePages(tag, from, from + 1, token).catch(() => {
+        failed = true;
+      });
+      // Staleness wins over failure: a session the user has already left must
+      // still return SILENTLY, even if the abandoned fetch also failed — there
+      // is nothing to tell them, they navigated away deliberately.
       if (galleryToken !== token || ui.galleryTag !== tag || imgToken !== imgTok) return;
+      if (failed) break;
       const imageItems = tagRowsAsImages();
       ui.photoQueue = imageItems.map((row): QueueItem => ({
         path: row.path,
@@ -2346,12 +2371,19 @@ async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
           : prevIndex(ui.photoIndex, ui.photoQueue.length, false);
       if (probe >= 0) return; // this page answered the question
     }
+    // A real fetch failure (not staleness — that returned above already) is
+    // the one case worth telling the user about: silently stopping here would
+    // leave Prev/Next looking dead with no way to tell "the tag ends here"
+    // from "this broke".
+    if (failed) flashImageAction("Could not load more of this tag.");
   })();
   extendingPhotoQueue = run;
+  extendingFor = { gallery: token, img: imgTok };
   try {
     await run;
   } finally {
     extendingPhotoQueue = null;
+    extendingFor = null;
   }
 }
 
@@ -2377,9 +2409,19 @@ function clearPhotoQueue(): void {
  *  before writing the index) would otherwise both land on the very same
  *  target, silently swallowing one of the two presses. That matches
  *  `stepPhoto`'s own decline contract: the index does not move, so the next
- *  press is simply this press, retried. */
+ *  press is simply this press, retried.
+ *
+ *  tags-002 fix-2 (Defect A): that decline is scoped to `extendingFor`, the
+ *  session the in-flight extend actually belongs to — NOT to "any extend is
+ *  in flight anywhere". `extendingPhotoQueue` is only ever set from inside a
+ *  tag view, but nothing cleared it on leaving one, so an extend abandoned in
+ *  a tag the user has since left (back out to a folder, open an unrelated
+ *  photo) used to freeze Prev/Next in that unrelated view until the
+ *  abandoned fetch resolved. Checking `extendingFor` against the CURRENT
+ *  `galleryToken`/`imgToken` means only a press still inside that same
+ *  session gets declined. */
 export function doNextPhoto(): void {
-  if (extendingPhotoQueue) return;
+  if (extendingPhotoQueue && extendingFor?.gallery === galleryToken && extendingFor?.img === imgToken) return;
   const i = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
   if (i >= 0) {
     void stepPhoto(i);
@@ -2394,7 +2436,7 @@ export function doNextPhoto(): void {
 }
 
 export function doPrevPhoto(): void {
-  if (extendingPhotoQueue) return;
+  if (extendingPhotoQueue && extendingFor?.gallery === galleryToken && extendingFor?.img === imgToken) return;
   const i = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
   if (i >= 0) {
     void stepPhoto(i);
@@ -4549,7 +4591,13 @@ async function renderThumb(index: number): Promise<void> {
   // tags-002: `index` is ABSOLUTE (passed down from enqueueThumb, itself sourced
   // from data-gallery-index) — see the comment on enqueueThumb.
   const item = ui.galleryItems[index - ui.galleryWindowStart];
-  if (!item || item.thumbSrc) return;
+  // tags-002 fix-2 (Defect C): mirrors enqueueThumb's own `|| item.pending`
+  // bail (see the comment there) rather than relying on the fact that, today,
+  // every caller path that could reach a pending item was already filtered by
+  // enqueueThumb first. That cross-function ordering is real but implicit —
+  // guarding it here too means this one function stays safe to reason about
+  // on its own.
+  if (!item || item.thumbSrc || item.pending) return;
   // Observability: which tile indices actually reach a render. Comparing the
   // count of these against distinct indices is how a duplicate-enqueue is caught.
   perfMark("thumb.render", String(index));
