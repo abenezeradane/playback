@@ -3725,7 +3725,11 @@ function currentTagTarget(): TagTarget | null {
     // real entry point sets the cursor first: the arrow keys move it, and the
     // tile's own tag button sets it before opening the popover.
     if (ui.galleryIndex < 0) return null;
-    const item = ui.galleryItems[ui.galleryIndex];
+    // tags-002: ui.galleryIndex is ABSOLUTE (see enqueueThumb) — offset it back to
+    // a position within the windowed ui.galleryItems. A no-op today (windowStart
+    // is 0); once the window slides, an unoffset read would tag whatever landed
+    // at that array position instead of the tile the user actually pointed at.
+    const item = ui.galleryItems[ui.galleryIndex - ui.galleryWindowStart];
     if (!item) return null;
     return { archive: item.archive, path: item.path, kind: item.kind, name: item.name };
   }
@@ -4243,7 +4247,11 @@ export function galleryTile(node: HTMLElement, index: number): { destroy(): void
 }
 
 function enqueueThumb(index: number): void {
-  const item = ui.galleryItems[index];
+  // tags-002: `index` is ABSOLUTE (it comes from data-gallery-index), while
+  // ui.galleryItems is the windowed slice starting at galleryWindowStart. A no-op
+  // today (windowStart is 0); once the window slides, indexing without this offset
+  // silently paints one tile's thumbnail onto another.
+  const item = ui.galleryItems[index - ui.galleryWindowStart];
   if (!item || item.thumbSrc) return;
   thumbQueue.push(index);
   pumpThumbs();
@@ -4268,7 +4276,9 @@ function pumpThumbs(): void {
  */
 async function renderThumb(index: number): Promise<void> {
   const token = galleryToken;
-  const item = ui.galleryItems[index];
+  // tags-002: `index` is ABSOLUTE (passed down from enqueueThumb, itself sourced
+  // from data-gallery-index) — see the comment on enqueueThumb.
+  const item = ui.galleryItems[index - ui.galleryWindowStart];
   if (!item || item.thumbSrc) return;
   // Observability: which tile indices actually reach a render. Comparing the
   // count of these against distinct indices is how a duplicate-enqueue is caught.
@@ -4359,7 +4369,9 @@ async function renderTilePoster(
     () => null,
   );
   if (token !== galleryToken) return null;
-  const current = ui.galleryItems[index];
+  // tags-002: `index` is ABSOLUTE (passed down from renderThumb) — see the
+  // comment on enqueueThumb.
+  const current = ui.galleryItems[index - ui.galleryWindowStart];
   if (!current || current.path !== item.path) return null; // list changed under us
   // A folder or archive never falls back to its own path (neither is an image),
   // and neither does an archive ENTRY, whose path is an inner path rather than a
@@ -4386,7 +4398,9 @@ async function renderTileDuration(
   }).catch(() => null);
   if (token !== galleryToken) return;
   if (seconds === null || !Number.isFinite(seconds) || seconds <= 0) return;
-  const current = ui.galleryItems[index];
+  // tags-002: `index` is ABSOLUTE (passed down from renderThumb) — see the
+  // comment on enqueueThumb.
+  const current = ui.galleryItems[index - ui.galleryWindowStart];
   if (!current || current.path !== item.path) return; // list changed under us
   current.durationLabel = formatTime(seconds);
   // Observability: the badge is text, which a screenshot oracle cannot read — this

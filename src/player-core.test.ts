@@ -2316,4 +2316,19 @@ describe("windowBounds", () => {
   it("treats an unset cursor as the top of the list", () => {
     expect(windowBounds(40000, -1, 1500)).toEqual({ start: 0, end: 1500 });
   });
+
+  it("rounds the half-window down on an odd window size", () => {
+    // 1501 is odd: floor gives 750, ceil would give 751 and shift the window.
+    expect(windowBounds(40000, 20000, 1501)).toEqual({ start: 19250, end: 20751 });
+  });
+
+  it("clamps at the end when only one row of slack exists", () => {
+    // total - windowSize is 1, so an off-by-one in the clamp cannot hide.
+    expect(windowBounds(1501, 1500, 1500)).toEqual({ start: 1, end: 1501 });
+  });
+
+  it("starts sliding exactly when the focus clears the half-window", () => {
+    expect(windowBounds(40000, 750, 1500)).toEqual({ start: 0, end: 1500 });
+    expect(windowBounds(40000, 751, 1500)).toEqual({ start: 1, end: 1501 });
+  });
 });

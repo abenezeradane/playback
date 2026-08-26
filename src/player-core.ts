@@ -1208,7 +1208,7 @@ export function windowBounds(
 ): { start: number; end: number } {
   if (total <= windowSize) return { start: 0, end: total };
   const half = Math.floor(windowSize / 2);
-  const wanted = Math.max(0, focus < 0 ? 0 : focus - half);
+  const wanted = Math.max(0, focus - half);
   const start = Math.min(wanted, total - windowSize);
   return { start, end: start + windowSize };
 }
