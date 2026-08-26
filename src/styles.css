@@ -2632,6 +2632,17 @@ body {
   gap: 14px;
 }
 
+/* tags-002: stands in for the tag members ABOVE/BELOW the sliding window's
+   loaded slice, so the scroll container's scrollbar reflects the whole tag's
+   length rather than just what's currently in the DOM (Gallery.svelte sizes
+   the height inline). Spans every column so it occupies whole phantom rows
+   instead of sitting inside one, and takes no pointer/keyboard interaction —
+   it is bookkeeping, not a tile. */
+.gallery__spacer {
+  grid-column: 1 / -1;
+  pointer-events: none;
+}
+
 .gallery-tile {
   position: relative;
   aspect-ratio: 1 / 1;

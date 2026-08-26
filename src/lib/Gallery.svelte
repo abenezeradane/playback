@@ -6,6 +6,9 @@
     galleryTile,
     openTagPopover,
     pruneMissingFromTag,
+    galleryColumns,
+    onGalleryScroll,
+    tagItemKey,
   } from "./controller";
   import { galleryMeta, tagMeta } from "../player-core";
   import type { GalleryItem } from "./state.svelte";
@@ -40,6 +43,111 @@
     const base = tagMeta(total);
     if (!capped) return base;
     return `${base} · showing the first ${shown.toLocaleString("en-US")} of ${total.toLocaleString("en-US")}`;
+  }
+
+  // --- Sliding window: scroll-driven re-centring + scrollbar spacers (tags-002 Step 2/3) ---
+  //
+  // A tag view keeps only a TAG_WINDOW-tile slice of the tag in the DOM
+  // (controller.ts's applyWindow); everything below exists so the scrollbar
+  // and the keyboard/scroll experience still read as one continuous grid the
+  // size of the whole tag, not the size of whatever's currently loaded.
+
+  // Row height (tile height + row gap) and column count are DOM measurements,
+  // not reactive state, so they are cached rather than re-read on every scroll
+  // tick — the cache is invalidated when a fresh tag opens (a new grid can lay
+  // out at a different tile size) or the window resizes (a responsive grid
+  // changes both its column count and, via `aspect-ratio: 1/1`, its tile
+  // height along with it).
+  let cachedRowHeight = 0;
+  let measuredForTag = "";
+
+  function invalidateRowHeightCache(): void {
+    cachedRowHeight = 0;
+  }
+
+  function currentRowHeight(): number {
+    if (ui.galleryTag !== measuredForTag) {
+      measuredForTag = ui.galleryTag;
+      cachedRowHeight = 0;
+    }
+    if (cachedRowHeight > 0) return cachedRowHeight;
+    const grid = document.getElementById("gallery-grid");
+    const tile = grid?.querySelector(".gallery-tile") as HTMLElement | null;
+    if (!grid || !tile) return 0;
+    const gap = parseFloat(getComputedStyle(grid).rowGap || "0") || 0;
+    cachedRowHeight = tile.offsetHeight + gap;
+    return cachedRowHeight;
+  }
+
+  let spacerTop = $state(0);
+  let spacerBottom = $state(0);
+
+  /** tags-002 Step 3: without these two spacers the scrollbar reports only the
+   *  loaded window's height rather than the whole tag's, and scrolling snaps
+   *  every time the window re-centres. Both are grid-column-spanning (styles.css
+   *  `.gallery__spacer`) so they occupy whole phantom rows rather than sitting
+   *  inside one column. */
+  function recomputeSpacers(): void {
+    if (!ui.galleryTag) {
+      spacerTop = 0;
+      spacerBottom = 0;
+      return;
+    }
+    const rh = currentRowHeight();
+    const cols = galleryColumns();
+    if (rh <= 0 || cols <= 0) return;
+    const start = ui.galleryWindowStart;
+    const end = start + ui.galleryItems.length;
+    const total = ui.galleryTagTotal;
+    spacerTop = Math.ceil(start / cols) * rh;
+    spacerBottom = Math.ceil(Math.max(0, total - end) / cols) * rh;
+  }
+
+  // Reruns whenever the window moves (galleryWindowStart/galleryItems.length),
+  // the tag's own total changes, or the tag itself changes — every reactive
+  // read inside recomputeSpacers (called synchronously here) is what drives
+  // that, including the ones made through currentRowHeight/galleryColumns'
+  // callers below.
+  $effect(() => {
+    recomputeSpacers();
+  });
+
+  $effect(() => {
+    const onResize = (): void => {
+      invalidateRowHeightCache();
+      recomputeSpacers();
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  });
+
+  let scrollScheduled = false;
+
+  /** tags-002 Step 2: computes the row scrolled to from scrollTop/rowHeight and
+   *  slides the window (via controller's `onGalleryScroll`) when that row
+   *  leaves the middle third of the currently loaded window. rAF-throttled so
+   *  a fast scroll/wheel gesture — which can fire many "scroll" events per
+   *  frame — costs one recentre check per frame, not one per event. A no-op
+   *  outside a tag view: every other gallery is loaded in full already, so
+   *  there is no window to slide. */
+  function onGridScroll(): void {
+    if (!ui.galleryTag || scrollScheduled) return;
+    scrollScheduled = true;
+    requestAnimationFrame(() => {
+      scrollScheduled = false;
+      const body = document.querySelector(".gallery__body") as HTMLElement | null;
+      const rh = currentRowHeight();
+      const cols = galleryColumns();
+      if (!body || rh <= 0 || cols <= 0) return;
+      const row = Math.floor(body.scrollTop / rh);
+      const focus = row * cols;
+      const windowStart = ui.galleryWindowStart;
+      const windowSize = ui.galleryItems.length;
+      const third = windowSize / 3;
+      if (focus < windowStart + third || focus >= windowStart + windowSize - third) {
+        onGalleryScroll(focus);
+      }
+    });
   }
 </script>
 
@@ -101,7 +209,7 @@
     {/if}
   </header>
 
-  <div class="gallery__body">
+  <div class="gallery__body" onscroll={onGridScroll}>
     {#if ui.galleryLoading}
       <div class="gallery__status" role="status" aria-live="polite">
         <div class="prepping__spinner" aria-hidden="true"></div>
@@ -116,7 +224,14 @@
       </div>
     {:else}
       <div id="gallery-grid" class="gallery__grid">
-        {#each ui.galleryItems as item, i (item.path)}
+        {#if ui.galleryTag && spacerTop > 0}
+          <!-- tags-002 Step 3: stands in for every tag member ABOVE the loaded
+               window so the scrollbar reflects the tag's full length, not just
+               what's currently in the DOM. Grid-column-spanning (styles.css)
+               so it occupies whole phantom rows. -->
+          <div class="gallery__spacer" style="height: {spacerTop}px" aria-hidden="true"></div>
+        {/if}
+        {#each ui.galleryItems as item, i (tagItemKey(item.archive, item.path))}
           <!-- ux-004: `galleryTile` renders this tile's thumbnail only once it
                nears the viewport, and the roving tabindex makes the whole grid a
                single Tab stop (arrows move within it) so a folder of thousands is
@@ -216,6 +331,11 @@
             <span class="gallery-tile__name">{item.name}</span>
           </button>
         {/each}
+        {#if ui.galleryTag && spacerBottom > 0}
+          <!-- tags-002 Step 3: the same stand-in as the top spacer, for every
+               tag member BELOW the loaded window. -->
+          <div class="gallery__spacer" style="height: {spacerBottom}px" aria-hidden="true"></div>
+        {/if}
       </div>
     {/if}
   </div>

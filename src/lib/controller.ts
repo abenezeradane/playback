@@ -124,8 +124,9 @@ import {
   cleanTagDraft,
   tagIdentity,
   TAG_PAGE_SIZE,
-  TAG_VIEW_CAP,
+  pageForIndex,
   pageRange,
+  windowBounds,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -1022,6 +1023,12 @@ function galleryNavEntry(): NavEntry {
   const tag = ui.galleryTag;
   const tagTotal = ui.galleryTagTotal;
   const tagCapped = ui.galleryTagCapped;
+  // tags-002: the absolute index of items[0]. `cursor` below is an ABSOLUTE
+  // index too, and every read of the window (`ui.galleryItems[index -
+  // ui.galleryWindowStart]`) is relative to it — restoring the cursor without
+  // this snaps the window back to 0 while the cursor stays wherever the user
+  // had scrolled to, so every one of those reads lands at the wrong offset.
+  const windowStart = ui.galleryWindowStart;
   const scrollTop = document.querySelector(".gallery__body")?.scrollTop ?? 0;
   const cursor = ui.galleryIndex; // ux-004: come back to the tile you opened
   return {
@@ -1042,6 +1049,7 @@ function galleryNavEntry(): NavEntry {
       ui.galleryTag = tag;
       ui.galleryTagTotal = tagTotal;
       ui.galleryTagCapped = tagCapped;
+      ui.galleryWindowStart = windowStart;
       ui.galleryCrumbs = crumbs;
       ui.galleryError = "";
       ui.galleryLoading = false;
@@ -2187,10 +2195,10 @@ export function openQueueItem(item: QueueItem): void {
  * discarded.
  */
 async function buildPhotoQueue(openedPath: string): Promise<void> {
-  // tags-002: inside a tag view the siblings are the TAG's members, not the
-  // folder's — stepping right must not silently leave the tag. While the view is
-  // capped this list is the tag (up to the cap); when the sliding window lands,
-  // this becomes a paged cursor that fetches the neighbouring page at an edge.
+  // tags-002: the siblings are the whole TAG, which lives in tagRows — NOT in
+  // ui.galleryItems, which is only the slice currently in the DOM. Reading the
+  // window here would make Prev/Next stop at the window's edge and look like a
+  // tag that ends early.
   if (ui.galleryTag) {
     // tags-002: in a tag view the queue IS the tag and its membership does not
     // change while browsing, so it is built ONCE on entry and the index is then
@@ -2202,16 +2210,27 @@ async function buildPhotoQueue(openedPath: string): Promise<void> {
     // The tag branch is fully synchronous (no await above this point), so a newer
     // open could never supersede this call mid-flight — unlike the async fetch
     // below, there is no window in which `currentPath` could have moved on.
-    const imageItems = ui.galleryItems.filter(
-      (item) => item.kind === "image" && !item.missing,
-    );
-    const paths = imageItems.map((item) => item.path);
-    ui.photoQueue = imageItems.map((item): QueueItem => ({
-      path: item.path,
-      name: item.name,
-      archive: item.archive,
+    //
+    // tagRows is sparse: a page the sliding window has never covered is still
+    // `undefined` here, so this initial build only reflects whatever is loaded
+    // right now (typically whatever the user scrolled through to reach this
+    // tile). That is not necessarily the whole tag — doNextPhoto/doPrevPhoto
+    // pull in the rest on demand (extendPhotoQueueFromTag) when a step runs off
+    // the end of what this saw, rather than dead-ending at a page nobody has
+    // fetched yet.
+    const imageItems = tagRowsAsImages();
+    const paths = imageItems.map((row) => row.path);
+    ui.photoQueue = imageItems.map((row): QueueItem => ({
+      path: row.path,
+      name: row.name,
+      archive: row.archive,
     }));
-    const opened = ui.galleryIndex >= 0 ? ui.galleryItems[ui.galleryIndex] : undefined;
+    // tags-002: resolved against tagRows, NOT ui.galleryItems — galleryIndex is
+    // absolute and ui.galleryItems is only the window since Task 12, so an
+    // identity lookup against the window would be off by windowStart and
+    // silently fall through to the ambiguous path-string match below, which
+    // cannot tell the same inner path apart in two different archives.
+    const opened = ui.galleryIndex >= 0 ? tagRows[ui.galleryIndex] : undefined;
     const byIdentity = opened ? imageItems.indexOf(opened) : -1;
     ui.photoIndex = byIdentity >= 0 ? byIdentity : resolveQueueIndex(paths, openedPath);
     return;
@@ -2227,6 +2246,74 @@ async function buildPhotoQueue(openedPath: string): Promise<void> {
   ui.photoIndex = resolveQueueIndex(sorted, openedPath);
 }
 
+/** The images tagRows currently knows about (loaded pages only), in tag order,
+ *  skipping folders/videos/archives-as-tiles that are not steppable photos and
+ *  files flagged missing (tags-002). Shared by the initial photo-queue build
+ *  and `extendPhotoQueueFromTag`'s rebuild once more pages have loaded. */
+function tagRowsAsImages(): TaggedItem[] {
+  return tagRows.filter(
+    (row): row is TaggedItem => !!row && row.kind === "image" && !row.missing,
+  );
+}
+
+/** Guards `extendPhotoQueueFromTag` against running twice concurrently — two
+ *  fast Prev/Next presses landing before the first fetch resolves would
+ *  otherwise both walk `ensurePages` over the same unfetched pages. */
+let extendingPhotoQueue: Promise<void> | null = null;
+
+/**
+ * Pull the rest of a tag into the photo queue when a step has run off the end
+ * of what `buildPhotoQueue` could see at open time (tags-002). The initial
+ * queue only reflects whatever pages the window had already loaded when the
+ * viewer opened — not necessarily the whole tag — so `nextIndex`/`prevIndex`
+ * returning -1 here does not yet mean "end of tag", only "end of what's loaded
+ * so far". Loads every remaining page once, rebuilds the compacted queue, and
+ * relocates the currently-open item by identity so the cursor lands back on
+ * the same picture rather than jumping.
+ *
+ * Idempotent: once the whole tag is loaded this is a cheap no-op (`ensurePages`
+ * skips every already-loaded page; the rebuild finds nothing new to add), so
+ * calling it again at a genuine tag boundary just re-confirms there is nothing
+ * more — it does not loop or re-fetch.
+ */
+async function extendPhotoQueueFromTag(): Promise<void> {
+  if (extendingPhotoQueue) return extendingPhotoQueue;
+  const tag = ui.galleryTag;
+  if (!tag) return;
+  const token = galleryToken;
+  // Also captured: the viewer's OWN token, bumped by clearImageView (leaving
+  // the viewer) independently of galleryToken (which only moves on a gallery
+  // navigation). Without this, backing out of the viewer entirely while a
+  // fetch was in flight lets this resolve later and repopulate ui.photoQueue
+  // after clearPhotoQueue emptied it — leaving a stale, non-empty queue that
+  // makes the NEXT photo opened (in any tag, or none) skip buildPhotoQueue's
+  // "already built" guard and show the wrong siblings.
+  const imgTok = imgToken;
+  const current = ui.photoQueue[ui.photoIndex];
+  const run = (async () => {
+    await ensurePages(tag, 0, tagRows.length, token).catch(() => {});
+    if (galleryToken !== token || ui.galleryTag !== tag || imgToken !== imgTok) return;
+    const imageItems = tagRowsAsImages();
+    ui.photoQueue = imageItems.map((row): QueueItem => ({
+      path: row.path,
+      name: row.name,
+      archive: row.archive,
+    }));
+    if (current) {
+      const idx = imageItems.findIndex(
+        (row) => (row.archive || "") === (current.archive || "") && row.path === current.path,
+      );
+      if (idx >= 0) ui.photoIndex = idx;
+    }
+  })();
+  extendingPhotoQueue = run;
+  try {
+    await run;
+  } finally {
+    extendingPhotoQueue = null;
+  }
+}
+
 /** Drop the photo queue (leaving the image viewer). */
 function clearPhotoQueue(): void {
   ui.photoQueue = [];
@@ -2235,13 +2322,38 @@ function clearPhotoQueue(): void {
 
 /** Prev/Next controls in the image viewer (buttons + Left/Right arrows): step
  *  through the sibling photo queue. Clamps at the ends (no wrap — there is no
- *  "repeat all" concept for a photo browse). */
+ *  "repeat all" concept for a photo browse).
+ *
+ *  tags-002: in a tag view, running off the end of the CURRENT queue does not
+ *  necessarily mean the tag itself has ended — it may only mean the page that
+ *  far in has never been fetched (see `buildPhotoQueue`). Pull the rest of the
+ *  tag in and retry once before accepting that as the real end. */
 export function doNextPhoto(): void {
-  void stepPhoto(nextIndex(ui.photoIndex, ui.photoQueue.length, false));
+  const i = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
+  if (i >= 0) {
+    void stepPhoto(i);
+    return;
+  }
+  if (ui.galleryTag) {
+    void extendPhotoQueueFromTag().then(() => {
+      const retry = nextIndex(ui.photoIndex, ui.photoQueue.length, false);
+      if (retry >= 0) void stepPhoto(retry);
+    });
+  }
 }
 
 export function doPrevPhoto(): void {
-  void stepPhoto(prevIndex(ui.photoIndex, ui.photoQueue.length, false));
+  const i = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
+  if (i >= 0) {
+    void stepPhoto(i);
+    return;
+  }
+  if (ui.galleryTag) {
+    void extendPhotoQueueFromTag().then(() => {
+      const retry = prevIndex(ui.photoIndex, ui.photoQueue.length, false);
+      if (retry >= 0) void stepPhoto(retry);
+    });
+  }
 }
 
 /** Open one photo-queue entry and, unless the open was merely DECLINED, make it
@@ -3888,6 +4000,119 @@ interface TaggedItem {
   missing: boolean;
 }
 
+/** The tag's members by ABSOLUTE index, sparse: only fetched pages are filled.
+ *  This is the tag itself; `ui.galleryItems` is only the slice currently in the
+ *  DOM. Anything that needs "the whole tag" (sibling navigation, the window)
+ *  reads this, never `ui.galleryItems` (tags-002). */
+let tagRows: (TaggedItem | undefined)[] = [];
+/** Pages already fetched, so scrolling back over one costs no round trip. */
+let tagPagesLoaded = new Set<number>();
+/** Tiles kept in the DOM at once. Bounded regardless of how large the tag is.
+ *  `TAG_VIEW_CAP` (player-core.ts) stays exported and documented as the
+ *  fallback this replaces — reverting is dropping this window and restoring
+ *  the capped loop `openGalleryForTag` used to run. */
+const TAG_WINDOW = 1500;
+
+/** Fetch any page overlapping the absolute range [from, to) that is not loaded. */
+async function ensurePages(tag: string, from: number, to: number, token: number): Promise<void> {
+  const firstPage = pageForIndex(from, TAG_PAGE_SIZE);
+  const lastPage = pageForIndex(Math.max(from, to - 1), TAG_PAGE_SIZE);
+  for (let page = firstPage; page <= lastPage; page++) {
+    if (tagPagesLoaded.has(page)) continue;
+    const { offset, limit } = pageRange(page, TAG_PAGE_SIZE, tagRows.length);
+    if (limit <= 0) continue;
+    const res = await tauriInvoke<{ total: number; offset: number; items: TaggedItem[] }>(
+      "tag_items",
+      { tag, limit, offset },
+    );
+    if (galleryToken !== token) return;
+    res.items.forEach((it, i) => {
+      tagRows[offset + i] = it;
+    });
+    tagPagesLoaded.add(page);
+    await authorizePageDirs(res.items);
+    if (galleryToken !== token) return;
+  }
+}
+
+/** Separates an item's archive from its path when the two are joined into one
+ *  identity key (tags-002): a plain concatenation of archive+path could
+ *  collide (archive "ab" + path "c" reads the same as archive "a" + path
+ *  "bc"). Built with fromCharCode (U+0001, a control character that cannot
+ *  appear in a real path) rather than a source-level unicode escape, which
+ *  this editing toolchain was observed to mangle when typed directly. */
+const TAG_ID_SEP = String.fromCharCode(1);
+
+/** The identity key for a tag row or gallery tile: which archive it came from
+ *  (or "" for a real on-disk file) plus its path. Used to carry a rendered
+ *  thumbnail across a window slide (applyWindow) and to key the grid's
+ *  each-block in Gallery.svelte on the item itself rather than its position. */
+export function tagItemKey(archive: string, path: string): string {
+  return archive + TAG_ID_SEP + path;
+}
+
+/** Move the DOM window so it covers `focus`, fetching whatever it now needs. */
+async function applyWindow(tag: string, focus: number, token: number): Promise<void> {
+  const { start, end } = windowBounds(tagRows.length, focus, TAG_WINDOW);
+  await ensurePages(tag, start, end, token);
+  if (galleryToken !== token) return;
+  // applyWindow can run many times over one tag session (every scroll
+  // re-centre, every keyboard step past the edge), and always minting fresh
+  // GalleryItem objects would blank thumbSrc/durationLabel for a tile that
+  // stays in the window across the call: its DOM node survives (the keyed
+  // {#each} in Gallery.svelte matches it by identity), but the thumbnail
+  // pipeline's IntersectionObserver is one-shot and never re-fires for a node
+  // that was never unmounted -- so a reset thumbSrc would never get repainted.
+  // Carrying forward the existing object for an identity already on screen
+  // keeps that one-shot contract honest instead of fighting it.
+  const carried = new Map<string, GalleryItem>();
+  for (const it of ui.galleryItems) carried.set(tagItemKey(it.archive, it.path), it);
+  ui.galleryWindowStart = start;
+  // Built with an explicit loop rather than `tagRows.slice(start, end).map(...)`:
+  // `tagRows` is a genuinely sparse array (`new Array(total)`, holes at every
+  // index `ensurePages` has never written), and both `.slice` and `.map` follow
+  // the spec's hole-skipping rule — `.map` never even INVOKES its callback for
+  // an index that was never assigned, so the "undefined -> placeholder" branch
+  // below could never fire on a real hole; the slot would just vanish from the
+  // result instead (a Svelte `{#each}` gap, or a shifted/miscounted window).
+  // Pushing into a plain array first makes every slot a real (if `undefined`)
+  // element, so `.map` runs its callback for all of them.
+  const windowSlice: (TaggedItem | undefined)[] = [];
+  for (let idx = start; idx < end; idx++) windowSlice.push(tagRows[idx]);
+  ui.galleryItems = windowSlice.map((it, i) => {
+    if (!it) {
+      // A row whose page is still in flight: render a placeholder rather than
+      // blocking the whole window on one request. It fills in when the page
+      // lands and the window is re-applied.
+      return {
+        path: "pending:" + (start + i),
+        name: "",
+        kind: "image" as const,
+        thumbSrc: "",
+        durationLabel: "",
+        archive: "",
+        missing: false,
+      };
+    }
+    const key = tagItemKey(it.archive, it.path);
+    const prior = carried.get(key);
+    if (prior) {
+      prior.missing = it.missing; // the only field a re-fetch could change
+      return prior;
+    }
+    return {
+      path: it.path,
+      name: it.name,
+      kind: it.kind,
+      thumbSrc: "",
+      durationLabel: "",
+      archive: it.archive,
+      missing: it.missing,
+    };
+  });
+  perfMark("tag.window", start + "-" + end + "/" + tagRows.length);
+}
+
 /**
  * Open the gallery grid scoped to a TAG (tags-002).
  *
@@ -3895,9 +4120,9 @@ interface TaggedItem {
  * the tiles, the thumbnail pipeline, the keyboard cursor, Back — a tag view is
  * just a grid with a different source, which is why this needs no second grid.
  *
- * Members are fetched a page at a time and, for now, stopped at TAG_VIEW_CAP.
- * The header says so when it happens; the sliding window that removes the cap
- * arrives later in this plan.
+ * Members live in `tagRows`, sized to the store's own total and filled a page
+ * at a time. Only a `TAG_WINDOW`-tile slice around the focus ever reaches the
+ * DOM (`applyWindow`), so the grid's size no longer depends on the tag's.
  */
 export async function openGalleryForTag(tag: string): Promise<void> {
   perfMark("tag.open", tag);
@@ -3909,7 +4134,8 @@ export async function openGalleryForTag(tag: string): Promise<void> {
   ui.galleryInner = "";
   ui.galleryTag = tag;
   ui.galleryTagTotal = 0;
-  ui.galleryTagCapped = false;
+  ui.galleryTagCapped = false; // tags-002: the sliding window replaced the cap
+  ui.galleryWindowStart = 0;
   ui.galleryCrumbs = [];
   ui.galleryError = "";
   ui.galleryLoading = true;
@@ -3920,33 +4146,22 @@ export async function openGalleryForTag(tag: string): Promise<void> {
   ui.view = "gallery";
   document.title = `${tag} — Playback`;
   try {
+    // One call learns `total` (needed to size tagRows before anything can be
+    // paged against it) and happens to be page 0, so it is recorded as loaded
+    // rather than re-fetched a moment later by applyWindow's own ensurePages.
     const first = await tauriInvoke<{ total: number; offset: number; items: TaggedItem[] }>(
       "tag_items",
       { tag, limit: TAG_PAGE_SIZE, offset: 0 },
     );
     if (galleryToken !== token) return; // superseded by a newer open
     ui.galleryTagTotal = first.total;
-
-    const collected: TaggedItem[] = [...first.items];
-    // Pull further pages up to the cap. The store's ordering is total and
-    // stable, so paging cannot repeat or skip a row.
-    const wanted = Math.min(first.total, TAG_VIEW_CAP);
-    let page = 1;
-    while (collected.length < wanted) {
-      const { offset, limit } = pageRange(page, TAG_PAGE_SIZE, wanted);
-      if (limit <= 0) break;
-      const next = await tauriInvoke<{ total: number; offset: number; items: TaggedItem[] }>(
-        "tag_items",
-        { tag, limit, offset },
-      );
-      if (galleryToken !== token) return;
-      if (next.items.length === 0) break;
-      collected.push(...next.items);
-      page++;
-    }
-    ui.galleryTagCapped = first.total > collected.length;
-
-    await authorizePageDirs(collected);
+    tagRows = new Array(first.total);
+    tagPagesLoaded = new Set<number>();
+    first.items.forEach((it, i) => {
+      tagRows[i] = it;
+    });
+    tagPagesLoaded.add(0);
+    await authorizePageDirs(first.items);
     if (galleryToken !== token) return;
 
     ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
@@ -3954,16 +4169,9 @@ export async function openGalleryForTag(tag: string): Promise<void> {
     // pipeline BEFORE the items land, or tiles that already mounted never
     // request a thumbnail and shimmer forever.
     startGalleryThumbs(token);
-    ui.galleryItems = collected.map((i) => ({
-      path: i.path,
-      name: i.name,
-      kind: i.kind,
-      thumbSrc: "",
-      durationLabel: "",
-      archive: i.archive,
-      missing: i.missing,
-    }));
-    perfMark("tag.items", `${collected.length}/${first.total}`);
+    await applyWindow(tag, 0, token);
+    if (galleryToken !== token) return;
+    perfMark("tag.items", String(first.total));
     if (first.total === 0) ui.galleryError = "Nothing carries this tag yet.";
   } catch (err) {
     if (galleryToken === token) ui.galleryError = `Could not open this tag: ${String(err)}`;
@@ -4410,10 +4618,17 @@ async function renderTileDuration(
 
 // --- Grid keyboard navigation (ux-004) -------------------------------------
 
-/** Columns currently laid out, derived from the DOM (the grid is responsive). */
-function galleryColumns(): number {
+/** Columns currently laid out, derived from the DOM (the grid is responsive).
+ *  Only counts actual TILES — the sliding window's spacer rows (tags-002 Step
+ *  3) are full-width grid children too, and folding one into this offsetTop
+ *  scan undercounts to 1 the moment the window is not sitting at the very top
+ *  (the spacer's own offsetTop is 0, so the real first tile right after it
+ *  reads as a new row and the scan stops after one column). Exported so
+ *  Gallery.svelte's scroll handler can size a scroll step in absolute rows
+ *  without re-deriving this. */
+export function galleryColumns(): number {
   const grid = document.getElementById("gallery-grid");
-  const tiles = grid?.children;
+  const tiles = grid?.querySelectorAll(":scope > .gallery-tile");
   if (!tiles || tiles.length === 0) return 1;
   const firstTop = (tiles[0] as HTMLElement).offsetTop;
   let cols = 0;
@@ -4424,22 +4639,51 @@ function galleryColumns(): number {
   return Math.max(1, cols);
 }
 
+/** The count arrow-key clamping and End navigate against: the whole TAG when
+ *  one is open, since `ui.galleryItems` is only the sliding window in the DOM
+ *  (tags-002) — clamping against the window would stop the cursor at the
+ *  window's edge and End would land on the last LOADED tile rather than the
+ *  tag's actual last one. `ui.galleryTagTotal` is safe to read for this only
+ *  because `openGalleryForTag` no longer caps: it used to be able to exceed
+ *  what was loaded, which is exactly why this waited for the window to land.
+ *  Every other gallery loads in full, so `ui.galleryItems.length` already IS
+ *  its total. */
+function galleryTotalCount(): number {
+  return ui.galleryTag ? ui.galleryTagTotal : ui.galleryItems.length;
+}
+
 /** Move the grid cursor, scroll it into view, and give it real DOM focus (so the
- *  ux-003 focus ring shows and Enter/Space activate it natively). */
+ *  ux-003 focus ring shows and Enter/Space activate it natively). In a tag view
+ *  this first slides the window to cover `index` (tags-002 Step 2) — keyboard
+ *  navigation past the loaded window's edge must pull the next page in rather
+ *  than focusing a tile that is not in the DOM yet. */
 function focusGalleryTile(index: number): void {
-  const count = ui.galleryItems.length;
+  const count = galleryTotalCount();
   if (count === 0) return;
   const next = Math.max(0, Math.min(count - 1, index));
-  ui.galleryIndex = next;
-  void tick().then(() => {
-    const grid = document.getElementById("gallery-grid");
-    // Absolute index -> DOM position, converted here at the point of use rather
-    // than assuming child position n is item n: with a window (Task 12) and
-    // spacer divs, it is not (tags-002).
-    const el = grid?.querySelector(`[data-gallery-index="${next}"]`) as HTMLElement | null;
-    el?.focus({ preventScroll: true });
-    el?.scrollIntoView({ block: "nearest" });
-  });
+  const tag = ui.galleryTag;
+  const token = galleryToken;
+  const place = (): void => {
+    if (token !== galleryToken) return; // superseded while the window loaded
+    ui.galleryIndex = next;
+    void tick().then(() => {
+      const grid = document.getElementById("gallery-grid");
+      // Absolute index -> DOM position, converted here at the point of use rather
+      // than assuming child position n is item n: with a window (Task 12) and
+      // spacer divs, it is not (tags-002).
+      const el = grid?.querySelector(`[data-gallery-index="${next}"]`) as HTMLElement | null;
+      el?.focus({ preventScroll: true });
+      el?.scrollIntoView({ block: "nearest" });
+    });
+  };
+  if (tag) {
+    // A page fetch failing here must not leave an unhandled rejection sitting
+    // on a keypress — better to leave the cursor where it was than to break
+    // the next arrow key too.
+    void applyWindow(tag, next, token).then(place).catch(() => {});
+  } else {
+    place();
+  }
 }
 
 /** Arrow/Home/End navigation inside the grid. Returns true when handled. */
@@ -4464,7 +4708,8 @@ function handleGalleryKey(e: KeyboardEvent): boolean {
       focusGalleryTile(0);
       return true;
     case "End":
-      focusGalleryTile(ui.galleryItems.length - 1);
+      // tags-002: the real total, not the window's length — see galleryTotalCount.
+      focusGalleryTile(galleryTotalCount() - 1);
       return true;
     case "#":
       openTagPopover();
@@ -4472,6 +4717,17 @@ function handleGalleryKey(e: KeyboardEvent): boolean {
     default:
       return false;
   }
+}
+
+/** Called by the grid's scroll handler (Gallery.svelte Step 2) when the row
+ *  scrolled to leaves the middle third of the currently loaded window
+ *  (tags-002). A no-op outside a tag view — only a tag view has a window to
+ *  slide; every other gallery is loaded in full already. */
+export function onGalleryScroll(focusIndex: number): void {
+  if (!ui.galleryTag) return;
+  // A page fetch failing mid-scroll must not surface as an unhandled
+  // rejection — the window simply stays put until the next scroll retries it.
+  void applyWindow(ui.galleryTag, focusIndex, galleryToken).catch(() => {});
 }
 
 /** Open the Gallery grid for the folder the CURRENT photo lives in (the viewer's
@@ -4549,6 +4805,14 @@ export async function openGalleryForFolder(
   ui.galleryTag = "";
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
+  // tags-002: a folder view is never windowed — every tile it renders IS the
+  // gallery, so its absolute indices start at 0. Without this reset, leaving a
+  // tag scrolled deep in (a non-zero windowStart) for a tagged FOLDER tile
+  // would carry that stale offset into this session: Gallery.svelte's tiles
+  // would carry `data-gallery-index` values starting at the stale offset while
+  // focusGalleryTile/the roving tabindex assume indices start at 0, so no tile
+  // would ever match and keyboard navigation would silently stop working.
+  ui.galleryWindowStart = 0;
   ui.galleryCrumbs = opts.crumbs ?? [label];
   ui.galleryError = "";
   ui.galleryLoading = true;
@@ -4612,6 +4876,10 @@ export async function openArchiveGallery(
   ui.galleryTag = "";
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
+  // tags-002: see the matching reset in openGalleryForFolder — an archive
+  // level is never windowed either, so a stale non-zero windowStart carried
+  // over from a tag session would break keyboard focus the same way.
+  ui.galleryWindowStart = 0;
   ui.galleryCrumbs = opts.crumbs ?? [basename(archive)];
   ui.galleryError = "";
   ui.galleryLoading = true;
