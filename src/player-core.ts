@@ -1175,8 +1175,12 @@ export function tagIdentity(
  *  waits, small enough that one page's missing-file stat stays cheap. */
 export const TAG_PAGE_SIZE = 500;
 
-/** The most tiles the tag view puts in the DOM before the sliding window takes
- *  over (tags-002). Until then this is a hard cap, and the header says so. */
+/** The hard cap the tag view used to put on how many tiles it would ever put
+ *  in the DOM, before the sliding window (Task 12) replaced it — the window
+ *  has no such ceiling, so `ui.galleryTagCapped` is never set true anywhere
+ *  today and the header never shows a cap notice. Retained, unused, as the
+ *  documented fallback: reverting to this cap is dropping the window, not a
+ *  rewrite. Do not delete this or `galleryTagCapped` on that account. */
 export const TAG_VIEW_CAP = 2000;
 
 /** Which page holds an absolute index. A negative index (the grid's cursor

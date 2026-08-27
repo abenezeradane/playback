@@ -994,6 +994,7 @@ function resetNav(): void {
   ui.galleryTag = "";
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
+  disarmPrune(); // tags-002 fix-wave: a fresh journey leaves any armed prune behind too
 }
 
 /** Record where the CURRENT view should return to, before navigating forward. */
@@ -3965,9 +3966,9 @@ function currentTagTarget(): TagTarget | null {
     // tile's own tag button sets it before opening the popover.
     if (ui.galleryIndex < 0) return null;
     // tags-002: ui.galleryIndex is ABSOLUTE (see enqueueThumb) — offset it back to
-    // a position within the windowed ui.galleryItems. A no-op today (windowStart
-    // is 0); once the window slides, an unoffset read would tag whatever landed
-    // at that array position instead of the tile the user actually pointed at.
+    // a position within the windowed ui.galleryItems. Load-bearing now that the
+    // window (Task 12) slides: an unoffset read would tag whatever landed at
+    // that array position instead of the tile the user actually pointed at.
     const item = ui.galleryItems[ui.galleryIndex - ui.galleryWindowStart];
     // tags-002 fix-1: a pending tile has no real identity yet (its `path` is a
     // synthetic "pending:N" marker) — decline rather than let the popover
@@ -4266,6 +4267,7 @@ export async function openGalleryForTag(tag: string): Promise<void> {
   ui.galleryTag = tag;
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false; // tags-002: the sliding window replaced the cap
+  disarmPrune(); // tags-002 fix-wave: opening a tag, even this one afresh, is a new count
   ui.galleryWindowStart = 0;
   ui.galleryCrumbs = [];
   ui.galleryError = "";
@@ -4326,17 +4328,58 @@ function flashGalleryAction(text: string): void {
   }, 1400);
 }
 
+/** How long the prune button stays armed after a first press before it
+ *  disarms itself (tags-002 fix-wave). Mirrors `flashGalleryAction`'s own
+ *  timer rather than inventing a second pattern for the same idea. */
+const PRUNE_ARM_MS = 5000;
+let galleryPruneTimer: number | undefined;
+
+/** Disarm the prune button's two-step confirmation, wherever the count it
+ *  captured could go stale: its own timeout, or the gallery moving on to a
+ *  different tag, a folder, an archive, or a fresh journey entirely (tags-002
+ *  fix-wave). A count that outlives what it was counted against is no longer
+ *  a real confirmation — see the call sites next to the matching resets of
+ *  `galleryTag`/`galleryTagTotal`/`galleryTagCapped`. */
+function disarmPrune(): void {
+  ui.galleryPrunePending = 0;
+  window.clearTimeout(galleryPruneTimer);
+  galleryPruneTimer = undefined;
+}
+
 /**
  * Remove the members of the current tag whose files are gone (tags-002).
  *
- * Two calls on purpose: the first counts without changing anything, so the
- * confirmation can state a real number, and the second acts only if the user
- * agrees. Tags are never removed as a side effect of browsing — a file on an
- * unplugged drive comes back when the drive does.
+ * A two-press button, not a dialog: this codebase has no modal pattern, and
+ * `window.confirm` does not work in this WebView2 build — it returns `true`
+ * synchronously with nothing shown on screen, so a single press would remove
+ * tag entries with no chance to cancel. The FIRST press only counts (nothing
+ * is removed) and arms `ui.galleryPrunePending` with the real number, which
+ * Gallery.svelte surfaces on the button itself; the SECOND press, while
+ * armed, is what actually applies it. Tags are never removed as a side
+ * effect of browsing — a file on an unplugged drive comes back when the
+ * drive does.
  */
 export async function pruneMissingFromTag(): Promise<void> {
   const tag = ui.galleryTag;
   if (!tag) return;
+
+  if (ui.galleryPrunePending > 0) {
+    // Second press: apply against the count the first press already showed.
+    const removed = await tauriInvoke<number>("tag_prune_missing", { tag, apply: true }).catch(
+      () => -1,
+    );
+    disarmPrune();
+    if (removed < 0) {
+      ui.galleryError = "Could not remove the missing files from this tag.";
+      return;
+    }
+    perfMark("tag.prune.applied", String(removed));
+    await openGalleryForTag(tag); // reload so the grid matches the store
+    return;
+  }
+
+  // First press: count without changing anything, so the confirmation can
+  // state a real number.
   const count = await tauriInvoke<number>("tag_prune_missing", { tag, apply: false }).catch(
     () => -1,
   );
@@ -4349,20 +4392,13 @@ export async function pruneMissingFromTag(): Promise<void> {
     flashGalleryAction("Nothing is missing from this tag.");
     return;
   }
-  const ok = window.confirm(
-    `${count} tagged ${count === 1 ? "item is" : "items are"} no longer on disk.\n\n` +
-      `Remove ${count === 1 ? "it" : "them"} from "${tag}"? The files themselves are not touched.`,
+  ui.galleryPrunePending = count;
+  flashGalleryAction(
+    `${count} tagged ${count === 1 ? "item is" : "items are"} no longer on disk. ` +
+      `Press again to remove ${count === 1 ? "it" : "them"} from "${tag}".`,
   );
-  if (!ok) return;
-  const removed = await tauriInvoke<number>("tag_prune_missing", { tag, apply: true }).catch(
-    () => -1,
-  );
-  if (removed < 0) {
-    ui.galleryError = "Could not remove the missing files from this tag.";
-    return;
-  }
-  perfMark("tag.prune.applied", String(removed));
-  await openGalleryForTag(tag); // reload so the grid matches the store
+  window.clearTimeout(galleryPruneTimer);
+  galleryPruneTimer = window.setTimeout(disarmPrune, PRUNE_ARM_MS);
 }
 
 /**
@@ -4587,8 +4623,8 @@ export function galleryTile(node: HTMLElement, index: number): { destroy(): void
 
 function enqueueThumb(index: number): void {
   // tags-002: `index` is ABSOLUTE (it comes from data-gallery-index), while
-  // ui.galleryItems is the windowed slice starting at galleryWindowStart. A no-op
-  // today (windowStart is 0); once the window slides, indexing without this offset
+  // ui.galleryItems is the windowed slice starting at galleryWindowStart. Load-
+  // bearing now that the window (Task 12) slides: indexing without this offset
   // silently paints one tile's thumbnail onto another.
   const item = ui.galleryItems[index - ui.galleryWindowStart];
   // tags-002 fix-1: a pending tile has no real file yet — queuing it would
@@ -4948,6 +4984,7 @@ export async function openGalleryForFolder(
   ui.galleryTag = "";
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
+  disarmPrune(); // tags-002 fix-wave: leaving the tag for a folder leaves any armed prune too
   // tags-002: a folder view is never windowed — every tile it renders IS the
   // gallery, so its absolute indices start at 0. Without this reset, leaving a
   // tag scrolled deep in (a non-zero windowStart) for a tagged FOLDER tile
@@ -5019,6 +5056,7 @@ export async function openArchiveGallery(
   ui.galleryTag = "";
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
+  disarmPrune(); // tags-002 fix-wave: same as openGalleryForFolder — leaving the tag
   // tags-002: see the matching reset in openGalleryForFolder — an archive
   // level is never windowed either, so a stale non-zero windowStart carried
   // over from a tag session would break keyboard focus the same way.
@@ -5219,9 +5257,9 @@ export function openGalleryItem(item: GalleryItem): void {
   // the same way — its `path` is a synthetic "pending:N" marker, not a file.
   if (item.missing || item.pending) return;
   // ux-004: record which tile this was, so Back restores the cursor onto it.
-  // `indexOf` is a position WITHIN `ui.galleryItems` (the window, once Task 12
-  // lands) — offset by `galleryWindowStart` to land back on an absolute index,
-  // same as everywhere else the cursor is written (tags-002).
+  // `indexOf` is a position WITHIN `ui.galleryItems` (the window, Task 12) —
+  // offset by `galleryWindowStart` to land back on an absolute index, same as
+  // everywhere else the cursor is written (tags-002).
   const index = ui.galleryItems.indexOf(item);
   if (index >= 0) ui.galleryIndex = ui.galleryWindowStart + index;
   // ux-001: remember the grid (items + scroll + cursor) so Back returns to it in

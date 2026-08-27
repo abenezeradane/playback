@@ -45,6 +45,33 @@
     return `${base} · showing the first ${shown.toLocaleString("en-US")} of ${total.toLocaleString("en-US")}`;
   }
 
+  /**
+   * The prune button's accessible name (tags-002 fix-wave). Unarmed, it just
+   * names the action. Armed — `ui.galleryPrunePending` holds the count the
+   * first press found — it says so and what a second press does, which is
+   * the button's only visible sign that it is waiting for confirmation: the
+   * `.gallery__flash` toast that announced the count fades after 1.4s, but
+   * the button stays armed for several seconds longer. `.gallery__flash`
+   * already carries `role="status"`, so that toast reaches a screen reader
+   * on its own; this text is what a screen reader gets for the button
+   * itself, both while the toast is showing and after it has faded.
+   */
+  function pruneButtonText(pending: number): { title: string; label: string } {
+    if (pending === 0) {
+      return {
+        title: "Remove missing items from this tag",
+        label: "Remove missing items from this tag — the files themselves are not deleted",
+      };
+    }
+    const noun = pending === 1 ? "item" : "items";
+    const pronoun = pending === 1 ? "it" : "them";
+    return {
+      title: `Press again to remove ${pending} missing ${noun}`,
+      label: `${pending} missing ${noun} found — press again to remove ${pronoun} from this tag; the files themselves are not deleted`,
+    };
+  }
+  const pruneText = $derived(pruneButtonText(ui.galleryPrunePending));
+
   // --- Sliding window: scroll-driven re-centring + scrollbar spacers (tags-002 Step 2/3) ---
   //
   // A tag view keeps only a TAG_WINDOW-tile slice of the tag in the DOM
@@ -195,13 +222,19 @@
     {#if ui.galleryTag}
       <!-- tags-002: pruning counts before it deletes (pruneMissingFromTag makes
            two calls on purpose) and only ever removes the TAG, never the file —
-           a file on an unplugged drive comes back when the drive does. -->
+           a file on an unplugged drive comes back when the drive does.
+           tags-002 fix-wave: this is now a two-press confirmation, not a
+           `window.confirm` (which shows no dialog at all in this WebView2
+           build — see controller.ts). The first press counts and arms
+           `ui.galleryPrunePending`; the title/aria-label below change to name
+           that count, and only a second press while armed actually removes
+           anything. -->
       <button
         id="gallery-prune"
         class="glass-btn"
         type="button"
-        title="Remove missing items from this tag"
-        aria-label="Remove missing items from this tag — the files themselves are not deleted"
+        title={pruneText.title}
+        aria-label={pruneText.label}
         onclick={() => void pruneMissingFromTag()}
       >
         <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m18.84 12.25 1.72-1.71h-.02a5.004 5.004 0 0 0-.12-7.07 5.006 5.006 0 0 0-6.95 0l-1.72 1.71" /><path d="m5.17 11.75-1.71 1.71a5.004 5.004 0 0 0 .12 7.07 5.006 5.006 0 0 0 6.95 0l1.71-1.71" /><line x1="8" x2="8" y1="2" y2="5" /><line x1="2" x2="5" y1="8" y2="8" /><line x1="16" x2="16" y1="19" y2="22" /><line x1="19" x2="22" y1="16" y2="16" /></svg>
@@ -319,9 +352,9 @@
               onclick={(e) => {
                 e.stopPropagation();
                 // tags-002: `i` is a position within `ui.galleryItems` (the
-                // window, once Task 12 lands) — same conversion as every other
-                // cursor write in this file/controller.ts, so this one does not
-                // regress silently when that window lands.
+                // window, Task 12) — same conversion as every other cursor
+                // write in this file/controller.ts, so a tag view scrolled
+                // deep in still tags the tile the user actually clicked.
                 ui.galleryIndex = ui.galleryWindowStart + i;
                 openTagPopover();
               }}

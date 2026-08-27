@@ -308,6 +308,16 @@ export const ui = $state({
   // nothing here renders that one and the value would linger until some later
   // photo surfaced it out of context.
   galleryFlash: "",
+  // tags-002: the prune button's two-step confirmation. 0 = not armed, so a
+  // press only counts what's missing and shows the number. N = the count the
+  // FIRST press found and is now awaiting a second, confirming press to
+  // actually remove; that second press is what applies it. Never persisted
+  // across a different tag or a different view — see the resets alongside
+  // `galleryTag` in `resetNav`, `openGalleryForTag`, `openGalleryForFolder`,
+  // and `openArchiveGallery` — nor left armed indefinitely (pruneMissingFromTag
+  // also arms a short timeout, the same way `flashGalleryAction` times out its
+  // own message).
+  galleryPrunePending: 0,
   // gallery-002: the folder path the grid is currently showing, and the trail of
   // folder names from wherever this gallery journey started down to it — the
   // header's breadcrumb, so a nested sub-gallery says where it sits.
@@ -328,8 +338,7 @@ export const ui = $state({
   // populates the whole list, so this stays 0 for them; only the tag view's
   // sliding window (Task 12) moves it. Kept here rather than local to that
   // window so the conversion of the grid's cursor/thumbnail sites to absolute
-  // indices (Task 11) is a no-op today and needs no further change once the
-  // window lands.
+  // indices (Task 11) needed no further change once the window landed.
   galleryWindowStart: 0,
 
   // --- Livestream · Unavailable (frame 04b) ---
