@@ -644,6 +644,12 @@ pub(crate) fn tag_page(
 ///
 /// Only the named tag is touched. An item carried by another tag keeps its row —
 /// the row is deleted only when the prune took its LAST tag.
+///
+/// Test-only: production uses the two-phase `missing_ids`/`delete_tag_members`
+/// split below (it doesn't hold the DB lock while statting files). This stays as
+/// the reference implementation a parity test compares that split against, on an
+/// independent store, to prove the split preserves items still held by another tag.
+#[cfg(test)]
 pub(crate) fn prune_missing(conn: &Connection, tag: &str, apply: bool) -> Result<u32, String> {
     let (_, folded) = fold_tag(tag)?;
     let mut stmt = conn
