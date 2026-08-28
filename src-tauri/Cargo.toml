@@ -1,6 +1,6 @@
 [package]
 name = "playback"
-version = "0.62.0"
+version = "0.63.0"
 description = "A fully featured video player built with Tauri 2.0"
 authors = ["Playback"]
 edition = "2021"
@@ -50,6 +50,16 @@ kamadak-exif = "0.6"
 # statement lives in tags.rs — tauri-plugin-sql is deliberately NOT used, because
 # it would hand the WebView an arbitrary-SQL bridge.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# perf-008: a still photo's thumbnail is decoded and downscaled IN PROCESS
+# rather than by spawning the 99 MB ffmpeg sidecar once per picture. Measured on
+# a 600-photo folder, that spawn cost ~60 ms a call at four concurrent — 33.9 s
+# of native work and 600 process spawns — which is what made browsing a large
+# gallery slow the whole app down. Default features are OFF deliberately: they
+# pull in codecs a photo gallery never shows (exr/hdr/dds/tga/pnm/qoi/tiff) and
+# this profile is opt-level = "s". AVIF is NOT enabled — its decoder wants a C
+# toolchain (dav1d) — so an AVIF still takes the ffmpeg path, as does any file
+# this crate declines to decode.
+image = { version = "0.25.6", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico"] }
 
 [target.'cfg(windows)'.dependencies]
 # Child-window z-order management for the mpv wid embed (push mpv's child HWND

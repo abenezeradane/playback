@@ -1176,6 +1176,172 @@ fn ffmpeg_thumb_args(
     args
 }
 
+// --- perf-008: the in-process still-image thumbnailer -----------------------
+//
+// Everything below exists so a photo tile does not cost an ffmpeg process. The
+// ffmpeg path above still owns every video, and still catches anything this one
+// cannot read, so a tile degrades to the old cost rather than breaking.
+
+/// Still formats decoded in process. A subset of `GALLERY_IMAGE_EXTENSIONS`:
+/// AVIF is missing because its decoder needs a C toolchain the build does not
+/// carry, so an AVIF photo keeps taking the ffmpeg path. `apng` is here because
+/// the PNG decoder reads an APNG's default image, which is the still poster a
+/// tile wants anyway.
+const NATIVE_THUMB_EXTENSIONS: &[&str] =
+    &["jpg", "jpeg", "png", "apng", "gif", "webp", "bmp", "ico"];
+
+/// True when `path`'s extension is one the in-process decoder handles
+/// (case-insensitive). Pure + unit-tested.
+fn has_native_thumb_ext(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| NATIVE_THUMB_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// JPEG quality the thumbnails are written at. `-q:v 4`, what the ffmpeg path
+/// asks mjpeg for, lands in this neighbourhood; a tile is ~200 px on screen, so
+/// anything higher is bytes nobody sees.
+const THUMB_JPEG_QUALITY: u8 = 85;
+
+/// The pixel size a thumbnail gets: fit INSIDE a `max_px` box, keep the aspect
+/// ratio, and never upscale a source already smaller than the box. Mirrors the
+/// ffmpeg expression in `ffmpeg_thumb_args`
+/// (`scale='min(max,iw)':'min(max,ih)':force_original_aspect_ratio=decrease`)
+/// so a tile is the same size whichever path rendered it. Pure + unit-tested.
+fn thumb_fit_dimensions(w: u32, h: u32, max_px: u32) -> (u32, u32) {
+    if w == 0 || h == 0 {
+        return (w.max(1), h.max(1));
+    }
+    // Already inside the box: left exactly alone. ffmpeg's `min(max,iw)` does the
+    // same, and a tile showing a 90 px sprite blown up to 480 would be worse than
+    // the sprite.
+    if w <= max_px && h <= max_px {
+        return (w, h);
+    }
+    let scale = f64::min(max_px as f64 / w as f64, max_px as f64 / h as f64);
+    // `.max(1)`: an extreme panorama's short axis rounds to zero otherwise, and
+    // no encoder accepts a zero-pixel side.
+    (
+        ((w as f64 * scale).round() as u32).max(1),
+        ((h as f64 * scale).round() as u32).max(1),
+    )
+}
+
+/// Turn a decoded image the way its EXIF Orientation says it should be seen.
+///
+/// The ffmpeg path autorotates (verified directly against the bundled sidecar: a
+/// 400x200 source tagged Orientation=6 comes out 200x400), so this one must too
+/// — otherwise a tile would face a different way depending on which decoder
+/// happened to render it, and every portrait phone photo in a folder would lie
+/// on its side. Anything outside 2..=8, including a missing or zero tag, is
+/// "as stored" rather than a rotation guessed at.
+fn apply_exif_orientation(img: image::DynamicImage, orientation: u16) -> image::DynamicImage {
+    match orientation {
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => img,
+    }
+}
+
+/// The EXIF Orientation of a still, or 1 ("as stored") when it carries none and
+/// whenever the block cannot be read. Only the first `EXIF_SCAN_BYTES` are
+/// pulled in: Exif lives at the front of a file, and the decode below already
+/// streams the picture itself, so this must not drag a large photo through
+/// memory a second time.
+fn exif_orientation(src: &Path) -> u16 {
+    let Ok(mut file) = fs::File::open(src) else {
+        return 1;
+    };
+    let mut head = Vec::new();
+    if std::io::Read::take(&mut file, EXIF_SCAN_BYTES)
+        .read_to_end(&mut head)
+        .is_err()
+    {
+        return 1;
+    }
+    let mut cursor = std::io::Cursor::new(&head);
+    let Ok(reader) = exif::Reader::new().read_from_container(&mut cursor) else {
+        return 1;
+    };
+    reader
+        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+        .and_then(|v| u16::try_from(v).ok())
+        .unwrap_or(1)
+}
+
+/// Decode, orient, downscale and re-encode one still image without leaving the
+/// process. Errors (an unreadable file, a format the crate declines, a codec
+/// this build did not enable) are the caller's cue to fall back to ffmpeg.
+///
+/// A failure never leaves `dst` behind. A half-written file would be
+/// indistinguishable from a good one to the cache-hit check in `media_thumbnail`,
+/// so the tile would show a corrupt thumbnail forever rather than retrying.
+fn native_still_thumbnail(src: &Path, dst: &Path, max_px: u32) -> Result<(), String> {
+    match render_still_thumbnail(src, dst, max_px) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(dst);
+            Err(e)
+        }
+    }
+}
+
+fn render_still_thumbnail(src: &Path, dst: &Path, max_px: u32) -> Result<(), String> {
+    // `ImageReader` carries `image::Limits::default()`, which caps one decode's
+    // allocation at 512 MiB, and `decode()` enforces it. That cap is load-bearing
+    // now that this runs IN PROCESS rather than in an ffmpeg child: a decompression
+    // bomb — or simply a photograph far larger than any camera makes — errors here
+    // and falls back to the sidecar, where an over-allocation costs one tile
+    // instead of the whole app. Do not swap this for `Limits::no_limits()`.
+    let decoded = image::ImageReader::open(src)
+        .map_err(|e| format!("thumbnail open failed: {e}"))?
+        // The extension is only a hint — a .jpg that is really a PNG still
+        // decodes, the same way ffmpeg probes rather than trusting the name.
+        .with_guessed_format()
+        .map_err(|e| format!("thumbnail format probe failed: {e}"))?
+        .decode()
+        .map_err(|e| format!("thumbnail decode failed: {e}"))?;
+
+    let oriented = apply_exif_orientation(decoded, exif_orientation(src));
+    let (w, h) = thumb_fit_dimensions(oriented.width(), oriented.height(), max_px);
+
+    // JPEG carries no alpha, so a PNG/WebP cutout is flattened to RGB rather
+    // than refused. The ffmpeg path's yuvj420p conversion does the same. This
+    // runs BEFORE the resample so the scaler walks three channels instead of
+    // four, and `into_rgb8` is a move rather than a copy for the RGB8 image a
+    // photograph already decodes to.
+    let source = oriented.into_rgb8();
+
+    // `imageops::thumbnail`, not `resize_exact`: it is an exact box average,
+    // which is the right kernel for the 4x-25x reductions a tile actually asks
+    // for, and it is the difference between beating the ffmpeg path and losing
+    // to it. Measured on this machine, 6000x4000 -> 480x320: decode 35 ms, then
+    // resize_exact(Triangle) 91 ms against thumbnail's 43 ms — with ffmpeg's
+    // whole spawn-and-render costing 98 ms, the windowed filter alone spent
+    // more than the process it was replacing. The antialiasing this still owes
+    // is pinned by a test; do not "optimise" it to Nearest.
+    let scaled = if (w, h) == (source.width(), source.height()) {
+        source
+    } else {
+        image::imageops::thumbnail(&source, w, h)
+    };
+    let rgb = image::DynamicImage::ImageRgb8(scaled);
+    let file = fs::File::create(dst).map_err(|e| format!("thumbnail create failed: {e}"))?;
+    let mut out = std::io::BufWriter::new(file);
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, THUMB_JPEG_QUALITY)
+        .encode_image(&rgb)
+        .map_err(|e| format!("thumbnail encode failed: {e}"))?;
+    std::io::Write::flush(&mut out).map_err(|e| format!("thumbnail flush failed: {e}"))?;
+    Ok(())
+}
+
 /// Render (or serve from cache) a small thumbnail for one image OR video,
 /// returning the cached file's path. The frontend feeds that path to
 /// `convertFileSrc`, so a tile loads a ~50 KB JPEG instead of the original.
@@ -1215,6 +1381,33 @@ async fn media_thumbnail(
     }
 
     let is_video = has_queue_video_ext(&src);
+
+    // perf-008: a still photo never needs a process. Spawning the ffmpeg sidecar
+    // cost ~60 ms a picture — four at a time, 33.9 s of native work and 600
+    // spawns for a 600-photo folder — and that load, not the grid, is what made
+    // scrolling a large gallery drag the whole app down. Decoding in process is
+    // roughly an order of magnitude cheaper. `spawn_blocking` because the decode
+    // is CPU-bound and the async runtime is also carrying every other IPC call.
+    //
+    // Failure is not an error here: an AVIF, a format this build did not enable,
+    // or a file the crate declines simply falls through to the ffmpeg attempts
+    // below, which is exactly the behaviour every tile had before.
+    if !is_video && has_native_thumb_ext(&src) {
+        let (native_src, native_dst) = (src.clone(), out.clone());
+        let rendered = tauri::async_runtime::spawn_blocking(move || {
+            native_still_thumbnail(&native_src, &native_dst, THUMB_MAX_PX)
+        })
+        .await;
+        if matches!(rendered, Ok(Ok(())))
+            && fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false)
+        {
+            return Ok(out.to_string_lossy().into_owned());
+        }
+        // Same guard the ffmpeg loop keeps: never leave a 0-byte file behind for
+        // the cache-hit check above to serve forever.
+        let _ = fs::remove_file(&out);
+    }
+
     // Attempts, best first. Images need only one; a video degrades seek -> no-mfra
     // -> start-of-file rather than giving up.
     let attempts: Vec<(Option<f64>, bool)> = if is_video {
@@ -2184,6 +2377,219 @@ mod tests {
         // Overwrite, and the destination is the final argument.
         assert!(args.iter().any(|a| a == "-y"));
         assert_eq!(args.last().map(String::as_str), Some("/cache/t.jpg"));
+    }
+
+    // --- perf-008: the in-process still thumbnailer -------------------------
+
+    #[test]
+    fn has_native_thumb_ext_covers_the_still_formats_the_crate_can_decode() {
+        for p in ["a.jpg", "B.JPEG", "c.png", "d.APNG", "e.gif", "f.webp", "g.bmp", "h.ico"] {
+            assert!(has_native_thumb_ext(Path::new(p)), "{p} should decode in process");
+        }
+        // AVIF needs a decoder this build does not carry, every video belongs to
+        // ffmpeg, and a file with no extension is not a picture. All fall back.
+        for p in ["a.avif", "b.mp4", "c.mkv", "d.txt", "noext", "e."] {
+            assert!(!has_native_thumb_ext(Path::new(p)), "{p} should fall back to ffmpeg");
+        }
+    }
+
+    #[test]
+    fn thumb_fit_dimensions_fits_inside_the_box_and_never_upscales() {
+        // Landscape and portrait both scale by the tighter axis.
+        assert_eq!(thumb_fit_dimensions(1920, 1440, 480), (480, 360));
+        assert_eq!(thumb_fit_dimensions(300, 900, 480), (160, 480));
+        // A square source lands square.
+        assert_eq!(thumb_fit_dimensions(1000, 1000, 480), (480, 480));
+        // Already smaller than the box: left exactly alone, never blown up.
+        assert_eq!(thumb_fit_dimensions(400, 200, 480), (400, 200));
+        assert_eq!(thumb_fit_dimensions(480, 480, 480), (480, 480));
+        // A very wide panorama still keeps at least one pixel of height rather
+        // than rounding away to zero, which no encoder would accept.
+        let (w, h) = thumb_fit_dimensions(10000, 3, 480);
+        assert_eq!(w, 480);
+        assert!(h >= 1, "height rounded away to {h}");
+    }
+
+    #[test]
+    fn apply_exif_orientation_turns_the_picture_the_way_the_tag_says() {
+        // A corner marker, so a rotation is told apart from a mirror: only the
+        // top-left pixel is white on an otherwise black 4x2 image.
+        let source = || {
+            let mut img = image::RgbImage::from_pixel(4, 2, image::Rgb([0, 0, 0]));
+            img.put_pixel(0, 0, image::Rgb([255, 255, 255]));
+            image::DynamicImage::ImageRgb8(img)
+        };
+        let marker = |img: &image::DynamicImage| -> (u32, u32) {
+            let rgb = img.to_rgb8();
+            for (x, y, p) in rgb.enumerate_pixels() {
+                if p.0 == [255, 255, 255] {
+                    return (x, y);
+                }
+            }
+            panic!("the corner marker was lost");
+        };
+
+        // 1 = as stored. 2/4 mirror, 3 turns 180: all keep the 4x2 shape.
+        for (o, corner) in [(1u16, (0, 0)), (2, (3, 0)), (3, (3, 1)), (4, (0, 1))] {
+            let out = apply_exif_orientation(source(), o);
+            assert_eq!((out.width(), out.height()), (4, 2), "orientation {o} changed the shape");
+            assert_eq!(marker(&out), corner, "orientation {o} put the corner wrong");
+        }
+        // 5..=8 are the quarter turns: the axes swap to 2x4.
+        for (o, corner) in [(5u16, (0, 0)), (6, (1, 0)), (7, (1, 3)), (8, (0, 3))] {
+            let out = apply_exif_orientation(source(), o);
+            assert_eq!((out.width(), out.height()), (2, 4), "orientation {o} did not swap the axes");
+            assert_eq!(marker(&out), corner, "orientation {o} put the corner wrong");
+        }
+        // A tag that is absent, zero or out of range is "as stored" rather than
+        // a rotation guessed at.
+        for o in [0u16, 9, 65535] {
+            let out = apply_exif_orientation(source(), o);
+            assert_eq!((out.width(), out.height()), (4, 2), "orientation {o}");
+            assert_eq!(marker(&out), (0, 0), "orientation {o}");
+        }
+    }
+
+    #[test]
+    fn native_still_thumbnail_writes_a_downscaled_jpeg() {
+        let dir = temp_root("nativethumb");
+        let src = dir.join("big.png");
+        let dst = dir.join("thumb.jpg");
+        image::RgbImage::from_pixel(1200, 900, image::Rgb([12, 200, 40]))
+            .save(&src)
+            .unwrap();
+
+        native_still_thumbnail(&src, &dst, 480).expect("a plain PNG should decode in process");
+
+        let out = image::open(&dst).expect("the thumbnail should be a decodable image");
+        assert_eq!((out.width(), out.height()), (480, 360));
+        // Written as JPEG regardless of the source format, because that is what
+        // the cache path and the ffmpeg path both produce.
+        assert_eq!(
+            image::ImageReader::open(&dst).unwrap().format(),
+            Some(image::ImageFormat::Jpeg)
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_still_thumbnail_leaves_a_source_smaller_than_the_box_alone() {
+        let dir = temp_root("nativethumb-small");
+        let src = dir.join("small.png");
+        let dst = dir.join("thumb.jpg");
+        image::RgbImage::from_pixel(120, 90, image::Rgb([9, 9, 9])).save(&src).unwrap();
+
+        native_still_thumbnail(&src, &dst, 480).unwrap();
+
+        let out = image::open(&dst).unwrap();
+        assert_eq!((out.width(), out.height()), (120, 90), "a small source was upscaled");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_still_thumbnail_applies_exif_rotation_like_ffmpeg_does() {
+        // ffmpeg autorotates: the same 400x200 source tagged Orientation=6 comes
+        // out of the sidecar 200x400 (verified directly against the bundled
+        // binary). A tile must not change which way up it is depending on which
+        // decoder happened to render it.
+        let dir = temp_root("nativethumb-exif");
+        let src = dir.join("rotated.jpg");
+        let dst = dir.join("thumb.jpg");
+        fs::write(&src, jpeg_with_orientation(400, 200, 6)).unwrap();
+
+        native_still_thumbnail(&src, &dst, 480).unwrap();
+
+        let out = image::open(&dst).unwrap();
+        assert_eq!(
+            (out.width(), out.height()),
+            (200, 400),
+            "EXIF Orientation=6 was ignored, so a portrait photo would show sideways"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_still_thumbnail_averages_the_pixels_it_discards() {
+        // The downscale must ANTIALIAS, not point-sample. A 1 px checkerboard
+        // reduced 8x has to come out mid-grey; a filter that just picks one
+        // source pixel per output pixel returns pure black and white, which is
+        // what a folder of detailed photographs would shimmer with. This is the
+        // property that lets the fast box filter stand in for a windowed one, so
+        // it is pinned rather than assumed.
+        let dir = temp_root("nativethumb-alias");
+        let src = dir.join("checker.png");
+        let dst = dir.join("thumb.jpg");
+        let mut img = image::RgbImage::new(480, 480);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let v = if (x + y) % 2 == 0 { 0u8 } else { 255u8 };
+            *p = image::Rgb([v, v, v]);
+        }
+        img.save(&src).unwrap();
+
+        native_still_thumbnail(&src, &dst, 60).unwrap();
+
+        let out = image::open(&dst).unwrap().to_rgb8();
+        assert_eq!((out.width(), out.height()), (60, 60));
+        for p in out.pixels() {
+            assert!(
+                (90..=165).contains(&p.0[0]),
+                "a downscaled checkerboard came out {} — the resample is point-sampling, not averaging",
+                p.0[0]
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_still_thumbnail_refuses_a_file_it_cannot_decode() {
+        // The caller's cue to fall back to ffmpeg. It must be an Err, never a
+        // zero-byte file left behind for the cache to hit forever.
+        let dir = temp_root("nativethumb-bad");
+        let src = dir.join("broken.jpg");
+        let dst = dir.join("thumb.jpg");
+        fs::write(&src, b"this is not a JPEG at all").unwrap();
+
+        assert!(native_still_thumbnail(&src, &dst, 480).is_err());
+        assert!(
+            !dst.exists(),
+            "a failed render left a file behind, which media_thumbnail would cache-hit forever"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A REAL, decodable JPEG of `w`x`h` carrying one APP1 Exif block whose only
+    /// field is Orientation. Built by splicing the block in after the SOI of an
+    /// encoded JPEG, so the bytes are both a valid picture and a valid Exif
+    /// carrier — `jpeg_with_exif` above builds a header-only file, which is
+    /// enough to read metadata out of but not to decode.
+    fn jpeg_with_orientation(w: u32, h: u32, orientation: u16) -> Vec<u8> {
+        let mut body: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(w, h, image::Rgb([200, 30, 30])))
+            .write_to(&mut std::io::Cursor::new(&mut body), image::ImageFormat::Jpeg)
+            .unwrap();
+
+        // Little-endian TIFF: header, then an IFD0 holding the single SHORT.
+        let mut tiff: Vec<u8> = Vec::new();
+        tiff.extend_from_slice(b"II\x2a\x00");
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 at offset 8
+        tiff.extend_from_slice(&1u16.to_le_bytes()); // one entry
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes()); // Orientation
+        tiff.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+        tiff.extend_from_slice(&1u32.to_le_bytes()); // count
+        tiff.extend_from_slice(&(orientation as u32).to_le_bytes()); // inline value
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // no IFD1
+
+        let mut app1: Vec<u8> = Vec::new();
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(&tiff);
+
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(&body[..2]); // SOI
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&app1);
+        out.extend_from_slice(&body[2..]);
+        out
     }
 
     #[test]
