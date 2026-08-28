@@ -8,6 +8,7 @@
     pruneMissingFromTag,
     galleryColumns,
     onGalleryScroll,
+    setThumbFocus,
     tagItemKey,
   } from "./controller";
   import { galleryMeta, tagMeta } from "../player-core";
@@ -86,10 +87,24 @@
   // changes both its column count and, via `aspect-ratio: 1/1`, its tile
   // height along with it).
   let cachedRowHeight = 0;
+  let cachedCols = 0;
   let measuredForTag = "";
 
   function invalidateRowHeightCache(): void {
     cachedRowHeight = 0;
+    cachedCols = 0;
+  }
+
+  /** perf-009: the scroll handler now runs for EVERY gallery, not just a tag
+   *  view, so the column count is cached on the same lifecycle as the row
+   *  height rather than re-walking the grid's children on every frame. */
+  function currentColumns(): number {
+    if (cachedCols > 0) return cachedCols;
+    const cols = galleryColumns();
+    if (cols > 0 && document.querySelector("#gallery-grid > .gallery-tile")) {
+      cachedCols = cols;
+    }
+    return cols;
   }
 
   function currentRowHeight(): number {
@@ -150,24 +165,33 @@
 
   let scrollScheduled = false;
 
-  /** tags-002 Step 2: computes the row scrolled to from scrollTop/rowHeight and
-   *  slides the window (via controller's `onGalleryScroll`) when that row
-   *  leaves the middle third of the currently loaded window. rAF-throttled so
-   *  a fast scroll/wheel gesture — which can fire many "scroll" events per
-   *  frame — costs one recentre check per frame, not one per event. A no-op
-   *  outside a tag view: every other gallery is loaded in full already, so
-   *  there is no window to slide. */
+  /** Computes the row scrolled to from scrollTop/rowHeight. rAF-throttled so a
+   *  fast scroll/wheel gesture — which can fire many "scroll" events per frame
+   *  — costs one pass per frame, not one per event.
+   *
+   *  Two things come out of that row. perf-009: EVERY gallery reports it as the
+   *  thumbnail pipeline's focus, so what is on screen is rendered before what
+   *  has scrolled past. tags-002 Step 2: a TAG view additionally slides its
+   *  window (via `onGalleryScroll`) when that row leaves the middle third of
+   *  what is loaded — every other gallery is loaded in full already, so there
+   *  is no window to slide. */
   function onGridScroll(): void {
-    if (!ui.galleryTag || scrollScheduled) return;
+    if (scrollScheduled) return;
     scrollScheduled = true;
     requestAnimationFrame(() => {
       scrollScheduled = false;
       const body = document.querySelector(".gallery__body") as HTMLElement | null;
       const rh = currentRowHeight();
-      const cols = galleryColumns();
+      const cols = currentColumns();
       if (!body || rh <= 0 || cols <= 0) return;
       const row = Math.floor(body.scrollTop / rh);
       const focus = row * cols;
+      // perf-009: EVERY gallery reports where the eye is, so the thumbnail
+      // pipeline renders what is on screen before what has scrolled past. Only
+      // the window slide below stays tag-only — a folder gallery is loaded in
+      // full and has no window to move.
+      setThumbFocus(focus);
+      if (!ui.galleryTag) return;
       const windowStart = ui.galleryWindowStart;
       const windowSize = ui.galleryItems.length;
       const third = windowSize / 3;

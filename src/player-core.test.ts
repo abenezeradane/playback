@@ -89,6 +89,7 @@ import {
   pageRange,
   tagMeta,
   windowBounds,
+  nextThumbFillBatch,
   type PlaylistStore,
   DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
@@ -2330,5 +2331,44 @@ describe("windowBounds", () => {
   it("starts sliding exactly when the focus clears the half-window", () => {
     expect(windowBounds(40000, 750, 1500)).toEqual({ start: 0, end: 1500 });
     expect(windowBounds(40000, 751, 1500)).toEqual({ start: 1, end: 1501 });
+  });
+});
+
+// --- perf-009: which tile the thumbnail pipeline renders next --------------
+
+describe("nextThumbFillBatch", () => {
+  it("walks outward from the focus so the fill spreads from what is on screen", () => {
+    // Ascending candidates, focus in the middle: nearest first, alternating
+    // below/above rather than restarting at index 0.
+    expect(nextThumbFillBatch([0, 1, 2, 3, 4, 5, 6], 3, 5)).toEqual([3, 2, 4, 1, 5]);
+  });
+
+  it("takes only what the batch allows", () => {
+    expect(nextThumbFillBatch([10, 11, 12, 13], 10, 2)).toEqual([10, 11]);
+  });
+
+  it("returns everything when the batch is larger than the candidates", () => {
+    expect(nextThumbFillBatch([7, 8], 7, 99)).toEqual([7, 8]);
+  });
+
+  it("is empty when nothing is left to fill", () => {
+    expect(nextThumbFillBatch([], 5, 10)).toEqual([]);
+  });
+
+  it("works when the focus is below every candidate", () => {
+    // A tag window scrolled far in: every loaded tile sits above the cursor.
+    expect(nextThumbFillBatch([100, 101, 102], 0, 2)).toEqual([100, 101]);
+  });
+
+  it("works when the focus is above every candidate", () => {
+    expect(nextThumbFillBatch([100, 101, 102], 999, 2)).toEqual([102, 101]);
+  });
+
+  it("skips gaps left by tiles that already have a thumbnail", () => {
+    // The candidate list is only the tiles still needing one, so the walk must
+    // not assume they are contiguous — it orders by DISTANCE, not by which
+    // side of the focus a tile happens to sit on. 0 is 9 away and 20 is 11, so
+    // 0 comes first even though it means going back up past a filled gap.
+    expect(nextThumbFillBatch([0, 5, 9, 20], 9, 3)).toEqual([9, 5, 0]);
   });
 });

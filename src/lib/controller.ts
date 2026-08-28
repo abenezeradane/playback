@@ -127,6 +127,7 @@ import {
   pageForIndex,
   pageRange,
   windowBounds,
+  nextThumbFillBatch,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -1043,6 +1044,14 @@ function galleryNavEntry(): NavEntry {
       galleryToken++;
       resetThumbPipeline();
       ui.galleryItems = items; // already-rendered tiles, thumbnails included
+      // perf-009: and restart the background fill by hand. The reset above
+      // cancelled it and bumped the token out from under it, and the restore
+      // puts back the SAME item objects — so the keyed {#each} reuses the
+      // existing tiles, `use:galleryTile` never re-runs, and nothing would
+      // re-arm the pipeline on its own. Measured before this line existed: a
+      // grid left mid-fill, opened into a photo and backed out of, sat at 186
+      // of 3,000 tiles and never moved again.
+      scheduleThumbFill();
       ui.galleryFolder = folder;
       ui.galleryPath = path;
       ui.galleryArchive = archive;
@@ -4574,12 +4583,128 @@ let thumbObserver: IntersectionObserver | null = null;
 let thumbQueue: number[] = [];
 let thumbActive = 0;
 
+// perf-009 -------------------------------------------------------------------
+//
+// The observer above is a PRIORITY signal, not a coverage one: it fires for
+// tiles near the viewport and nothing else, so a grid nobody scrolls used to
+// stop at the first screenful and stay there (measured: 42 of 600 tiles, still
+// 42 after thirty seconds, resuming the millisecond the wheel moved). The fill
+// below is what finishes the job, walking outward from whatever the viewport is
+// showing so the grid completes from what the user is looking at rather than
+// from the top of the folder.
+//
+// This is only affordable because of perf-008. While every tile cost an ffmpeg
+// process spawn, filling a whole folder in the background meant 34.2 s of
+// native work for 600 photos; in process it is 11.3 s, and it yields.
+
+/** How many tiles one background top-up adds. Small enough that a scroll's own
+ *  enqueues are never stuck behind a huge batch, big enough that the pipeline
+ *  is not re-armed every few milliseconds. */
+const THUMB_FILL_BATCH = 48;
+
+/** Retry delay while the gallery is not the visible view — see `runThumbFill`. */
+const THUMB_FILL_IDLE_MS = 500;
+
+/** Tiles queued but not yet started, and tiles started but not yet finished.
+ *  Both are needed to dedupe: a tile is off `thumbQueue` for the whole time it
+ *  is rendering, and the background fill would otherwise pick it up again
+ *  because `thumbSrc` is not set until it lands. */
+const thumbQueued = new Set<number>();
+const thumbInFlight = new Set<number>();
+
+/** The absolute index of the first tile the viewport is showing. Written by the
+ *  grid's scroll handler (Gallery.svelte) and read as the origin for every
+ *  ordering decision below. */
+let thumbFocus = 0;
+
+let thumbFillTimer = 0;
+/** Set once a pass finds nothing left to render, so an already-full grid stops
+ *  re-scanning itself. Any fresh enqueue clears it. */
+let thumbFillDone = false;
+
 /** Tear down the pipeline for the previous gallery. */
 function resetThumbPipeline(): void {
   thumbObserver?.disconnect();
   thumbObserver = null;
   thumbQueue = [];
+  thumbQueued.clear();
+  thumbInFlight.clear();
   thumbActive = 0;
+  thumbFocus = 0;
+  thumbFillDone = false;
+  cancelThumbFill();
+}
+
+/** Where the grid is scrolled to, in absolute tile indices (tags-002 windows
+ *  the DOM, so this is not a position within `ui.galleryItems`). Called from
+ *  the grid's rAF-throttled scroll handler. */
+export function setThumbFocus(index: number): void {
+  if (!Number.isFinite(index) || index < 0) return;
+  thumbFocus = Math.floor(index);
+}
+
+function cancelThumbFill(): void {
+  if (!thumbFillTimer) return;
+  clearTimeout(thumbFillTimer);
+  thumbFillTimer = 0;
+}
+
+/**
+ * Arm the background fill, but only when the pipeline is about to run dry —
+ * topping up at the low-water mark rather than at empty is what keeps the
+ * renderer saturated instead of stalling for a timer between every batch.
+ */
+function scheduleThumbFill(): void {
+  if (thumbFillTimer || thumbFillDone) return;
+  if (thumbQueue.length > THUMB_CONCURRENCY) return;
+  const token = galleryToken;
+  thumbFillTimer = window.setTimeout(() => {
+    thumbFillTimer = 0;
+    runThumbFill(token);
+  }, 0);
+}
+
+function runThumbFill(token: number): void {
+  if (token !== galleryToken) return; // a different gallery owns the pipeline now
+  // Background work must not run behind another view. Opening a photo from the
+  // grid leaves `ui.galleryItems` in place on purpose (Back returns to it), so
+  // without this the fill would keep four decodes busy underneath the viewer —
+  // exactly the "the app feels heavy" the user reported. Re-armed rather than
+  // abandoned, so coming back to the grid resumes it.
+  if (ui.view !== "gallery") {
+    thumbFillTimer = window.setTimeout(() => {
+      thumbFillTimer = 0;
+      runThumbFill(token);
+    }, THUMB_FILL_IDLE_MS);
+    return;
+  }
+  const pending = pendingThumbIndices();
+  if (pending.length === 0) {
+    thumbFillDone = true;
+    return;
+  }
+  for (const index of nextThumbFillBatch(pending, thumbFocus, THUMB_FILL_BATCH)) {
+    enqueueThumb(index);
+  }
+}
+
+/**
+ * Absolute indices of loaded tiles that still need a thumbnail and are not
+ * already queued or rendering. Only ever the loaded window: in a tag view the
+ * rest of the tag has no DOM and no item object, and `pending` placeholders
+ * have no real file to render yet (tags-002).
+ */
+function pendingThumbIndices(): number[] {
+  const out: number[] = [];
+  const start = ui.galleryWindowStart;
+  for (let i = 0; i < ui.galleryItems.length; i++) {
+    const item = ui.galleryItems[i];
+    if (!item || item.thumbSrc || item.pending) continue;
+    const index = start + i;
+    if (thumbQueued.has(index) || thumbInFlight.has(index)) continue;
+    out.push(index);
+  }
+  return out;
 }
 
 /** Prime the disk cache once per gallery open, then let the observer drive. */
@@ -4634,14 +4759,31 @@ function enqueueThumb(index: number): void {
   // rather than patching this one — and that new node's own use:galleryTile
   // mount re-observes it, enqueueing the real thumbnail then.
   if (!item || item.thumbSrc || item.pending) return;
+  // perf-009: the observer and the background fill both feed this queue, and a
+  // tile can be revealed while it is already waiting or already rendering.
+  if (thumbQueued.has(index) || thumbInFlight.has(index)) return;
+  thumbQueued.add(index);
+  thumbFillDone = false;
   thumbQueue.push(index);
   pumpThumbs();
 }
 
 function pumpThumbs(): void {
   while (thumbActive < THUMB_CONCURRENCY && thumbQueue.length > 0) {
-    void renderThumb(thumbQueue.shift() as number);
+    // Plain FIFO, deliberately. A nearest-to-the-viewport dequeue was built,
+    // tested and MEASURED NOT TO MATTER, so it was removed rather than shipped
+    // on theory — see perf-009's entry in docs/feature_list.json. The ordering
+    // that does matter comes from `nextThumbFillBatch`, which enqueues outward
+    // from the viewport in the first place; by the time work reaches this
+    // queue it is already in the right order, and the queue is kept short
+    // enough (topped up only at the low-water mark) that re-sorting it changes
+    // nothing.
+    const index = thumbQueue.shift() as number;
+    thumbQueued.delete(index);
+    thumbInFlight.add(index);
+    void renderThumb(index);
   }
+  scheduleThumbFill();
 }
 
 /**
@@ -4666,7 +4808,13 @@ async function renderThumb(index: number): Promise<void> {
   // enqueueThumb first. That cross-function ordering is real but implicit —
   // guarding it here too means this one function stays safe to reason about
   // on its own.
-  if (!item || item.thumbSrc || item.pending) return;
+  if (!item || item.thumbSrc || item.pending) {
+    // perf-009: this bail happens AFTER pumpThumbs marked the tile in flight,
+    // so it has to release it or the background fill will skip that index for
+    // the rest of the gallery's life.
+    thumbInFlight.delete(index);
+    return;
+  }
   // Observability: which tile indices actually reach a render. Comparing the
   // count of these against distinct indices is how a duplicate-enqueue is caught.
   perfMark("thumb.render", String(index));
@@ -4684,6 +4832,7 @@ async function renderThumb(index: number): Promise<void> {
     }
   } finally {
     thumbActive--;
+    thumbInFlight.delete(index);
     if (token === galleryToken) pumpThumbs();
   }
 }

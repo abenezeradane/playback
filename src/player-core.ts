@@ -2179,3 +2179,52 @@ export function orientationDrawMatrix(
   return [a, b, c, d, e + 0, f + 0];
 }
 
+
+// --- perf-009: which tile the thumbnail pipeline renders next ---------------
+//
+// The background fill enqueues work in the order it should be done: outward
+// from the tile the viewport is actually showing, so a grid finishes from
+// what the user is looking at rather than from the top of the folder.
+//
+// A companion helper that RE-ordered the queue at dequeue time was written,
+// unit-tested, and then deleted: across four constructed scenarios it could
+// not be told apart from plain FIFO, and the render-order traces of the two
+// builds came out identical. The reason is below — by the time work reaches
+// the queue it is already ordered, and the queue is never long enough for
+// re-sorting to change anything. See perf-009 in docs/feature_list.json.
+
+/**
+ * The next slice of still-unrendered tiles to top the queue up with, walking
+ * OUTWARD from `focus` so a background fill spreads from what is on screen
+ * rather than restarting at the top of the folder.
+ *
+ * `pending` is ascending and holds only tiles that still need a thumbnail, so
+ * it is not contiguous — the walk orders strictly by distance rather than
+ * assuming a gap means the end. A tie goes to the tile ABOVE the focus, which
+ * on a downward scroll is the one just left behind.
+ */
+export function nextThumbFillBatch(
+  pending: readonly number[],
+  focus: number,
+  batch: number,
+): number[] {
+  const out: number[] = [];
+  if (batch <= 0) return out;
+  // The first candidate at or after the focus; everything before it is the
+  // other half of the walk.
+  let hi = 0;
+  while (hi < pending.length && pending[hi] < focus) hi++;
+  let lo = hi - 1;
+  while (out.length < batch && (lo >= 0 || hi < pending.length)) {
+    if (lo < 0) {
+      out.push(pending[hi++]);
+    } else if (hi >= pending.length) {
+      out.push(pending[lo--]);
+    } else if (focus - pending[lo] <= pending[hi] - focus) {
+      out.push(pending[lo--]);
+    } else {
+      out.push(pending[hi++]);
+    }
+  }
+  return out;
+}
