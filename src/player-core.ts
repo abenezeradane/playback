@@ -2260,7 +2260,7 @@ export interface DeleteArm {
  *  things that must never collide. The separator is a NUL, which cannot occur
  *  in a Windows path. */
 export function deleteArmKey(archive: string, path: string): string {
-  return `${archive} ${path}`;
+  return `${archive}\u0000${path}`;
 }
 
 /** Arm a delete for `key`, expiring `ttlMs` from `now`. */
