@@ -134,8 +134,15 @@
 
       <!-- Tags (tags-002): the most-used tags, so the counts beside them are what
            stop a duplicate tag being created next to one that already has 4,000
-           members. Hidden entirely on a fresh install, which has none. -->
-      <section class="tags" hidden={ui.tagLibrary.length === 0}>
+           members. Hidden entirely on a fresh install, which has none.
+           tags-003: `ui.tagLibrary` excludes blacklisted tags, so checking it
+           alone would also hide this section — and with it the ONLY route
+           into the all-tags index, "All tags…" — the moment every tag a user
+           has happens to be blacklisted. `ui.tagBlacklist` keeps the section
+           (and that button) reachable in exactly that case; the chip row
+           itself still renders nothing, since it stays sourced from
+           tagLibrary alone. -->
+      <section class="tags" hidden={ui.tagLibrary.length === 0 && ui.tagBlacklist.length === 0}>
         <div class="recent__head">
           <div class="recent__title">
             <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /><circle cx="7.5" cy="7.5" r="1.5" /></svg>

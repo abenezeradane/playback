@@ -1137,6 +1137,9 @@ export function goHome(): void {
   ui.galleryLoading = false;
   renderRecents();
   void loadTagLibrary(); // tags-002: keep Home's Tags shelf counts current
+  void loadTagBlacklist(); // tags-003: Home's shelf must know about a fully-
+  // blacklisted library too — see the matching call in init() below and
+  // Home.svelte's `hidden` condition for why.
   document.title = "Playback";
   endClose();
 }
@@ -6630,6 +6633,13 @@ export function init(): void {
                          // Home paint, not only after a navigation back to it
   void refreshHiddenKeys(); // tags-003: the app must know the blacklist before
                              // the first gallery, same reasoning as above
+  void loadTagBlacklist(); // tags-003: same reasoning again — Home.svelte's
+  // Tags section (and its only route into the all-tags index, "All tags…")
+  // is hidden when tagLibrary is empty, which now also happens when every
+  // tag the user has is blacklisted, not just when they have none. Without
+  // this, that first Home paint would show no button, no way back into the
+  // index, and the "Show blacklisted" un-trap would be unreachable until
+  // some OTHER tag got applied. See the matching call in goHome() above.
   renderPlaylists();
   renderTimestamps();
   render();
