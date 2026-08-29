@@ -1917,6 +1917,7 @@ pub fn run() {
             reveal_in_explorer,
             image_info,
             copy_image_to_clipboard,
+            recycle::recycle_file,
             tags::tags_for_item,
             tags::tag_apply,
             tags::tag_unapply,

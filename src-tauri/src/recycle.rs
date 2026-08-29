@@ -14,6 +14,41 @@ pub(crate) fn recycle(path: &Path) -> Result<(), String> {
     trash::delete(path).map_err(|e| format!("recycle: {e}"))
 }
 
+/// Move one file to the Recycle Bin, on the user's explicit confirmation
+/// (img-003).
+///
+/// The path comes from the WebView, so it goes through `ensure_allowed` — the
+/// same sec-002 gate the two file-reading commands use, unchanged and not
+/// widened. Anything the user can see they can already read, so a delete
+/// scoped identically grants no new reach; and `ensure_allowed` canonicalizes
+/// first, so `..` traversal and symlink escapes resolve to a real target
+/// before the check, and a path that is not there fails on canonicalize
+/// rather than reaching the bin.
+///
+/// The confirmation itself is the FRONTEND's job (see armDelete in
+/// player-core.ts). This command deletes what it is given: it is the last
+/// step, not the guard.
+#[tauri::command]
+pub(crate) async fn recycle_file(
+    allow: tauri::State<'_, crate::AllowList>,
+    path: String,
+) -> Result<(), String> {
+    let target = crate::ensure_allowed(&allow, &path)?;
+    // Directories are refused here as well as in the UI. The UI decides which
+    // tiles offer a delete; this decides what the command will ever do, and a
+    // recursive folder delete is a materially different promise from removing
+    // one file — one this app does not make anywhere.
+    if target.is_dir() {
+        return Err(crate::ipc_error(
+            "recycle_file: refused a directory",
+            target.display(),
+            "folders cannot be deleted from here",
+        ));
+    }
+    recycle(&target)
+        .map_err(|e| crate::ipc_error("recycle_file", e, "that file could not be deleted"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
