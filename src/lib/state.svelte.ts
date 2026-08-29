@@ -357,6 +357,15 @@ export const ui = $state({
   tagDeleteFolders: 0,
   tagDeleteBusy: false,
   tagDeleteError: "",
+  // tags-004 fix round 1 (#1): non-empty once a sweep has FINISHED — the
+  // panel's outcome message, replacing its confirm/cancel body with the
+  // counts and a single Close button until the user dismisses it. Not a
+  // flash: `flashGalleryAction`'s message only ever rendered inside
+  // Gallery.svelte, which the sweep's own goHome() call hid in the same tick,
+  // so it was set and never seen. Cleared by closeTagDeletePanel, whose
+  // presence is also what tells that function this dismissal should run
+  // goHome() rather than just cancel.
+  tagDeleteResult: "",
   // gallery-002: the folder path the grid is currently showing, and the trail of
   // folder names from wherever this gallery journey started down to it — the
   // header's breadcrumb, so a nested sub-gallery says where it sits.

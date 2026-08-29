@@ -4588,6 +4588,7 @@ export async function openTagDeletePanel(): Promise<void> {
   const tag = ui.galleryTag;
   if (!tag) return;
   ui.tagDeleteError = "";
+  ui.tagDeleteResult = ""; // in case a prior sweep's result was never dismissed
   const page = await tauriInvoke<{ total: number; items: TaggedItem[] }>("tag_items", {
     tag,
     limit: 1000,
@@ -4607,10 +4608,29 @@ export async function openTagDeletePanel(): Promise<void> {
   ui.tagDeleteOpen = true;
 }
 
+/**
+ * Close the panel — Cancel, the header X, the backdrop, and Escape all route
+ * here (tags-004 fix round 1, #2).
+ *
+ * A no-op while `tagDeleteBusy`: the sweep cannot be interrupted once
+ * started, so a "Cancel" that only hid the panel would be a lie — the sweep
+ * would keep running behind it and still land its result and `goHome()` when
+ * it finished, bouncing the user Home after they believed they'd stopped it.
+ *
+ * `tagDeleteResult` is non-empty exactly when a sweep has FINISHED and its
+ * counts are the panel's whole body (see confirmTagDelete) — dismissing that
+ * view is an acknowledgement of what happened, not a cancellation of
+ * something not yet done, so it is what actually triggers `goHome()`
+ * (tags-004 fix round 1, #1: the result has to be SEEN before the view moves
+ * on, not flashed into a grid that's about to be hidden).
+ */
 export function closeTagDeletePanel(): void {
+  if (ui.tagDeleteBusy) return;
+  const sawResult = ui.tagDeleteResult !== "";
   ui.tagDeleteOpen = false;
-  ui.tagDeleteBusy = false;
+  ui.tagDeleteResult = "";
   ui.tagDeleteError = "";
+  if (sawResult) goHome();
 }
 
 /** Run the sweep the panel described. */
@@ -4631,19 +4651,29 @@ export async function confirmTagDelete(): Promise<void> {
   });
   ui.tagDeleteBusy = false;
   if (!res) return;
-  closeTagDeletePanel();
   perfMark("tag.deleted", `${res.recycled}`);
   // Report what actually happened, not "done". A sweep that skipped or failed
   // on some members is a different outcome from one that took everything.
+  //
+  // tags-004 fix round 1 (#1): this used to be flashGalleryAction'd into the
+  // gallery grid and immediately followed by goHome() — but that flash only
+  // ever renders inside Gallery.svelte, which goHome() hides in the same
+  // tick, so the message was set and never once seen. It is now the panel's
+  // OWN result view (TagDeletePanel.svelte) instead: the panel stays open,
+  // showing these counts, until closeTagDeletePanel dismisses it — which is
+  // also what runs goHome() now, so the report is unmissable before the view
+  // moves on.
   const parts = [`${res.recycled} moved to the Recycle Bin`];
   if (res.skippedInArchive > 0) parts.push(`${res.skippedInArchive} skipped inside archives`);
   if (res.skippedFolders > 0) parts.push(`${res.skippedFolders} folders skipped`);
   if (res.skippedMissing > 0) parts.push(`${res.skippedMissing} already gone`);
   if (res.failed > 0) parts.push(`${res.failed} could not be deleted`);
-  flashGalleryAction(parts.join(" · "));
+  ui.tagDeleteResult = parts.join(" · ");
+  // The underlying data is refreshed now, not deferred to dismissal — the
+  // sweep already happened; only the user's acknowledgement of it, and the
+  // navigation that follows, wait on the panel being closed.
   await refreshHiddenKeys();
   await loadTagLibrary();
-  goHome();
 }
 
 /**
@@ -5374,7 +5404,12 @@ function handleGalleryKey(e: KeyboardEvent): boolean {
       // popover's scrim, so a destructive key must not fire while its own
       // feedback cannot be seen. Falls through as unhandled rather than
       // preventing default — there is nothing else bound to Delete to leak into.
-      if (ui.tagPopoverOpen) return false;
+      //
+      // tags-004 fix round 1 (#3): the delete-tagged confirmation panel is the
+      // identical case — same scrim hiding the same armed-tile outline and
+      // flash toast, same non-trapped focus (its Cancel/Delete buttons don't
+      // refocus the grid) — so the guard now covers both panels.
+      if (ui.tagPopoverOpen || ui.tagDeleteOpen) return false;
       void doGalleryDelete();
       return true;
     default:
