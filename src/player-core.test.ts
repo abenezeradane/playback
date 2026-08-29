@@ -2382,18 +2382,18 @@ describe("nextThumbFillBatch", () => {
 describe("img-003 delete confirmation", () => {
   describe("deleteArmKey", () => {
     it("distinguishes a file on disk from a page inside an archive", () => {
-      expect(deleteArmKey("", "C:\pics\a.jpg")).not.toBe(
-        deleteArmKey("C:\pics\book.cbz", "C:\pics\a.jpg"),
+      expect(deleteArmKey("", "C:\\pics\\a.jpg")).not.toBe(
+        deleteArmKey("C:\\pics\\book.cbz", "C:\\pics\\a.jpg"),
       );
     });
 
     it("is stable for the same identity", () => {
-      expect(deleteArmKey("", "C:\pics\a.jpg")).toBe(deleteArmKey("", "C:\pics\a.jpg"));
+      expect(deleteArmKey("", "C:\\pics\\a.jpg")).toBe(deleteArmKey("", "C:\\pics\\a.jpg"));
     });
   });
 
   describe("isArmedFor", () => {
-    const key = deleteArmKey("", "C:\pics\a.jpg");
+    const key = deleteArmKey("", "C:\\pics\\a.jpg");
 
     it("is not armed when nothing has been pressed", () => {
       expect(isArmedFor(null, key, 1000)).toBe(false);
@@ -2413,7 +2413,7 @@ describe("img-003 delete confirmation", () => {
     // arming on one photo and pressing Del on the NEXT one must not delete it.
     it("is not armed for a different file, however recently it was armed", () => {
       const arm = armDelete(key, 1000, DELETE_ARM_MS);
-      const other = deleteArmKey("", "C:\pics\b.jpg");
+      const other = deleteArmKey("", "C:\\pics\\b.jpg");
       expect(isArmedFor(arm, other, 1001)).toBe(false);
     });
   });
