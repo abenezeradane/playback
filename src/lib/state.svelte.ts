@@ -357,6 +357,19 @@ export const ui = $state({
   tagDeleteFolders: 0,
   tagDeleteBusy: false,
   tagDeleteError: "",
+  // tags-004 code review (Finding 1, CRITICAL): the tag NAME this panel is
+  // about, captured once by openTagDeletePanel and read by confirmTagDelete
+  // instead of confirmTagDelete re-reading `ui.galleryTag` live. Closes the
+  // gap where Cancel leaves the panel's controls sitting in the DOM (see
+  // `opacity:0` in styles.css) with `tagDeleteCount` still holding its last
+  // value: without a captured name, a later confirm reached through that gap
+  // would sweep whatever tag the view had since moved to, using a count that
+  // was never shown for it.
+  tagDeleteTag: "",
+  // tags-004 code review (Finding 4): how many files the last sweep actually
+  // recycled, so the result heading can say "Done" only when that's true —
+  // set alongside `tagDeleteResult`, reset alongside the other counts.
+  tagDeleteRecycled: 0,
   // tags-004 fix round 1 (#1): non-empty once a sweep has FINISHED — the
   // panel's outcome message, replacing its confirm/cancel body with the
   // counts and a single Close button until the user dismisses it. Not a

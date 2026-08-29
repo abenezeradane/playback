@@ -1130,6 +1130,19 @@ pub(crate) async fn tag_prune_missing(
 /// the recycling pass can run for minutes on a large tag, and holding the
 /// shared connection across it would freeze every other tag command for the
 /// duration.
+///
+/// tags-004 code review (Finding 5, informational, deliberate): this sweep
+/// does NOT filter out members hidden by the blacklist (tags-003; see
+/// `hidden_keys`). A blacklisted tag hides its members from BROWSING only —
+/// this action is an explicit, confirmed sweep of every member the tag
+/// names, not a browse, so a member the grid currently hides is still swept.
+/// `tag_items`, which the panel's count and this command's `expect_count`
+/// interlock both come from, already includes those members in its `total`,
+/// so the number the user confirms is truthful; it is simply larger than the
+/// tiles they could see. Filtering it out here would make the blacklist
+/// silently spare files from an action the user explicitly typed a count for
+/// and confirmed — a blacklist hides things from browsing, and must not also
+/// quietly protect them from a delete aimed at the same tag.
 #[tauri::command]
 pub(crate) async fn tag_delete_all(
     db: tauri::State<'_, TagsDb>,

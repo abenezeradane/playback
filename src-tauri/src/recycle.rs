@@ -11,6 +11,20 @@ use std::path::Path;
 /// break exactly what the confirmation promised the user, which is the one
 /// thing a delete button must not do.
 pub(crate) fn recycle(path: &Path) -> Result<(), String> {
+    // tags-004 code review (Finding 2): refused HERE, not only by callers that
+    // remember to check first. `recycle_file` (below) already refuses a
+    // directory before ever reaching this function, but the bulk sweep
+    // (tags::tag_delete_all) calls this directly: it stats every member up
+    // front via `classify_for_delete`, then runs the recycle loop for
+    // however long hundreds of files take, so for the last member in a large
+    // tag the window between ITS stat and this call is the whole sweep. If
+    // something turned that path into a directory during that window,
+    // `trash::delete` would recurse into it. Making the refusal structural —
+    // every caller inherits it, not just the ones that ask first — closes
+    // that window instead of relying on every call site remembering to.
+    if path.is_dir() {
+        return Err(format!("recycle: refused a directory: {}", path.display()));
+    }
     trash::delete(path).map_err(|e| format!("recycle: {e}"))
 }
 
@@ -98,5 +112,23 @@ mod tests {
         let dir = temp_dir("missing");
         let err = recycle(&dir.join("never-existed.txt"));
         assert!(err.is_err(), "a missing file must not report success");
+    }
+
+    /// tags-004 code review (Finding 2): `recycle()` itself must refuse a
+    /// directory, not just `recycle_file` upstream of it — this is what the
+    /// bulk sweep in tags.rs calls directly, bypassing that command.
+    #[test]
+    fn recycle_refuses_a_real_directory() {
+        let dir = temp_dir("dir-refusal");
+        let inside = dir.join("inside.txt");
+        std::fs::write(&inside, b"x").unwrap();
+
+        let err = recycle(&dir).expect_err("a directory must not be accepted");
+        assert!(
+            err.contains("directory"),
+            "error should say why the directory was refused: {err}"
+        );
+        assert!(dir.exists(), "the directory must still be there — refused, not recycled");
+        assert!(inside.exists(), "its contents must be untouched");
     }
 }

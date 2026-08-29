@@ -17,83 +17,106 @@
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <!-- closeTagDeletePanel is itself a no-op while tagDeleteBusy (tags-004 fix
        round 1, #2) -- the sweep cannot be interrupted once started, so the
-       backdrop staying clickable but inert is deliberate, not an oversight. -->
+       backdrop staying clickable but inert is deliberate, not an oversight.
+       The backdrop itself stays outside the {#if} below: it only ever closes
+       the panel, so leaving it mounted while closed is harmless (and matches
+       `data-open`/`aria-hidden` above, which need to exist to be read). -->
   <div class="shortcuts__backdrop" data-close="true" onclick={closeTagDeletePanel}></div>
-  <div class="shortcuts__panel" role="dialog" aria-label="Delete every file with this tag">
-    <div class="shortcuts__head">
-      <div class="shortcuts__heading">
-        <div>
-          {#if ui.tagDeleteResult}
-            <h2 class="shortcuts__title">Done</h2>
-          {:else}
-            <h2 class="shortcuts__title">Delete {ui.tagDeleteCount.toLocaleString("en-US")} files?</h2>
-          {/if}
-          <p class="shortcuts__sub">Everything tagged "{ui.galleryTag}"</p>
+  {#if ui.tagDeleteOpen}
+    <!-- tags-004 code review (Finding 1, CRITICAL): everything destructive or
+         focusable below used to render unconditionally, with only `.shortcuts`
+         CSS (`opacity: 0; pointer-events: none`) hiding it while closed.
+         Opacity does NOT remove a descendant from the tab order: Tab could
+         reach the confirm button below while this panel was never opened (or
+         was opened, then Cancelled), and Enter would fire a bulk delete that
+         was never seen, asked for, or shown a result. A destructive control
+         must not merely be invisible — it must not exist in the DOM at all
+         while its action isn't wanted. This wrap is the structural fix;
+         `confirmTagDelete`'s own `!ui.tagDeleteOpen` guard and the count/tag
+         resets in `closeTagDeletePanel` (controller.ts) are defence in depth
+         on top of it, not substitutes for it. -->
+    <div class="shortcuts__panel" role="dialog" aria-label="Delete every file with this tag">
+      <div class="shortcuts__head">
+        <div class="shortcuts__heading">
+          <div>
+            {#if ui.tagDeleteResult}
+              <!-- tags-004 code review (Finding 4): "Done" implied success even
+                   when `recycled` was 0 and every member had failed or been
+                   skipped. The heading now says only what actually happened. -->
+              <h2 class="shortcuts__title">{ui.tagDeleteRecycled > 0 ? "Done" : "Nothing deleted"}</h2>
+            {:else}
+              <h2 class="shortcuts__title">Delete {ui.tagDeleteCount.toLocaleString("en-US")} files?</h2>
+            {/if}
+            <!-- tags-004 code review (Finding 1, CRITICAL): `tagDeleteTag`, not
+                 `ui.galleryTag` — the name captured when THIS panel opened, so
+                 the question shown always matches what confirmTagDelete acts on. -->
+            <p class="shortcuts__sub">Everything tagged "{ui.tagDeleteTag}"</p>
+          </div>
         </div>
+        <button
+          id="tag-delete-close"
+          class="iconbtn iconbtn--sm"
+          type="button"
+          title={ui.tagDeleteResult ? "Close (Esc)" : "Cancel (Esc)"}
+          disabled={ui.tagDeleteBusy}
+          onclick={closeTagDeletePanel}
+        >
+          <svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+        </button>
       </div>
-      <button
-        id="tag-delete-close"
-        class="iconbtn iconbtn--sm"
-        type="button"
-        title={ui.tagDeleteResult ? "Close (Esc)" : "Cancel (Esc)"}
-        disabled={ui.tagDeleteBusy}
-        onclick={closeTagDeletePanel}
-      >
-        <svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
-      </button>
-    </div>
 
-    <div class="tagpop__body">
-      {#if ui.tagDeleteResult}
-        <!-- tags-004 fix round 1 (#1): the sweep's own outcome, replacing the
-             question with the answer in the same panel — the only place these
-             counts are shown to the user at all. -->
-        <p class="tagdel__line" role="status">{ui.tagDeleteResult}</p>
-        <div class="tagdel__actions">
-          <button id="tag-delete-done" class="pill pill--primary" type="button" onclick={closeTagDeletePanel}>
-            Close
-          </button>
-        </div>
-      {:else}
-        <p class="tagdel__line">They move to the <strong>Recycle Bin</strong>, so you can get them back from Windows.</p>
-        {#if ui.tagDeleteArchived > 0}
-          <p class="tagdel__line tagdel__line--note">
-            {ui.tagDeleteArchived.toLocaleString("en-US")} inside archives will be skipped — deleting one would mean rewriting the archive.
-          </p>
+      <div class="tagpop__body">
+        {#if ui.tagDeleteResult}
+          <!-- tags-004 fix round 1 (#1): the sweep's own outcome, replacing the
+               question with the answer in the same panel — the only place these
+               counts are shown to the user at all. -->
+          <p class="tagdel__line" role="status">{ui.tagDeleteResult}</p>
+          <div class="tagdel__actions">
+            <button id="tag-delete-done" class="pill pill--primary" type="button" onclick={closeTagDeletePanel}>
+              Close
+            </button>
+          </div>
+        {:else}
+          <p class="tagdel__line">They move to the <strong>Recycle Bin</strong>, so you can get them back from Windows.</p>
+          {#if ui.tagDeleteArchived > 0}
+            <p class="tagdel__line tagdel__line--note">
+              {ui.tagDeleteArchived.toLocaleString("en-US")} inside archives will be skipped — deleting one would mean rewriting the archive.
+            </p>
+          {/if}
+          {#if ui.tagDeleteFolders > 0}
+            <!-- tags-004 code review: a tagged FOLDER is skipped, never recursively
+                 recycled — deleting one file is a far smaller promise than deleting
+                 a whole tree. Said here, before the sweep runs, for the same reason
+                 the archive line is: a skip reported only afterward reads as the
+                 app silently ignoring what it was asked to do. -->
+            <p class="tagdel__line tagdel__line--note">
+              {ui.tagDeleteFolders.toLocaleString("en-US")} {ui.tagDeleteFolders === 1 ? "folder" : "folders"} will be skipped — this deletes files, never whole directories.
+            </p>
+          {/if}
+          <p class="tagdel__line tagdel__line--note">The tag itself is removed once nothing it names is left.</p>
+          {#if ui.tagDeleteError}
+            <p class="tagpop__error" role="alert">{ui.tagDeleteError}</p>
+          {/if}
+          <div class="tagdel__actions">
+            <!-- tags-004 fix round 1 (#2): disabled rather than left clickable-but-
+                 inert while busy -- the sweep genuinely cannot be interrupted once
+                 started, so a live Cancel button would be an offer this app can't
+                 honor. -->
+            <button id="tag-delete-cancel" class="pill pill--ghost" type="button" disabled={ui.tagDeleteBusy} onclick={closeTagDeletePanel}>
+              Cancel
+            </button>
+            <button
+              id="tag-delete-confirm"
+              class="pill pill--danger"
+              type="button"
+              disabled={ui.tagDeleteBusy || ui.tagDeleteCount === 0}
+              onclick={() => void confirmTagDelete()}
+            >
+              {ui.tagDeleteBusy ? "Deleting…" : `Delete ${ui.tagDeleteCount.toLocaleString("en-US")} files`}
+            </button>
+          </div>
         {/if}
-        {#if ui.tagDeleteFolders > 0}
-          <!-- tags-004 code review: a tagged FOLDER is skipped, never recursively
-               recycled — deleting one file is a far smaller promise than deleting
-               a whole tree. Said here, before the sweep runs, for the same reason
-               the archive line is: a skip reported only afterward reads as the
-               app silently ignoring what it was asked to do. -->
-          <p class="tagdel__line tagdel__line--note">
-            {ui.tagDeleteFolders.toLocaleString("en-US")} {ui.tagDeleteFolders === 1 ? "folder" : "folders"} will be skipped — this deletes files, never whole directories.
-          </p>
-        {/if}
-        <p class="tagdel__line tagdel__line--note">The tag itself is removed once nothing it names is left.</p>
-        {#if ui.tagDeleteError}
-          <p class="tagpop__error" role="alert">{ui.tagDeleteError}</p>
-        {/if}
-        <div class="tagdel__actions">
-          <!-- tags-004 fix round 1 (#2): disabled rather than left clickable-but-
-               inert while busy -- the sweep genuinely cannot be interrupted once
-               started, so a live Cancel button would be an offer this app can't
-               honor. -->
-          <button id="tag-delete-cancel" class="pill pill--ghost" type="button" disabled={ui.tagDeleteBusy} onclick={closeTagDeletePanel}>
-            Cancel
-          </button>
-          <button
-            id="tag-delete-confirm"
-            class="pill pill--danger"
-            type="button"
-            disabled={ui.tagDeleteBusy || ui.tagDeleteCount === 0}
-            onclick={() => void confirmTagDelete()}
-          >
-            {ui.tagDeleteBusy ? "Deleting…" : `Delete ${ui.tagDeleteCount.toLocaleString("en-US")} files`}
-          </button>
-        </div>
-      {/if}
+      </div>
     </div>
-  </div>
+  {/if}
 </div>

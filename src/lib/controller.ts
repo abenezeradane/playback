@@ -4603,8 +4603,22 @@ export async function openTagDeletePanel(): Promise<void> {
   // than that these two undercount — only members within the first 1000 are
   // seen. `tagDeleteCount` above is unaffected: it comes from `total`, a real
   // COUNT(*), so the interlock the command checks against is still exact.
+  //
+  // tags-004 code review (Finding 5, informational): `total` and this
+  // archive/folder breakdown both come straight from `tag_items`, which does
+  // NOT filter out members hidden by the blacklist (tags-003) — a
+  // blacklisted tag hides its members from BROWSING only. This sweep is an
+  // explicit, confirmed action on every member the tag names, not a browse,
+  // so a member the grid currently hides is still counted here and still
+  // gets recycled; deliberately not filtered — see the matching note beside
+  // `tag_delete_all` in tags.rs.
   ui.tagDeleteArchived = page.items.filter((i) => i.archive).length;
   ui.tagDeleteFolders = page.items.filter((i) => i.kind === "folder").length;
+  // tags-004 code review (Finding 1, CRITICAL): captured once, here, at open
+  // time — confirmTagDelete reads THIS, not `ui.galleryTag` live, so a
+  // confirm reached after the view has moved to a different tag cannot sweep
+  // that different tag under the count shown for this one.
+  ui.tagDeleteTag = tag;
   ui.tagDeleteOpen = true;
 }
 
@@ -4630,12 +4644,37 @@ export function closeTagDeletePanel(): void {
   ui.tagDeleteOpen = false;
   ui.tagDeleteResult = "";
   ui.tagDeleteError = "";
+  // tags-004 code review (Finding 1, CRITICAL): a closed panel's controls
+  // used to stay in the DOM at `opacity:0` (CSS opacity does not remove a
+  // node from the tab order), and this state used to be left exactly as
+  // Cancel found it — so Tab+Enter reaching the invisible confirm button
+  // after Cancel could fire a bulk delete for a count nobody had just seen.
+  // The `{#if ui.tagDeleteOpen}` wrap in TagDeletePanel.svelte and the
+  // `!ui.tagDeleteOpen` guard in confirmTagDelete are what actually close
+  // that gap; resetting the counts here is defence in depth on top of both,
+  // not a replacement for either.
+  ui.tagDeleteCount = 0;
+  ui.tagDeleteArchived = 0;
+  ui.tagDeleteFolders = 0;
+  ui.tagDeleteTag = "";
+  ui.tagDeleteRecycled = 0;
   if (sawResult) goHome();
 }
 
 /** Run the sweep the panel described. */
 export async function confirmTagDelete(): Promise<void> {
-  const tag = ui.galleryTag;
+  // tags-004 code review (Finding 1, CRITICAL): the structural fix is the
+  // `{#if ui.tagDeleteOpen}` wrap in TagDeletePanel.svelte, which removes the
+  // confirm button from the DOM entirely while the panel is closed. This is
+  // the second, independent layer — a destructive command must refuse to run
+  // on its own terms, not rely solely on the caller never being able to
+  // reach it, in case some future path (a shortcut, a race, a bug in the
+  // wrap) ever calls this function while the panel isn't actually open.
+  if (!ui.tagDeleteOpen) return;
+  // tags-004 code review (Finding 1, CRITICAL): read the tag CAPTURED at open
+  // time, not `ui.galleryTag` live — see the comment beside `tagDeleteTag` in
+  // state.svelte.ts for what re-reading it here used to allow.
+  const tag = ui.tagDeleteTag;
   if (!tag || ui.tagDeleteBusy) return;
   ui.tagDeleteBusy = true;
   ui.tagDeleteError = "";
@@ -4646,7 +4685,14 @@ export async function confirmTagDelete(): Promise<void> {
     skippedFolders: number;
     failed: number;
   }>("tag_delete_all", { tag, expectCount: ui.tagDeleteCount }).catch((err) => {
-    ui.tagDeleteError = String(err);
+    // tags-004 code review (Finding 3): phase 3 (unlink members + decide the
+    // tag row) runs AFTER phase 2's recycle loop has already moved files to
+    // the bin. If phase 3 itself fails, this catch is all the UI ever sees —
+    // the command returns Err, discarding the TagDeleteResult it had already
+    // built, so there is no count to show. Saying nothing else happened
+    // would be dishonest: files are very possibly already gone from disk.
+    // Say so, without inventing a number we were never actually given.
+    ui.tagDeleteError = `${String(err)} Some files may already be in the Recycle Bin — reopen this tag to see what's left.`;
     return null;
   });
   ui.tagDeleteBusy = false;
@@ -4669,6 +4715,9 @@ export async function confirmTagDelete(): Promise<void> {
   if (res.skippedMissing > 0) parts.push(`${res.skippedMissing} already gone`);
   if (res.failed > 0) parts.push(`${res.failed} could not be deleted`);
   ui.tagDeleteResult = parts.join(" · ");
+  // tags-004 code review (Finding 4): lets the panel's result heading say
+  // "Done" only when something actually was — see TagDeletePanel.svelte.
+  ui.tagDeleteRecycled = res.recycled;
   // The underlying data is refreshed now, not deferred to dismissal — the
   // sweep already happened; only the user's acknowledgement of it, and the
   // navigation that follows, wait on the panel being closed.
