@@ -22,7 +22,14 @@
     doImageReveal,
     doImageInfo,
     openTagPopover,
+    doImageDelete,
   } from "./controller";
+  import { deleteButtonText } from "../player-core";
+
+  // img-003: the copy lives in player-core because it is unit-tested there —
+  // the armed wording is the button's only sign of arming once the flash toast
+  // has faded, which is exactly the kind of thing that rots silently.
+  const delText = $derived(deleteButtonText(ui.imgDeleteArmed, ui.imgTitle));
 </script>
 
 <!-- ===================== IMAGE / GIF VIEWER (play-012, gallery-001) ===================== -->
@@ -223,6 +230,21 @@
       </button>
       <button id="btn-img-tag" class="iconbtn iconbtn--sm" type="button" title="Tags (#)" aria-label="Tags" onclick={openTagPopover}>
         <svg class="ic" viewBox="0 0 24 24"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /><circle cx="7.5" cy="7.5" r="1.5" /></svg>
+      </button>
+      <!-- img-003: the only control in this app that destroys a user's file.
+           Two presses, and the file goes to the Recycle Bin — see
+           doImageDelete for why this is not a dialog. `data-armed` is what
+           makes the armed state visible rather than only announced. -->
+      <button
+        id="img-delete"
+        class="iconbtn iconbtn--sm iconbtn--danger"
+        type="button"
+        data-armed={ui.imgDeleteArmed}
+        title={delText.title}
+        aria-label={delText.label}
+        onclick={() => void doImageDelete()}
+      >
+        <svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
       </button>
     </div>
   </div>

@@ -1421,6 +1421,15 @@ body {
   transform: scale(0.94);
 }
 
+/* img-003: the delete control reads as destructive before it is pressed, and
+   unmistakably armed after. The armed state is a filled swatch rather than a
+   tint because it has to survive the chrome's idle fade being interrupted. */
+.iconbtn--danger:hover { color: #ff6b6b; }
+.iconbtn--danger[data-armed="true"] {
+  background: #c0392b;
+  color: #fff;
+}
+
 /* Play — plain icon button per frame 02 (no white fill); centered prominence. */
 .iconbtn--primary {
   color: var(--on-dark);

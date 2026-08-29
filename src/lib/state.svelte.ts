@@ -254,6 +254,11 @@ export const ui = $state({
   // the panel omits those rows rather than printing blanks or zeroes.
   imgInfoOpen: false,
   imgInfoRows: [] as { label: string; value: string }[],
+  // img-003: true while the delete button is armed — the first press has landed
+  // and a second within DELETE_ARM_MS will move the file to the Recycle Bin.
+  // Mirrors the authoritative keyed arm held in controller.ts; this is only what
+  // the button renders from.
+  imgDeleteArmed: false,
   // Brief confirmation for an action with no visible result of its own; copying
   // changes nothing on screen, so without this there is no way to tell it worked.
   imgActionFlash: "",

@@ -128,6 +128,12 @@ import {
   pageRange,
   windowBounds,
   nextThumbFillBatch,
+  deleteArmKey,
+  armDelete,
+  isArmedFor,
+  indexAfterDelete,
+  DELETE_ARM_MS,
+  type DeleteArm,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -3866,6 +3872,80 @@ export async function doImageReveal(): Promise<void> {
   }
 }
 
+/** The authoritative armed delete. `ui.imgDeleteArmed` is only its render. */
+let deleteArm: DeleteArm | null = null;
+let deleteArmTimer: number | undefined;
+
+/** Drop the arm and its render. Called on expiry and after a delete lands. */
+function disarmDelete(): void {
+  deleteArm = null;
+  ui.imgDeleteArmed = false;
+  window.clearTimeout(deleteArmTimer);
+  deleteArmTimer = undefined;
+}
+
+/**
+ * Delete the photo on screen, to the Recycle Bin (img-003).
+ *
+ * Two presses, not a dialog: `window.confirm` shows nothing in this WebView2
+ * build and returns true, so a single press behind one would destroy the file
+ * having asked nothing. The first press arms and says so on the button; the
+ * second, while still armed FOR THIS FILE, does it.
+ *
+ * Nothing here deletes a page inside an archive: that would mean rewriting the
+ * user's .zip, which is not what this button promises.
+ */
+export async function doImageDelete(): Promise<void> {
+  if (!currentPath) return;
+  if (currentArchiveOrigin) {
+    flashImageAction("A picture inside an archive cannot be deleted.");
+    return;
+  }
+  const key = deleteArmKey("", currentPath);
+  const name = basename(currentPath);
+
+  if (!isArmedFor(deleteArm, key, Date.now())) {
+    deleteArm = armDelete(key, Date.now(), DELETE_ARM_MS);
+    ui.imgDeleteArmed = true;
+    flashImageAction(`Press Delete again to move ${name} to the Recycle Bin.`);
+    window.clearTimeout(deleteArmTimer);
+    deleteArmTimer = window.setTimeout(disarmDelete, DELETE_ARM_MS);
+    return;
+  }
+
+  const doomed = currentPath;
+  disarmDelete();
+  try {
+    await tauriInvoke("recycle_file", { path: doomed });
+  } catch (err) {
+    showError(`Could not delete that file: ${String(err)}`);
+    return;
+  }
+  perfMark("image.deleted", name);
+
+  // Work out where to land BEFORE mutating the queue, then hand off to
+  // stepPhoto — the same helper doNextPhoto and doPrevPhoto use, so the
+  // viewer, title and counter update exactly as they do for any other
+  // navigation. stepPhoto sets ui.photoIndex itself; do not set it here too.
+  const at = ui.photoQueue.findIndex((q) => q.path === doomed);
+  if (at < 0) {
+    // The queue never held it (a single file opened directly). Nothing to
+    // advance to.
+    goBack();
+    return;
+  }
+  const next = indexAfterDelete(at, ui.photoQueue.length);
+  ui.photoQueue.splice(at, 1);
+
+  if (next < 0) {
+    // That was the last picture in the folder — there is nothing to show.
+    goBack();
+    return;
+  }
+  await stepPhoto(next);
+  flashImageAction(`${name} moved to the Recycle Bin.`);
+}
+
 /** What the native side reports about the file itself. */
 interface NativeImageInfo {
   sizeBytes: number;
@@ -5660,6 +5740,10 @@ function handleImageKey(e: KeyboardEvent): boolean {
         return true;
       }
       return false;
+    case "Delete":
+      e.preventDefault();
+      void doImageDelete();
+      return true;
     default:
       break;
   }
