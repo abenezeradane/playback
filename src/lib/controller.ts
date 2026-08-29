@@ -4359,6 +4359,8 @@ export async function openGalleryForTag(tag: string): Promise<void> {
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false; // tags-002: the sliding window replaced the cap
   disarmPrune(); // tags-002 fix-wave: opening a tag, even this one afresh, is a new count
+  disarmGalleryDelete(); // img-003: same reasoning as disarmDelete in openImage -- an
+  // armed tile from the view being left must not keep claiming a press here deletes it
   ui.galleryWindowStart = 0;
   ui.galleryCrumbs = [];
   ui.galleryError = "";
@@ -5291,6 +5293,8 @@ export async function openGalleryForFolder(
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
   disarmPrune(); // tags-002 fix-wave: leaving the tag for a folder leaves any armed prune too
+  disarmGalleryDelete(); // img-003: same reasoning as disarmDelete in openImage -- an
+  // armed tile from the view being left must not keep claiming a press here deletes it
   // tags-002: a folder view is never windowed — every tile it renders IS the
   // gallery, so its absolute indices start at 0. Without this reset, leaving a
   // tag scrolled deep in (a non-zero windowStart) for a tagged FOLDER tile
@@ -5363,6 +5367,8 @@ export async function openArchiveGallery(
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
   disarmPrune(); // tags-002 fix-wave: same as openGalleryForFolder — leaving the tag
+  disarmGalleryDelete(); // img-003: same reasoning as disarmDelete in openImage -- an
+  // armed tile from the view being left must not keep claiming a press here deletes it
   // tags-002: see the matching reset in openGalleryForFolder — an archive
   // level is never windowed either, so a stale non-zero windowStart carried
   // over from a tag session would break keyboard focus the same way.
