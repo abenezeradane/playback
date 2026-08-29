@@ -339,6 +339,11 @@ export const ui = $state({
   // be a tab trap). -1 until the grid is first focused. ABSOLUTE — a position in
   // the full list, not in `galleryItems` (tags-002).
   galleryIndex: -1,
+  // img-003: the ABSOLUTE index of the tile whose delete is armed, or -1. Absolute
+  // for the same reason galleryIndex is — a tag view's window slides underneath it,
+  // and an armed position that meant "row n of what is loaded" would drift onto a
+  // different file.
+  galleryDeleteArmed: -1,
   // tags-002: the absolute index of `galleryItems[0]`. Every other gallery view
   // populates the whole list, so this stays 0 for them; only the tag view's
   // sliding window (Task 12) moves it. Kept here rather than local to that

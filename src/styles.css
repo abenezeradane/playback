@@ -4281,6 +4281,14 @@ button.shortcuts__backdrop {
   opacity: 0.35;
 }
 
+/* img-003: the tile a second Delete will destroy. Deliberately loud — this is
+   the one confirmation in the app whose trigger needs no pointer, so it has to
+   be unmistakable at a glance across a grid of hundreds. */
+.gallery-tile--armed {
+  outline: 3px solid #c0392b;
+  outline-offset: -3px;
+}
+
 /* The duration badge owns the top-right corner, the folder/archive badge owns
    the top-left, and the filename strip owns the bottom edge (see
    .gallery-tile__tag above) — bottom-left is the one corner none of them

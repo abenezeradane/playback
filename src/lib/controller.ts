@@ -5068,6 +5068,7 @@ function galleryTotalCount(): number {
  *  navigation past the loaded window's edge must pull the next page in rather
  *  than focusing a tile that is not in the DOM yet. */
 function focusGalleryTile(index: number): void {
+  disarmGalleryDelete(); // img-003: the cursor moving means the arm no longer aims at anything
   const count = galleryTotalCount();
   if (count === 0) return;
   const next = Math.max(0, Math.min(count - 1, index));
@@ -5124,9 +5125,83 @@ function handleGalleryKey(e: KeyboardEvent): boolean {
     case "#":
       openTagPopover();
       return true;
+    case "Delete":
+      void doGalleryDelete();
+      return true;
     default:
       return false;
   }
+}
+
+/**
+ * Delete the tile under the grid's cursor, to the Recycle Bin (img-003).
+ *
+ * The most accident-prone surface in this feature — a bare keypress on a
+ * focused grid — so it carries the same two-press arm as the viewer AND makes
+ * the armed tile visibly pending. An arm legible only to a screen reader is
+ * not enough when the trigger needs no pointer.
+ */
+export async function doGalleryDelete(): Promise<void> {
+  // -1 means no tile has ever been focused (ux-004). Deleting tile 0 on a hunch
+  // would destroy something the user never pointed at, in a folder that may hold
+  // thousands. This is the same refusal currentTagTarget makes, for a much
+  // higher-stakes action.
+  if (ui.galleryIndex < 0) return;
+  // ABSOLUTE -> windowed, exactly as currentTagTarget does: a tag view's window
+  // slides, and an unoffset read would delete whatever landed at that array slot.
+  const item = ui.galleryItems[ui.galleryIndex - ui.galleryWindowStart];
+  if (!item || item.pending) return; // no real identity yet
+  if (item.missing) {
+    flashGalleryAction("That file is already gone.");
+    return;
+  }
+  if (item.kind === "folder" || item.kind === "archive") {
+    flashGalleryAction("Only photos and videos can be deleted from here.");
+    return;
+  }
+  if (item.archive) {
+    flashGalleryAction("A page inside an archive cannot be deleted.");
+    return;
+  }
+
+  const key = deleteArmKey(item.archive, item.path);
+  if (!isArmedFor(galleryArm, key, Date.now())) {
+    galleryArm = armDelete(key, Date.now(), DELETE_ARM_MS);
+    ui.galleryDeleteArmed = ui.galleryIndex;
+    flashGalleryAction(`Press Delete again to move ${item.name} to the Recycle Bin.`);
+    window.clearTimeout(galleryArmTimer);
+    galleryArmTimer = window.setTimeout(disarmGalleryDelete, DELETE_ARM_MS);
+    return;
+  }
+
+  disarmGalleryDelete();
+  try {
+    await tauriInvoke("recycle_file", { path: item.path });
+  } catch (err) {
+    ui.galleryError = `Could not delete ${item.name}.`;
+    return;
+  }
+  perfMark("gallery.deleted", item.name);
+  flashGalleryAction(`${item.name} moved to the Recycle Bin.`);
+  // Reload so the grid matches the disk, branching the way the rest of the file
+  // does. This is what pruneMissingFromTag does after it applies (controller.ts
+  // :4386) — there is no generic reloadGallery, and adding one for this would be
+  // a third path to keep in step with the other two.
+  if (ui.galleryTag) await openGalleryForTag(ui.galleryTag);
+  else await openGalleryForFolder(ui.galleryPath);
+}
+
+let galleryArm: DeleteArm | null = null;
+let galleryArmTimer: number | undefined;
+
+/** Drop the grid's arm. Called on expiry, on any cursor move, and whenever the
+ *  listing changes underneath it — an arm that outlives what it was aimed at is
+ *  not a confirmation, the rule disarmPrune already follows. */
+function disarmGalleryDelete(): void {
+  galleryArm = null;
+  ui.galleryDeleteArmed = -1;
+  window.clearTimeout(galleryArmTimer);
+  galleryArmTimer = undefined;
 }
 
 /** Called by the grid's scroll handler (Gallery.svelte Step 2) when the row

@@ -300,6 +300,7 @@
             class:gallery-tile--video={item.kind === "video"}
             class:gallery-tile--archive={item.kind === "archive"}
             class:gallery-tile--missing={item.missing}
+            class:gallery-tile--armed={ui.galleryWindowStart + i === ui.galleryDeleteArmed}
             title={tileLabel(item.kind, item.name)}
             aria-label={tileLabel(item.kind, item.name)}
             aria-disabled={item.missing ? "true" : undefined}
