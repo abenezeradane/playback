@@ -852,6 +852,65 @@ pub(crate) fn tag_member_paths(
     Ok(out)
 }
 
+/// What a tag-delete actually did (tags-004). Four numbers rather than one,
+/// because "deleted the tag" is not the same claim as "recycled every file it
+/// named", and the UI must be able to say which happened.
+///
+/// `rename_all = "camelCase"` is load-bearing, not style: serde's default would
+/// send `skipped_in_archive` and the TypeScript side reads `skippedInArchive`,
+/// so without it every skip count silently arrives as `undefined` and the UI
+/// reports a clean sweep over files it never touched.
+#[derive(Serialize, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TagDeleteResult {
+    pub recycled: u32,
+    pub skipped_in_archive: u32,
+    pub skipped_missing: u32,
+    pub failed: u32,
+}
+
+/// Members split by what can be done with them.
+pub(crate) struct Classified {
+    /// `(item id, path on disk)` for members that exist and can be recycled.
+    pub to_recycle: Vec<(i64, String)>,
+    pub skipped_in_archive: u32,
+    pub skipped_missing: u32,
+}
+
+/// Decide, for each member, whether it can be recycled — the whole of the
+/// sweep's phase 2 decision-making (tags-004).
+///
+/// Split out from the command so it is testable against real files with no
+/// database and no Tauri state, and because the `fs::metadata` calls in here
+/// are precisely the slow work that must run with the connection RELEASED.
+///
+/// A member with a non-empty `archive` lives inside a .zip/.cbr. It is skipped,
+/// never recycled: removing it would mean rewriting the user's archive, which is
+/// a far larger and more dangerous action than this button promises. It is
+/// counted so the result can say so rather than quietly dropping it.
+pub(crate) fn classify_for_delete(rows: Vec<(i64, String, String)>) -> Classified {
+    let mut out = Classified {
+        to_recycle: Vec::new(),
+        skipped_in_archive: 0,
+        skipped_missing: 0,
+    };
+    for (id, archive, path) in rows {
+        if !archive.is_empty() {
+            out.skipped_in_archive += 1;
+            continue;
+        }
+        // disk_target is the shared authority on which path must exist for a
+        // member to be real; for a non-archive member that is the path itself.
+        let target = disk_target(&archive, &path).to_string();
+        if std::fs::metadata(&target).is_err() {
+            out.skipped_missing += 1;
+            continue;
+        }
+        out.to_recycle.push((id, target));
+    }
+    out
+}
+
 /// Delete the given item ids from `tag`, in one transaction, dropping any item
 /// row whose LAST tag this was. Returns how many were removed.
 ///
@@ -2374,5 +2433,90 @@ mod tests {
         let path = temp_db("del-tag-missing");
         let conn = open_db(&path).unwrap();
         assert!(delete_tag(&conn, "nosuchtag").is_ok());
+    }
+
+    /// A temp directory holding one real file, for the classifier's disk checks.
+    fn temp_files(tag: &str) -> PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("pb-tagdel-test-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn classify_keeps_files_that_are_really_there() {
+        let dir = temp_files("present");
+        let f = dir.join("a.jpg");
+        std::fs::write(&f, b"x").unwrap();
+
+        let out = classify_for_delete(vec![(1, String::new(), f.to_string_lossy().into_owned())]);
+
+        assert_eq!(out.to_recycle.len(), 1);
+        assert_eq!(out.to_recycle[0].0, 1);
+        assert_eq!(out.skipped_missing, 0);
+        assert_eq!(out.skipped_in_archive, 0);
+    }
+
+    /// Skipped, not deleted: recycling a page would mean rewriting the user's
+    /// archive, which is a far larger action than this button promises.
+    #[test]
+    fn classify_skips_a_page_inside_an_archive() {
+        let dir = temp_files("archive");
+        let book = dir.join("book.cbz");
+        std::fs::write(&book, b"x").unwrap(); // the archive itself exists
+
+        let out = classify_for_delete(vec![(
+            1,
+            book.to_string_lossy().into_owned(),
+            "page1.jpg".to_string(),
+        )]);
+
+        assert!(out.to_recycle.is_empty(), "an archive page must never be recycled");
+        assert_eq!(out.skipped_in_archive, 1);
+        assert_eq!(out.skipped_missing, 0);
+    }
+
+    #[test]
+    fn classify_skips_a_file_that_is_already_gone() {
+        let dir = temp_files("missing");
+        let out = classify_for_delete(vec![(
+            1,
+            String::new(),
+            dir.join("never-existed.jpg").to_string_lossy().into_owned(),
+        )]);
+
+        assert!(out.to_recycle.is_empty());
+        assert_eq!(out.skipped_missing, 1);
+        assert_eq!(out.skipped_in_archive, 0);
+    }
+
+    #[test]
+    fn classify_sorts_a_mixed_batch_into_its_three_buckets() {
+        let dir = temp_files("mixed");
+        let real = dir.join("real.jpg");
+        std::fs::write(&real, b"x").unwrap();
+        let book = dir.join("book.cbz");
+        std::fs::write(&book, b"x").unwrap();
+
+        let out = classify_for_delete(vec![
+            (1, String::new(), real.to_string_lossy().into_owned()),
+            (2, book.to_string_lossy().into_owned(), "page1.jpg".to_string()),
+            (3, String::new(), dir.join("gone.jpg").to_string_lossy().into_owned()),
+        ]);
+
+        assert_eq!(out.to_recycle.len(), 1);
+        assert_eq!(out.to_recycle[0].0, 1);
+        assert_eq!(out.skipped_in_archive, 1);
+        assert_eq!(out.skipped_missing, 1);
+    }
+
+    #[test]
+    fn classify_handles_an_empty_batch() {
+        let out = classify_for_delete(Vec::new());
+        assert!(out.to_recycle.is_empty());
+        assert_eq!(out.skipped_in_archive, 0);
+        assert_eq!(out.skipped_missing, 0);
     }
 }
