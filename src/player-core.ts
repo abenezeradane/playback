@@ -2228,3 +2228,86 @@ export function nextThumbFillBatch(
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Deleting a file (img-003)
+// ---------------------------------------------------------------------------
+// `window.confirm` is unusable in this WebView2 build — it returns true
+// synchronously with nothing drawn on screen (see pruneMissingFromTag in
+// controller.ts). So a delete is confirmed the way a prune is: press once to
+// arm, press again to act.
+//
+// The arm is KEYED on the file's identity rather than being a bare boolean,
+// and that is the load-bearing part. Arming on one photo and pressing Del
+// after moving to the next must not delete the next one — with a keyed arm
+// that falls out of `isArmedFor` for free, instead of depending on every
+// navigation path remembering to call a reset. tags-002's `disarmPrune` needs
+// four such call sites; this needs none.
+
+/** How long a delete stays armed after the first press. Mirrors
+ *  PRUNE_ARM_MS in controller.ts rather than inventing a second duration for
+ *  the same idea. */
+export const DELETE_ARM_MS = 5000;
+
+/** An armed delete: which file, and until when. */
+export interface DeleteArm {
+  key: string;
+  expires: number;
+}
+
+/** The identity a delete is armed against. `archive` is "" for a real file;
+ *  otherwise `path` is the path INSIDE that archive, and the two are different
+ *  things that must never collide. The separator is a NUL, which cannot occur
+ *  in a Windows path. */
+export function deleteArmKey(archive: string, path: string): string {
+  return `${archive} ${path}`;
+}
+
+/** Arm a delete for `key`, expiring `ttlMs` from `now`. */
+export function armDelete(key: string, now: number, ttlMs: number): DeleteArm {
+  return { key, expires: now + ttlMs };
+}
+
+/** True only when `arm` is for this exact file and has not expired. */
+export function isArmedFor(arm: DeleteArm | null, key: string, now: number): boolean {
+  if (!arm) return false;
+  if (arm.key !== key) return false;
+  return now < arm.expires;
+}
+
+/**
+ * Where the cursor goes after the item at `index` is deleted from a queue of
+ * `length`, or -1 when that emptied it.
+ *
+ * Deleting from the middle keeps the index: the NEXT photo slides into the
+ * slot, which is what "delete and keep going" means. Deleting the last one has
+ * no next, so it steps back to the new end.
+ */
+export function indexAfterDelete(index: number, length: number): number {
+  if (length <= 1) return -1;
+  return Math.min(index, length - 2);
+}
+
+/**
+ * The delete button's title and accessible name (img-003).
+ *
+ * Armed, the control itself says what a second press does — the same reasoning
+ * as `pruneButtonText` in Gallery.svelte: the toast that announced the arm
+ * fades after 1.4s but the arm lasts 5s, so a screen reader reaching the
+ * button after the toast has gone must still learn it is armed.
+ */
+export function deleteButtonText(
+  armed: boolean,
+  name: string,
+): { title: string; label: string } {
+  if (!armed) {
+    return {
+      title: "Delete (Del)",
+      label: `Delete ${name} — moves it to the Recycle Bin`,
+    };
+  }
+  return {
+    title: `Press again to delete ${name}`,
+    label: `Press again to move ${name} to the Recycle Bin`,
+  };
+}

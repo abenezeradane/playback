@@ -137,6 +137,12 @@ import {
   orientationDrawMatrix,
   type EngineSnapshot,
   type NativePlayerEvent,
+  deleteArmKey,
+  armDelete,
+  isArmedFor,
+  indexAfterDelete,
+  deleteButtonText,
+  DELETE_ARM_MS,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -2370,5 +2376,80 @@ describe("nextThumbFillBatch", () => {
     // side of the focus a tile happens to sit on. 0 is 9 away and 20 is 11, so
     // 0 comes first even though it means going back up past a filled gap.
     expect(nextThumbFillBatch([0, 5, 9, 20], 9, 3)).toEqual([9, 5, 0]);
+  });
+});
+
+describe("img-003 delete confirmation", () => {
+  describe("deleteArmKey", () => {
+    it("distinguishes a file on disk from a page inside an archive", () => {
+      expect(deleteArmKey("", "C:\pics\a.jpg")).not.toBe(
+        deleteArmKey("C:\pics\book.cbz", "C:\pics\a.jpg"),
+      );
+    });
+
+    it("is stable for the same identity", () => {
+      expect(deleteArmKey("", "C:\pics\a.jpg")).toBe(deleteArmKey("", "C:\pics\a.jpg"));
+    });
+  });
+
+  describe("isArmedFor", () => {
+    const key = deleteArmKey("", "C:\pics\a.jpg");
+
+    it("is not armed when nothing has been pressed", () => {
+      expect(isArmedFor(null, key, 1000)).toBe(false);
+    });
+
+    it("is armed for the same file within the window", () => {
+      const arm = armDelete(key, 1000, DELETE_ARM_MS);
+      expect(isArmedFor(arm, key, 1000 + DELETE_ARM_MS - 1)).toBe(true);
+    });
+
+    it("disarms once the window has passed", () => {
+      const arm = armDelete(key, 1000, DELETE_ARM_MS);
+      expect(isArmedFor(arm, key, 1000 + DELETE_ARM_MS)).toBe(false);
+    });
+
+    // This is the whole reason the arm is keyed rather than a bare boolean:
+    // arming on one photo and pressing Del on the NEXT one must not delete it.
+    it("is not armed for a different file, however recently it was armed", () => {
+      const arm = armDelete(key, 1000, DELETE_ARM_MS);
+      const other = deleteArmKey("", "C:\pics\b.jpg");
+      expect(isArmedFor(arm, other, 1001)).toBe(false);
+    });
+  });
+
+  describe("indexAfterDelete", () => {
+    it("stays put in the middle, so the next photo slides in under the cursor", () => {
+      expect(indexAfterDelete(1, 3)).toBe(1);
+    });
+
+    it("steps back when the last item was deleted", () => {
+      expect(indexAfterDelete(2, 3)).toBe(1);
+    });
+
+    it("stays at the front when the first was deleted", () => {
+      expect(indexAfterDelete(0, 3)).toBe(0);
+    });
+
+    it("reports an empty queue when the only item was deleted", () => {
+      expect(indexAfterDelete(0, 1)).toBe(-1);
+    });
+  });
+
+  describe("deleteButtonText", () => {
+    it("names the action when unarmed and does not threaten a file", () => {
+      const t = deleteButtonText(false, "a.jpg");
+      expect(t.title).toBe("Delete (Del)");
+      expect(t.label).toBe("Delete a.jpg — moves it to the Recycle Bin");
+    });
+
+    // The armed state must be legible to a screen reader on the control
+    // itself: the .imgview__flash toast that announced it fades after 1.4s
+    // while the arm lasts 5s, exactly as pruneButtonText documents.
+    it("says what a second press will do once armed", () => {
+      const t = deleteButtonText(true, "a.jpg");
+      expect(t.title).toBe("Press again to delete a.jpg");
+      expect(t.label).toBe("Press again to move a.jpg to the Recycle Bin");
+    });
   });
 });
