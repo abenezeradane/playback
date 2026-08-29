@@ -852,7 +852,7 @@ pub(crate) fn tag_member_paths(
     Ok(out)
 }
 
-/// What a tag-delete actually did (tags-004). Four numbers rather than one,
+/// What a tag-delete actually did (tags-004). Five numbers rather than one,
 /// because "deleted the tag" is not the same claim as "recycled every file it
 /// named", and the UI must be able to say which happened.
 ///
@@ -866,6 +866,7 @@ pub(crate) struct TagDeleteResult {
     pub recycled: u32,
     pub skipped_in_archive: u32,
     pub skipped_missing: u32,
+    pub skipped_folders: u32,
     pub failed: u32,
 }
 
@@ -875,6 +876,7 @@ pub(crate) struct Classified {
     pub to_recycle: Vec<(i64, String)>,
     pub skipped_in_archive: u32,
     pub skipped_missing: u32,
+    pub skipped_folders: u32,
 }
 
 /// Decide, for each member, whether it can be recycled — the whole of the
@@ -893,6 +895,7 @@ pub(crate) fn classify_for_delete(rows: Vec<(i64, String, String)>) -> Classifie
         to_recycle: Vec::new(),
         skipped_in_archive: 0,
         skipped_missing: 0,
+        skipped_folders: 0,
     };
     for (id, archive, path) in rows {
         if !archive.is_empty() {
@@ -902,8 +905,23 @@ pub(crate) fn classify_for_delete(rows: Vec<(i64, String, String)>) -> Classifie
         // disk_target is the shared authority on which path must exist for a
         // member to be real; for a non-archive member that is the path itself.
         let target = disk_target(&archive, &path).to_string();
-        if std::fs::metadata(&target).is_err() {
-            out.skipped_missing += 1;
+        let meta = match std::fs::metadata(&target) {
+            Ok(meta) => meta,
+            Err(_) => {
+                out.skipped_missing += 1;
+                continue;
+            }
+        };
+        // recycle_file (recycle.rs) already refuses a directory outright: "a
+        // recursive folder delete is a materially different promise from
+        // removing one file — one this app does not make anywhere." A tag can
+        // carry a folder (TagTarget::kind includes "folder"), so this bulk path
+        // needs the same refusal or a confirmed "delete 5 files" could sweep an
+        // entire tree. Checked against the metadata just fetched, not the
+        // stored `kind`, so it also catches a row whose path happens to now
+        // point at a directory for any other reason.
+        if meta.is_dir() {
+            out.skipped_folders += 1;
             continue;
         }
         out.to_recycle.push((id, target));
@@ -911,12 +929,38 @@ pub(crate) fn classify_for_delete(rows: Vec<(i64, String, String)>) -> Classifie
     out
 }
 
-/// Delete the given item ids from `tag`, in one transaction, dropping any item
-/// row whose LAST tag this was. Returns how many were removed.
+/// The per-id unlink work shared by `delete_tag_members` and `tag_delete_all`'s
+/// phase 3. Pulled out so `tag_delete_all` can run it inside a transaction IT
+/// already holds, alongside a live recount and the tag-row delete — SQLite has
+/// no nested `BEGIN`, so this cannot itself open a transaction, unlike
+/// `delete_tag_members` below which is free to because it is always called
+/// standalone.
 ///
 /// Scoped exactly as `prune_missing`: the `item_tags` row goes first, so the
-/// `NOT EXISTS` guard on the `items` delete sees this transaction's own delete
-/// and fires only when no tag at all remains.
+/// `NOT EXISTS` guard on the `items` delete sees this same transaction's own
+/// delete and fires only when no tag at all remains.
+fn unlink_members(conn: &Connection, folded: &str, ids: &[i64]) -> Result<(), String> {
+    for id in ids {
+        conn.execute(
+            "DELETE FROM item_tags
+             WHERE item_id = ?1 AND tag_id = (SELECT id FROM tags WHERE folded = ?2)",
+            params![id, folded],
+        )
+        .map_err(|e| format!("tags: delete members unlink: {e}"))?;
+        // An items row exists only to carry tags — but only delete it when this
+        // was its last one, or a prune of `keep` would destroy `edit`'s member.
+        conn.execute(
+            "DELETE FROM items
+             WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM item_tags WHERE item_id = ?1)",
+            params![id],
+        )
+        .map_err(|e| format!("tags: delete members item: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Delete the given item ids from `tag`, in one transaction, dropping any item
+/// row whose LAST tag this was. Returns how many were removed.
 pub(crate) fn delete_tag_members(
     conn: &Connection,
     tag: &str,
@@ -930,22 +974,7 @@ pub(crate) fn delete_tag_members(
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("tags: delete members tx: {e}"))?;
-    for id in ids {
-        tx.execute(
-            "DELETE FROM item_tags
-             WHERE item_id = ?1 AND tag_id = (SELECT id FROM tags WHERE folded = ?2)",
-            params![id, folded],
-        )
-        .map_err(|e| format!("tags: delete members unlink: {e}"))?;
-        // An items row exists only to carry tags — but only delete it when this
-        // was its last one, or a prune of `keep` would destroy `edit`'s member.
-        tx.execute(
-            "DELETE FROM items
-             WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM item_tags WHERE item_id = ?1)",
-            params![id],
-        )
-        .map_err(|e| format!("tags: delete members item: {e}"))?;
-    }
+    unlink_members(&tx, &folded, ids)?;
     tx.commit().map_err(|e| format!("tags: delete members commit: {e}"))?;
     // The count is what phase 2 identified, not rows-affected. The three-phase
     // split releases the lock between the scan and this delete, so a concurrent
@@ -1110,13 +1139,18 @@ pub(crate) async fn tag_delete_all(
     let db = db.inner().clone();
     fold_tag(&tag)?;
     blocking(move || {
-        // Phase 1 — read the members under the lock.
-        let rows = with_db(&db, |conn| tag_member_paths(conn, &tag))?;
+        // Phase 1 — read the members under the lock. Wrapped here, not with a
+        // blanket wrap on the whole function's result: that would also catch —
+        // and flatten to a generic string — the interlock's own `Err` below,
+        // which is the one message the UI most needs to show verbatim.
+        let rows = with_db(&db, |conn| tag_member_paths(conn, &tag))
+            .map_err(|e| crate::ipc_error("tag_delete_all: read members", e, "could not read that tag"))?;
 
         // The interlock. The count the user confirmed against is the count we
         // must still be looking at; if a concurrent tag-apply changed it, abort
         // having deleted NOTHING rather than sweep a different set than the one
-        // the confirmation described.
+        // the confirmation described. This does not go through with_db, so it
+        // passes through the `?` below untouched by either ipc_error wrap.
         if rows.len() as u32 != expect_count {
             return Err(crate::ipc_error(
                 "tag_delete_all: count changed",
@@ -1131,6 +1165,7 @@ pub(crate) async fn tag_delete_all(
             recycled: 0,
             skipped_in_archive: plan.skipped_in_archive,
             skipped_missing: plan.skipped_missing,
+            skipped_folders: plan.skipped_folders,
             failed: 0,
         };
         let mut done: Vec<i64> = Vec::new();
@@ -1151,20 +1186,44 @@ pub(crate) async fn tag_delete_all(
             }
         }
 
-        // Phase 3 — under the lock again, and bounded to what phase 2 actually
-        // recycled. A file that failed keeps its tag, so the tag still names
-        // something real and the user can retry.
+        // Phase 3 — under the lock again, bounded to what phase 2 actually
+        // recycled.
         with_db(&db, |conn| {
-            delete_tag_members(conn, &tag, &done)?;
-            // The tag goes only when nothing it named survives. If a file failed
-            // to recycle or a page inside an archive was skipped, the tag still
-            // has members and deleting it would strand them.
-            let remaining = result.failed + result.skipped_in_archive + result.skipped_missing;
+            let (_, folded) = fold_tag(&tag)?;
+            // Unlinking `done` and the tag-row decision share ONE transaction.
+            // The phase-1 -> phase-3 gap is the whole point of releasing the
+            // lock for phase 2, and on a large tag that gap is minutes long — a
+            // tag_apply landing in it adds an item_tags row phase 1 never saw.
+            // If that unlink and the tag-row delete were two separate commits
+            // (as delete_tag_members does on its own), the new member could
+            // land in the gap between them and get cascade-dropped along with
+            // the tag it was just given. One transaction closes that window.
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|e| format!("tags: delete-all tx: {e}"))?;
+            unlink_members(&tx, &folded, &done)?;
+            // The tag goes only when nothing it named survives — checked with a
+            // live re-COUNT inside this same transaction, not by trusting the
+            // phase-1 snapshot's arithmetic (failed + skipped_in_archive +
+            // skipped_missing + skipped_folders). That arithmetic still decided
+            // WHICH ids ended up in `done`; but only the live table can see a
+            // member phase 1 never knew about, so it alone gets to decide
+            // whether the row is actually empty now.
+            let remaining: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM item_tags it
+                     JOIN tags t ON t.id = it.tag_id
+                     WHERE t.folded = ?1",
+                    params![folded],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("tags: delete-all recount: {e}"))?;
             if remaining == 0 {
-                delete_tag(conn, &tag)?;
+                delete_tag(&tx, &tag)?;
             }
-            Ok(())
-        })?;
+            tx.commit().map_err(|e| format!("tags: delete-all commit: {e}"))
+        })
+        .map_err(|e| crate::ipc_error("tag_delete_all: update tag", e, "could not update that tag"))?;
 
         Ok(result)
     })
@@ -2538,6 +2597,25 @@ mod tests {
         assert_eq!(out.to_recycle[0].0, 1);
         assert_eq!(out.skipped_missing, 0);
         assert_eq!(out.skipped_in_archive, 0);
+    }
+
+    /// A tagged FOLDER must never reach the recycle list. `recycle_file`
+    /// (recycle.rs) already refuses a directory outright -- "a recursive
+    /// folder delete is a materially different promise from removing one
+    /// file -- one this app does not make anywhere" -- and a tag can carry a
+    /// folder (TagTarget::kind includes "folder"), so the bulk sweep needs the
+    /// same refusal or a confirmed "delete 5 files" can take an entire tree.
+    #[test]
+    fn classify_skips_a_tagged_folder_rather_than_recycling_it_recursively() {
+        let dir = temp_files("folder");
+        let album = dir.join("album");
+        std::fs::create_dir_all(&album).unwrap();
+
+        let out = classify_for_delete(vec![(1, String::new(), album.to_string_lossy().into_owned())]);
+
+        assert!(out.to_recycle.is_empty(), "a folder must never be handed to recycle()");
+        assert_eq!(out.skipped_folders, 1);
+        assert_eq!(out.skipped_missing, 0);
     }
 
     /// Skipped, not deleted: recycling a page would mean rewriting the user's
