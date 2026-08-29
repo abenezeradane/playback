@@ -5126,6 +5126,14 @@ function handleGalleryKey(e: KeyboardEvent): boolean {
       openTagPopover();
       return true;
     case "Delete":
+      // img-003 final review: the tag popover is not a focus trap — clicking a
+      // chip or a suggestion (TagPopover.svelte) leaves focus on a <button>
+      // with nothing refocusing the input, so this key still reaches here.
+      // Both the armed-tile outline and the flash toast render underneath the
+      // popover's scrim, so a destructive key must not fire while its own
+      // feedback cannot be seen. Falls through as unhandled rather than
+      // preventing default — there is nothing else bound to Delete to leak into.
+      if (ui.tagPopoverOpen) return false;
       void doGalleryDelete();
       return true;
     default:
@@ -5175,9 +5183,20 @@ export async function doGalleryDelete(): Promise<void> {
   }
 
   disarmGalleryDelete();
+  // img-003 final review: captured before the reload below overwrites both —
+  // the reload's own setGalleryIndex(-1) would otherwise erase the position
+  // and count that indexAfterDelete needs to land the cursor afterwards.
+  const deletedIndex = ui.galleryIndex;
+  const countBefore = galleryTotalCount();
   try {
     await tauriInvoke("recycle_file", { path: item.path });
   } catch (err) {
+    // Logged here (not just shown) because ui.galleryError only ever renders
+    // "Could not delete <name>" — the backend's actual reason (refused
+    // directory, path not allowed, bin unavailable), already split from the
+    // public string by ipc_error on the Rust side, otherwise leaves no trace
+    // at all. Same reasoning as the "copy image" console.error above.
+    console.error("gallery delete", err);
     ui.galleryError = `Could not delete ${item.name}.`;
     return;
   }
@@ -5189,6 +5208,17 @@ export async function doGalleryDelete(): Promise<void> {
   // a third path to keep in step with the other two.
   if (ui.galleryTag) await openGalleryForTag(ui.galleryTag);
   else await openGalleryForFolder(ui.galleryPath);
+  // img-003 final review: both reload paths reset the cursor to -1 (ux-004's
+  // "a fresh grid starts with no keyboard cursor"), which meant every grid
+  // delete dropped focus to document.body and the roving tabindex snapped
+  // back to tile 0 -- so culling a folder, the actual use case for a grid
+  // delete, meant re-entering and re-arrowing after every single file. Land
+  // on the tile that slid into the deleted one's place instead, mirroring
+  // stepPhoto's use of this same indexAfterDelete in the viewer.
+  // focusGalleryTile both sets the cursor and gives the tile real DOM focus,
+  // so the roving tabindex agrees with it too.
+  const landing = indexAfterDelete(deletedIndex, countBefore);
+  if (landing >= 0) focusGalleryTile(landing);
 }
 
 let galleryArm: DeleteArm | null = null;
@@ -5217,7 +5247,7 @@ function disarmGalleryDelete(): void {
  * -- one choke point that stays correct even if a future call site forgets to
  * think about deletion at all.
  */
-function setGalleryIndex(next: number): void {
+export function setGalleryIndex(next: number): void {
   ui.galleryIndex = next;
   disarmGalleryDelete();
 }
@@ -5836,6 +5866,11 @@ function handleImageKey(e: KeyboardEvent): boolean {
       }
       return false;
     case "Delete":
+      // img-003 final review: same guard as the gallery's Delete case — the
+      // tag popover can hold focus on a plain <button> (a chip or a
+      // suggestion), which does not suppress this hotkey, while the popover's
+      // scrim hides both the armed toolbar button and the flash toast.
+      if (ui.tagPopoverOpen) return false;
       e.preventDefault();
       void doImageDelete();
       return true;

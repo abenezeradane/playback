@@ -2238,11 +2238,19 @@ export function nextThumbFillBatch(
 // arm, press again to act.
 //
 // The arm is KEYED on the file's identity rather than being a bare boolean,
-// and that is the load-bearing part. Arming on one photo and pressing Del
-// after moving to the next must not delete the next one — with a keyed arm
-// that falls out of `isArmedFor` for free, instead of depending on every
-// navigation path remembering to call a reset. tags-002's `disarmPrune` needs
-// four such call sites; this needs none.
+// and that is the load-bearing part for SAFETY: arming on one photo and
+// pressing Del after moving to the next must not delete the next one — with
+// a keyed arm that falls out of `isArmedFor` for free, because the key check
+// simply refuses to match. No reset call site is needed to prevent a
+// wrong-file delete.
+//
+// The shipped tree still resets the arm at three call sites (openImage,
+// focusGalleryTile, setGalleryIndex) — those exist for DISPLAY, not safety.
+// Without them the key check still protects the file, but the armed toolbar
+// button or tile outline would keep pointing at a file that is no longer
+// under the cursor, telling the user a second press destroys something other
+// than what it actually would. The resets keep what is SHOWN honest; they are
+// not what keeps the delete itself correct.
 
 /** How long a delete stays armed after the first press. Mirrors
  *  PRUNE_ARM_MS in controller.ts rather than inventing a second duration for

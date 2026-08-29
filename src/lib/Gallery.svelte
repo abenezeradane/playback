@@ -10,6 +10,7 @@
     onGalleryScroll,
     setThumbFocus,
     tagItemKey,
+    setGalleryIndex,
   } from "./controller";
   import { galleryMeta, tagMeta } from "../player-core";
   import type { GalleryItem } from "./state.svelte";
@@ -380,7 +381,10 @@
                 // window, Task 12) — same conversion as every other cursor
                 // write in this file/controller.ts, so a tag view scrolled
                 // deep in still tags the tile the user actually clicked.
-                ui.galleryIndex = ui.galleryWindowStart + i;
+                // img-003 final review: routed through setGalleryIndex rather
+                // than a direct write, so this writer disarms a pending grid
+                // delete the same way every other cursor write does.
+                setGalleryIndex(ui.galleryWindowStart + i);
                 openTagPopover();
               }}
             >

@@ -25,6 +25,18 @@ pub(crate) fn recycle(path: &Path) -> Result<(), String> {
 /// before the check, and a path that is not there fails on canonicalize
 /// rather than reaching the bin.
 ///
+/// This does not close the check-then-act window between that canonicalize
+/// and the `recycle()` call below — something could replace what the
+/// canonical path resolves to in between. It is accepted, not closed,
+/// because `recycle()` is called on the canonical `PathBuf` `ensure_allowed`
+/// already produced, never on the caller's original string, so the race
+/// cannot be steered outside the authorized tree; because winning it needs
+/// write access inside the user's OWN media directory, where an attacker in
+/// that position could already delete or replace the file directly, gaining
+/// nothing from racing this command instead; and because even a successful
+/// race only recycles a file, which is RECOVERABLE from the bin — the race
+/// cannot escalate into the one outcome this module refuses to allow.
+///
 /// The confirmation itself is the FRONTEND's job (see armDelete in
 /// player-core.ts). This command deletes what it is given: it is the last
 /// step, not the guard.
