@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 /// The schema version this binary understands. Bump it, and add a migration
 /// step below, whenever the schema changes.
-pub(crate) const SCHEMA_VERSION: i32 = 1;
+pub(crate) const SCHEMA_VERSION: i32 = 2;
 
 const SCHEMA_V1: &str = "
 CREATE TABLE items (
@@ -37,6 +37,18 @@ CREATE INDEX idx_items_sort    ON items(sort_key, path, id);
 // Deliberate deviation from the design doc, which also lists an
 // `idx_tags_folded`: `folded TEXT NOT NULL UNIQUE` already creates a unique
 // index on that column, so a second one would be dead weight on every write.
+
+// tags-003. `ON DELETE CASCADE` is load-bearing rather than tidiness: tags-004
+// deletes a tag once its files are gone, and without the cascade the blacklist
+// would keep a row pointing at a tag id that no longer exists — which a later
+// tag reusing that id would silently inherit. `open_db` enables `foreign_keys`,
+// without which this clause would parse and never fire.
+const SCHEMA_V2: &str = "
+CREATE TABLE tag_blacklist (
+  tag_id     INTEGER PRIMARY KEY REFERENCES tags(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL
+);
+";
 
 /// Open (creating if needed) the tag database at `path`, run migrations, and
 /// return the connection.
@@ -87,6 +99,17 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         if let Err(e) = conn.execute_batch(&sql) {
             let _ = conn.execute_batch("ROLLBACK;");
             return Err(format!("tags: create: {e}"));
+        }
+    }
+    if version < 2 {
+        // Same one-transaction discipline as v1, and for the same reason: DDL
+        // and the stamp must land together or a failure leaves the table on
+        // disk with the old user_version, and the next open dies on "table
+        // already exists" with the database wedged for good.
+        let sql = format!("BEGIN;\n{SCHEMA_V2}\nPRAGMA user_version = 2;\nCOMMIT;");
+        if let Err(e) = conn.execute_batch(&sql) {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(format!("tags: migrate v2: {e}"));
         }
     }
     Ok(())
@@ -1893,5 +1916,102 @@ mod tests {
         // police milliseconds, and a tight bound would flake and be deleted.
         assert!(head_ms < std::time::Duration::from_secs(5), "first page took {head_ms:?}");
         assert!(deep_ms < std::time::Duration::from_secs(5), "deep page took {deep_ms:?}");
+    }
+
+    #[test]
+    fn migration_creates_the_blacklist_table_and_stamps_v2() {
+        let path = temp_db("v2-schema");
+        let conn = open_db(&path).unwrap();
+        let found: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tag_blacklist'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1, "tag_blacklist was not created");
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 2);
+    }
+
+    /// A database created by the v1 binary must gain the new table WITHOUT
+    /// losing the tags already in it. This is the migration case that matters:
+    /// a fresh database exercises the v1 and v2 blocks together and would pass
+    /// even if the v2 block only ever ran on empty schemas.
+    #[test]
+    fn migration_upgrades_a_v1_database_in_place() {
+        let path = temp_db("v1-upgrade");
+        {
+            // Build a v1 database by hand: the v1 schema, its stamp, and a row.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(&format!("BEGIN;\n{SCHEMA_V1}\nPRAGMA user_version = 1;\nCOMMIT;"))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO tags (name, folded, created_at) VALUES ('Keep', 'keep', 1)",
+                [],
+            )
+            .unwrap();
+        }
+        let conn = open_db(&path).unwrap();
+        let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 2, "an existing v1 database was not migrated");
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE folded = 'keep'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "the migration lost an existing tag");
+        let found: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tag_blacklist'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1, "tag_blacklist was not added to the v1 database");
+    }
+
+    #[test]
+    fn migration_to_v2_is_idempotent_across_reopens() {
+        let path = temp_db("v2-reopen");
+        {
+            let conn = open_db(&path).unwrap();
+            conn.execute(
+                "INSERT INTO tags (name, folded, created_at) VALUES ('Keep', 'keep', 1)",
+                [],
+            )
+            .unwrap();
+        }
+        // A second open must not re-run the DDL (it would fail on "table exists").
+        let conn = open_db(&path).unwrap();
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE folded = 'keep'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1);
+    }
+
+    /// The FK cascade is what keeps the blacklist from accumulating orphans when
+    /// a tag is deleted (tags-004 will delete tags). `open_db` turns
+    /// `foreign_keys` on; without that pragma this silently would not fire.
+    #[test]
+    fn deleting_a_tag_drops_its_blacklist_row() {
+        let path = temp_db("v2-cascade");
+        let conn = open_db(&path).unwrap();
+        conn.execute(
+            "INSERT INTO tags (name, folded, created_at) VALUES ('Gone', 'gone', 1)",
+            [],
+        )
+        .unwrap();
+        let id: i64 = conn
+            .query_row("SELECT id FROM tags WHERE folded = 'gone'", [], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO tag_blacklist (tag_id, created_at) VALUES (?1, 1)",
+            params![id],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM tags WHERE id = ?1", params![id]).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tag_blacklist", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "the blacklist row outlived its tag");
     }
 }
