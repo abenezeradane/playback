@@ -372,6 +372,17 @@ fn like_prefix(prefix: &str) -> String {
 /// An empty `query` lists every tag; a non-empty one matches on a folded prefix.
 /// Only tags with members can appear — the JOIN is an inner one, so a tag row
 /// with no `item_tags` rows can never surface with a count of zero.
+///
+/// tags-003 final review (Finding 5, documented not fixed): this inner join is
+/// asymmetric with `list_blacklist`, which has no such join and lists a tag
+/// regardless of membership. Blacklist a tag, then untag its last member: the
+/// row disappears from THIS list even with `include_blacklisted` on, while
+/// `list_blacklist` still reports it blacklisted. Re-applying that tag name
+/// later silently starts hidden again. Left as-is because it is recoverable —
+/// the row returns the moment the tag has a member again, same as any other
+/// zero-member tag — and turning this into an outer join (plus teaching every
+/// caller to handle a NULL count) is a larger change than a self-healing edge
+/// case warrants.
 pub(crate) fn list_tags(
     conn: &Connection,
     include_blacklisted: bool,
@@ -2264,5 +2275,23 @@ mod tests {
         let names: Vec<String> =
             suggest_tags(&conn, "h", 50).unwrap().into_iter().map(|t| t.name).collect();
         assert!(names.is_empty(), "typeahead offered a blacklisted tag");
+
+        // tags-003 final review (Finding 3): a NON-empty prefix cannot tell
+        // `(?1 = '' OR like) AND notin` apart from the unparenthesised
+        // `?1 = '' OR like AND notin` -- once ?1 = '' is false both reduce to
+        // the same thing, so the assertion above would still pass with a
+        // dropped paren. An EMPTY prefix is the one case where they diverge:
+        // unparenthesised, `?1 = ''` alone makes the whole WHERE true and
+        // "Hide" leaks back in regardless of the blacklist. Empty is also the
+        // prefix the user hits FIRST -- openTagPopover calls
+        // refreshSuggestions("") -- so this is the untested form that matters
+        // most, not an edge case.
+        let all_names: Vec<String> =
+            suggest_tags(&conn, "", 50).unwrap().into_iter().map(|t| t.name).collect();
+        assert_eq!(
+            all_names,
+            vec!["Keep".to_string()],
+            "typeahead offered a blacklisted tag with an empty prefix"
+        );
     }
 }

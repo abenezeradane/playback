@@ -79,6 +79,15 @@ export interface GalleryItem {
    *  `missing`: the row is not gone, it is not here YET. Renders as the ordinary
    *  loading shimmer and refuses to open, tag or fetch a thumbnail. */
   pending?: boolean;
+  /** tags-003 final review (Finding 1): true when this item carries a
+   *  blacklisted tag AND the tag view it is in is not itself the blacklisted
+   *  one (see `shouldFilterTagView` in controller.ts). Only a TAG view's grid
+   *  sets it. Renders no tile at all -- unlike `missing`, which still shows a
+   *  dimmed one -- because this item must disappear from browsing, not just
+   *  be marked unopenable. Absolute window positions (`ui.galleryWindowStart
+   *  + i`) stay unchanged for a hidden slot; only what gets drawn there does,
+   *  so every other index arithmetic in this file keeps working unmodified. */
+  hidden?: boolean;
 }
 
 /** The item a tag is being applied to (tags-001). `archive` is "" for a real

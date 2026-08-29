@@ -135,6 +135,7 @@ import {
   DELETE_ARM_MS,
   type DeleteArm,
   filterBlacklisted,
+  isHidden,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -2243,7 +2244,13 @@ async function buildPhotoQueue(openedPath: string): Promise<void> {
     // `imageItems`'s indices, and filtering only the mapped result would leave
     // them pointing at positions from the unfiltered array while `ui.photoQueue`
     // had shrunk out from under them.
-    const imageItems = filterBlacklisted(tagRowsAsImages(), hiddenKeys);
+    // tags-003 final review (Finding 1): shouldFilterTagView keeps this in
+    // lockstep with the grid (applyWindow) — a blacklisted tag's own queue must
+    // hold every member, same as its own grid does, or Prev/Next would run off
+    // the end of a queue shorter than what the grid showed.
+    const imageItems = shouldFilterTagView(ui.galleryTag)
+      ? filterBlacklisted(tagRowsAsImages(), hiddenKeys)
+      : tagRowsAsImages();
     const paths = imageItems.map((row) => row.path);
     ui.photoQueue = imageItems.map((row): QueueItem => ({
       path: row.path,
@@ -2414,7 +2421,12 @@ async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
       // tags-003: same reasoning as buildPhotoQueue's tag branch -- filter
       // BEFORE deriving `idx` from `imageItems`, so the index below lands on
       // the same array `ui.photoQueue` was just built from.
-      const imageItems = filterBlacklisted(tagRowsAsImages(), hiddenKeys);
+      // tags-003 final review (Finding 1): same shared predicate as the grid
+      // and as buildPhotoQueue, so a page pulled in mid-session cannot make
+      // this extend disagree with either of them about what's visible.
+      const imageItems = shouldFilterTagView(tag)
+        ? filterBlacklisted(tagRowsAsImages(), hiddenKeys)
+        : tagRowsAsImages();
       ui.photoQueue = imageItems.map((row): QueueItem => ({
         path: row.path,
         name: row.name,
@@ -4307,6 +4319,27 @@ export function tagItemKey(archive: string, path: string): string {
   return archive + TAG_ID_SEP + path;
 }
 
+/**
+ * Whether a tag's own view (grid AND queue) should apply the blacklist veto
+ * (tags-003 final review, Finding 1).
+ *
+ * A blacklisted tag's own view is the one place a user goes to un-tag its
+ * members -- filtering it would empty the grid and strand them there with no
+ * way back. Every OTHER tag's view must still respect the veto, or
+ * blacklisting silently fails to hide anything from any other tag's grid.
+ *
+ * This single predicate backs BOTH the grid path (`applyWindow`) and the
+ * queue path (`buildPhotoQueue`'s tag branch, `extendPhotoQueueFromTag`) —
+ * written once rather than twice so the two can never disagree about which
+ * members of a tag are visible. Before this fix they did: the grid showed
+ * every member while the queue quietly dropped the hidden ones, so a click on
+ * a tile the queue had filtered out sent `byIdentity` to -1 and left
+ * `photoIndex` pointing at the wrong photo.
+ */
+function shouldFilterTagView(tag: string): boolean {
+  return !ui.tagBlacklist.includes(tag);
+}
+
 /** Move the DOM window so it covers `focus`, fetching whatever it now needs. */
 async function applyWindow(tag: string, focus: number, token: number): Promise<void> {
   const { start, end } = windowBounds(tagRows.length, focus, TAG_WINDOW);
@@ -4335,11 +4368,10 @@ async function applyWindow(tag: string, focus: number, token: number): Promise<v
   // element, so `.map` runs its callback for all of them.
   const windowSlice: (TaggedItem | undefined)[] = [];
   for (let idx = start; idx < end; idx++) windowSlice.push(tagRows[idx]);
-  // tags-003: deliberately NOT filtered by hiddenKeys. This is the blacklisted
-  // tag's OWN view — filtering it would render an empty grid for a tag the
-  // user navigated to on purpose, and put its members out of reach for
-  // un-tagging. Only OTHER surfaces (other galleries, recents, photo queues)
-  // hide items carrying this tag.
+  // tags-003 final review (Finding 1): filter this view UNLESS `tag` itself is
+  // blacklisted — see shouldFilterTagView. Computed once per call, not per
+  // item: it depends only on which tag this view is, not on the item.
+  const filterThisView = shouldFilterTagView(tag);
   ui.galleryItems = windowSlice.map((it, i) => {
     if (!it) {
       // A row whose page is still in flight: render a placeholder rather than
@@ -4356,10 +4388,18 @@ async function applyWindow(tag: string, focus: number, token: number): Promise<v
         pending: true,
       };
     }
+    // Marked, not dropped: dropping hidden rows would shrink this array so
+    // position i no longer equals absolute index (start + i), which every
+    // other cursor/index computation in this file (galleryIndex - windowStart,
+    // data-gallery-index, enqueueThumb) depends on. Gallery.svelte instead
+    // renders nothing for a hidden slot, which hides it from browsing just as
+    // completely without disturbing that arithmetic.
+    const hidden = filterThisView && isHidden(it, hiddenKeys);
     const key = tagItemKey(it.archive, it.path);
     const prior = carried.get(key);
     if (prior) {
-      prior.missing = it.missing; // the only field a re-fetch could change
+      prior.missing = it.missing; // the only fields a re-fetch could change
+      prior.hidden = hidden;
       return prior;
     }
     return {
@@ -4370,6 +4410,7 @@ async function applyWindow(tag: string, focus: number, token: number): Promise<v
       durationLabel: "",
       archive: it.archive,
       missing: it.missing,
+      hidden,
     };
   });
   perfMark("tag.window", start + "-" + end + "/" + tagRows.length);
@@ -4573,17 +4614,35 @@ export async function loadTagLibrary(): Promise<void> {
  * Refreshed when the blacklist changes and when a tag is applied or removed —
  * either can change what is hidden.
  *
- * It starts EMPTY and a failed refresh leaves it empty, so the filter fails
- * OPEN: a broken tag database shows the user everything rather than hiding
- * their library behind an error they cannot see.
+ * tags-003 final review (Finding 4): starts EMPTY, and a failed refresh
+ * CLEARS it rather than keeping whatever was cached before — the previous
+ * comment here claimed "a failed refresh leaves it empty", which was only
+ * true of the very first refresh. `if (!rows) return;` used to keep the OLD
+ * set, which fails CLOSED exactly when it matters most: right after
+ * un-blacklisting, when the tag looks restored everywhere (loadTagBlacklist
+ * already succeeded) but a failed refresh here would otherwise leave its
+ * members hidden with nothing on screen to say why. Clearing on every
+ * failure, not just the first, is what actually keeps this filter failing
+ * OPEN the way the global rule requires — the tradeoff is that a transient
+ * failure right after browsing with tags already blacklisted can flash
+ * everything back into view for a moment, which is judged the lesser risk
+ * next to silently hiding something the user just tried to un-hide.
  */
 let hiddenKeys = new Set<string>();
 
 export async function refreshHiddenKeys(): Promise<void> {
   const rows = await tauriInvoke<string[]>("tag_hidden_keys", {}).catch(() => null);
-  if (!rows) return; // fail open — see above
-  hiddenKeys = new Set(rows);
-  perfMark("tag.hidden", String(rows.length));
+  hiddenKeys = rows ? new Set(rows) : new Set<string>(); // fail open — see above
+  perfMark("tag.hidden", rows ? String(rows.length) : "failed");
+  // tags-003 final review (Finding 2): Home's recents went stale two ways —
+  // the session's first paint ran renderRecents() before this had ever
+  // resolved, filtering against an empty set, and toggleTagBlacklist used to
+  // refresh this cache without ever repainting recents at all. Recents are
+  // browsing, same as a gallery grid, so every refresh (success OR failure,
+  // since a failure can change hiddenKeys too — see above) repaints them
+  // here, once, rather than trusting every caller of refreshHiddenKeys to
+  // remember to.
+  renderRecents();
 }
 
 export function openTagIndex(): void {
@@ -5267,6 +5326,12 @@ export async function doGalleryDelete(): Promise<void> {
   // slides, and an unoffset read would delete whatever landed at that array slot.
   const item = ui.galleryItems[ui.galleryIndex - ui.galleryWindowStart];
   if (!item || item.pending) return; // no real identity yet
+  // tags-003 final review (Finding 1): a hidden slot renders no tile at all
+  // (Gallery.svelte), so the only way the cursor could sit here is an
+  // arrow-key step landing on a run of hidden members between two visible
+  // ones — never a deliberate point at something the user can see. Same
+  // silent decline as `pending`, for the same reason.
+  if (item.hidden) return;
   if (item.missing) {
     flashGalleryAction("That file is already gone.");
     return;

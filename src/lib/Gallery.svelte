@@ -19,11 +19,15 @@
   // interleaves photos and videos by name, so only folders are still a contiguous
   // leading block. `galleryMeta` (player-core, unit-tested) turns these into the
   // "2 folders · 12 photos · 3 videos" line.
-  const folderCount = $derived(ui.galleryItems.filter((i) => i.kind === "folder").length);
-  const videoCount = $derived(ui.galleryItems.filter((i) => i.kind === "video").length);
-  const archiveCount = $derived(ui.galleryItems.filter((i) => i.kind === "archive").length);
+  // tags-003 final review (Finding 1): counted over the VISIBLE items only — a
+  // hidden slot renders no tile below, and the header must not claim a count
+  // that includes tiles the user cannot see.
+  const visibleItems = $derived(ui.galleryItems.filter((i) => !i.hidden));
+  const folderCount = $derived(visibleItems.filter((i) => i.kind === "folder").length);
+  const videoCount = $derived(visibleItems.filter((i) => i.kind === "video").length);
+  const archiveCount = $derived(visibleItems.filter((i) => i.kind === "archive").length);
   const photoCount = $derived(
-    ui.galleryItems.length - folderCount - videoCount - archiveCount,
+    visibleItems.length - folderCount - videoCount - archiveCount,
   );
 
   /** A tile's accessible name. Folders and videos say so, because the picture alone
@@ -290,10 +294,16 @@
           <div class="gallery__spacer" style="height: {spacerTop}px" aria-hidden="true"></div>
         {/if}
         {#each ui.galleryItems as item, i (tagItemKey(item.archive, item.path))}
+        {#if !item.hidden}
           <!-- ux-004: `galleryTile` renders this tile's thumbnail only once it
                nears the viewport, and the roving tabindex makes the whole grid a
                single Tab stop (arrows move within it) so a folder of thousands is
-               not a tab trap. -->
+               not a tab trap.
+               tags-003 final review (Finding 1): a hidden item renders NOTHING
+               here, not a dimmed tile -- it must disappear from browsing, and
+               its absolute window position (ui.galleryWindowStart + i) is left
+               alone so every other index computation in controller.ts keeps
+               working across the gap. -->
           <button
             type="button"
             class="gallery-tile"
@@ -392,6 +402,7 @@
             </span>
             <span class="gallery-tile__name">{item.name}</span>
           </button>
+        {/if}
         {/each}
         {#if ui.galleryTag && spacerBottom > 0}
           <!-- tags-002 Step 3: the same stand-in as the top spacer, for every
