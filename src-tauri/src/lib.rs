@@ -36,6 +36,7 @@ mod archive;
 mod mp4probe;
 mod mpv;
 mod player;
+mod recycle;
 mod tags;
 
 /// Holds a media path supplied on the command line, if any.

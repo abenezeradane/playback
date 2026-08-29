@@ -60,6 +60,15 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # toolchain (dav1d) — so an AVIF still takes the ffmpeg path, as does any file
 # this crate declines to decode.
 image = { version = "0.25.6", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico"] }
+# img-003: the app's only deletion primitive. Files go to the Windows Recycle
+# Bin, never to fs::remove_file — see recycle.rs for why that is load-bearing.
+# Pinned to 5.2.3, NOT latest: 5.2.6 requires rustc 1.85 and this crate declares
+# rust-version = "1.77.2". Default features are REQUIRED: trash::delete does not
+# compile on Windows without them — the crate refuses to build unless one of
+# coinit_apartmentthreaded/coinit_multithreaded is picked, and that feature is
+# only reachable through the default set, which also pulls in `chrono` (used
+# for trash LISTING and RESTORE timestamps, neither of which this app exposes).
+trash = "5.2.3"
 
 [target.'cfg(windows)'.dependencies]
 # Child-window z-order management for the mpv wid embed (push mpv's child HWND
