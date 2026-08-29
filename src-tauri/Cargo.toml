@@ -62,13 +62,17 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 image = { version = "0.25.6", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico"] }
 # img-003: the app's only deletion primitive. Files go to the Windows Recycle
 # Bin, never to fs::remove_file — see recycle.rs for why that is load-bearing.
-# Pinned to 5.2.3, NOT latest: 5.2.6 requires rustc 1.85 and this crate declares
-# rust-version = "1.77.2". Default features are REQUIRED: trash::delete does not
-# compile on Windows without them — the crate refuses to build unless one of
-# coinit_apartmentthreaded/coinit_multithreaded is picked, and that feature is
-# only reachable through the default set, which also pulls in `chrono` (used
-# for trash LISTING and RESTORE timestamps, neither of which this app exposes).
-trash = "5.2.3"
+# Pinned EXACTLY to 5.2.3 with `=`, not a bare caret requirement: `"5.2.3"`
+# alone means >=5.2.3,<6.0.0, which a plain `cargo update` (no -p, no
+# --precise) is free to re-resolve to 5.2.6+. 5.2.6 requires rustc 1.85, and
+# this crate declares rust-version = "1.77.2" — a caret requirement would
+# silently blow that floor on the next routine update. Default features are
+# REQUIRED: trash::delete does not compile on Windows without them — the
+# crate refuses to build unless one of coinit_apartmentthreaded/
+# coinit_multithreaded is picked, and that feature is only reachable through
+# the default set, which also pulls in `chrono` (used for trash LISTING and
+# RESTORE timestamps, neither of which this app exposes).
+trash = "=5.2.3"
 
 [target.'cfg(windows)'.dependencies]
 # Child-window z-order management for the mpv wid embed (push mpv's child HWND
