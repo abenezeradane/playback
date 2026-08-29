@@ -4100,8 +4100,12 @@ function currentTagTarget(): TagTarget | null {
     const item = ui.galleryItems[ui.galleryIndex - ui.galleryWindowStart];
     // tags-002 fix-1: a pending tile has no real identity yet (its `path` is a
     // synthetic "pending:N" marker) — decline rather than let the popover
-    // open against it.
-    if (!item || item.pending) return null;
+    // open against it. tags-003: a hidden tile is a blacklisted item the grid
+    // deliberately renders as nothing (Gallery.svelte) — the cursor can still
+    // land on it via an arrow-key step across a run of hidden slots, and
+    // tagging it would act on an item the user cannot see. Same silent
+    // decline as `pending`, for the same reason.
+    if (!item || item.pending || item.hidden) return null;
     return { archive: item.archive, path: item.path, kind: item.kind, name: item.name };
   }
   return null;
