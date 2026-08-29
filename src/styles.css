@@ -242,6 +242,23 @@ body {
   padding: 6px 12px;
 }
 
+/* Destructive = tag_delete_all's confirm button (tags-004). Same solid-fill
+   weight as .pill--primary, red instead of white, so "this is the one that
+   destroys files" reads before the label is even parsed. Matches the fill
+   .iconbtn--danger[data-armed="true"] already uses for the cut-mode delete. */
+.pill--danger {
+  background: #c0392b;
+  color: #fff;
+}
+
+.pill--danger:hover {
+  background: var(--warning);
+}
+
+.pill--danger:active {
+  background: #a93226;
+}
+
 /* Keycap glyph (DESIGN.md keycap): subtle key-bg gradient + hairline-strong edge. */
 .kbd {
   display: inline-flex;
@@ -973,6 +990,22 @@ body {
 
 .glass-btn:active {
   transform: scale(0.94);
+}
+
+/* gallery-delete-tagged (tags-004): a red tint on the same glass chip, not a
+   solid fill — this button only OPENS the confirmation, so it should read as
+   "destructive action lives here" rather than "this is already armed" (that
+   fully-saturated look is reserved for .pill--danger, the button that actually
+   fires). Kept legible over video/photo thumbnails by staying translucent. */
+.glass-btn--danger {
+  border-color: rgba(255, 97, 97, 0.35);
+  background: rgba(192, 57, 43, 0.24);
+  color: var(--warning);
+}
+
+.glass-btn--danger:hover {
+  background: rgba(192, 57, 43, 0.38);
+  border-color: rgba(255, 97, 97, 0.6);
 }
 
 .overlay-top__title {
@@ -2908,6 +2941,10 @@ body {
   border-color: var(--hairline);
 }
 
+.pill--danger:disabled:hover {
+  background: #c0392b; /* cancel the hover lift — nothing will happen */
+}
+
 @media (prefers-reduced-motion: reduce) {
   .gallery-tile__img,
   .recent-card__img,
@@ -4161,6 +4198,14 @@ button.shortcuts__backdrop {
 .tagpop__suggestion:hover,
 .tagpop__suggestion--active { background: rgb(255 255 255 / 0.1); }
 .tagpop__suggestion-count { font-variant-numeric: tabular-nums; opacity: 0.6; font-size: 0.8rem; }
+
+/* Delete-tagged confirmation (tags-004): reuses .shortcuts + .tagpop__body
+   as-is, same as the index above — only these paragraph/action rules are new. */
+.tagdel__line { margin: 0; font-size: 0.9rem; line-height: 1.5; color: var(--ink); }
+/* The archive-skip, folder-skip and tag-removal lines: secondary information,
+   read after the headline count and the Recycle Bin promise. */
+.tagdel__line--note { font-size: 0.82rem; color: var(--mute); }
+.tagdel__actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 0.25rem; }
 
 .gallery-tile__tag {
   /* Below the duration badge, not on it: .gallery-tile__duration owns the

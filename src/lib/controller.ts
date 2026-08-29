@@ -4577,6 +4577,76 @@ export async function pruneMissingFromTag(): Promise<void> {
 }
 
 /**
+ * Open the confirmation for deleting every file a tag carries (tags-004).
+ *
+ * The counts come from ONE read of the tag, and the number shown is the number
+ * passed back as `expectCount` — so what the user agreed to is exactly what the
+ * command verifies against. Recomputing between showing and confirming would
+ * defeat the interlock.
+ */
+export async function openTagDeletePanel(): Promise<void> {
+  const tag = ui.galleryTag;
+  if (!tag) return;
+  ui.tagDeleteError = "";
+  const page = await tauriInvoke<{ total: number; items: TaggedItem[] }>("tag_items", {
+    tag,
+    limit: 1000,
+    offset: 0,
+  }).catch(() => null);
+  if (!page) {
+    ui.galleryError = "Could not read this tag.";
+    return;
+  }
+  ui.tagDeleteCount = page.total;
+  // `tag_items` caps `limit` at MAX_LIMIT (1000) natively, so for a tag larger
+  // than that these two undercount — only members within the first 1000 are
+  // seen. `tagDeleteCount` above is unaffected: it comes from `total`, a real
+  // COUNT(*), so the interlock the command checks against is still exact.
+  ui.tagDeleteArchived = page.items.filter((i) => i.archive).length;
+  ui.tagDeleteFolders = page.items.filter((i) => i.kind === "folder").length;
+  ui.tagDeleteOpen = true;
+}
+
+export function closeTagDeletePanel(): void {
+  ui.tagDeleteOpen = false;
+  ui.tagDeleteBusy = false;
+  ui.tagDeleteError = "";
+}
+
+/** Run the sweep the panel described. */
+export async function confirmTagDelete(): Promise<void> {
+  const tag = ui.galleryTag;
+  if (!tag || ui.tagDeleteBusy) return;
+  ui.tagDeleteBusy = true;
+  ui.tagDeleteError = "";
+  const res = await tauriInvoke<{
+    recycled: number;
+    skippedInArchive: number;
+    skippedMissing: number;
+    skippedFolders: number;
+    failed: number;
+  }>("tag_delete_all", { tag, expectCount: ui.tagDeleteCount }).catch((err) => {
+    ui.tagDeleteError = String(err);
+    return null;
+  });
+  ui.tagDeleteBusy = false;
+  if (!res) return;
+  closeTagDeletePanel();
+  perfMark("tag.deleted", `${res.recycled}`);
+  // Report what actually happened, not "done". A sweep that skipped or failed
+  // on some members is a different outcome from one that took everything.
+  const parts = [`${res.recycled} moved to the Recycle Bin`];
+  if (res.skippedInArchive > 0) parts.push(`${res.skippedInArchive} skipped inside archives`);
+  if (res.skippedFolders > 0) parts.push(`${res.skippedFolders} folders skipped`);
+  if (res.skippedMissing > 0) parts.push(`${res.skippedMissing} already gone`);
+  if (res.failed > 0) parts.push(`${res.failed} could not be deleted`);
+  flashGalleryAction(parts.join(" · "));
+  await refreshHiddenKeys();
+  await loadTagLibrary();
+  goHome();
+}
+
+/**
  * Authorize the folders a page's items live in, and only those.
  *
  * The asset-protocol scope and the IPC read gate are both per-directory, so a
@@ -6348,6 +6418,18 @@ function wireKeyboard(): void {
     if (ui.tagPopoverOpen && e.key === "Escape") {
       e.preventDefault();
       closeTagPopover();
+      return;
+    }
+
+    // tags-004: same reasoning as the tagPopoverOpen guard just above — the
+    // delete-confirmation panel is a LAYER over the gallery view it was opened
+    // from, whose own Esc (the check right below) backs out of the view
+    // entirely. Without this, Esc while confirming would navigate away and
+    // leave the panel dangling open over whatever view Back lands on, instead
+    // of just cancelling the confirmation.
+    if (ui.tagDeleteOpen && e.key === "Escape") {
+      e.preventDefault();
+      closeTagDeletePanel();
       return;
     }
 

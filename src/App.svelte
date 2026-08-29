@@ -12,6 +12,7 @@
   import PlaylistEditor from "./lib/PlaylistEditor.svelte";
   import TagPopover from "./lib/TagPopover.svelte";
   import TagIndex from "./lib/TagIndex.svelte";
+  import TagDeletePanel from "./lib/TagDeletePanel.svelte";
 
   // Boot the runtime once the whole tree (and every bind:this handle) is mounted.
   // This replaces main.ts's former imperative boot block; global listeners (the
@@ -39,6 +40,7 @@
   <PlaylistEditor />
   <TagPopover />
   <TagIndex />
+  <TagDeletePanel />
 
   {#if ui.prepping}
     <!-- Transport-stream remux progress (play-016): a non-blocking overlay shown

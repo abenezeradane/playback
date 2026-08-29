@@ -343,6 +343,20 @@ export const ui = $state({
   // also arms a short timeout, the same way `flashGalleryAction` times out its
   // own message).
   galleryPrunePending: 0,
+  // tags-004: the delete-everything-with-this-tag confirmation. `Count` is what
+  // the panel displayed and what the command is held to (its expect_count
+  // interlock), so it must never be recomputed between showing and confirming.
+  // `Archived` and `Folders` are advance warnings of what the sweep will skip
+  // (archive members and tagged folders are never touched — recycling one
+  // would mean rewriting the archive or making a recursive-delete promise this
+  // app does not make anywhere else), counted from the same first-1000-items
+  // page as the archive count, so both undercount identically past that cap.
+  tagDeleteOpen: false,
+  tagDeleteCount: 0,
+  tagDeleteArchived: 0,
+  tagDeleteFolders: 0,
+  tagDeleteBusy: false,
+  tagDeleteError: "",
   // gallery-002: the folder path the grid is currently showing, and the trail of
   // folder names from wherever this gallery journey started down to it — the
   // header's breadcrumb, so a nested sub-gallery says where it sits.
