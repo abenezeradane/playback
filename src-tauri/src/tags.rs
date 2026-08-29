@@ -374,6 +374,7 @@ fn like_prefix(prefix: &str) -> String {
 /// with no `item_tags` rows can never surface with a count of zero.
 pub(crate) fn list_tags(
     conn: &Connection,
+    include_blacklisted: bool,
     query: &str,
     limit: u32,
     offset: u32,
@@ -385,14 +386,15 @@ pub(crate) fn list_tags(
             "SELECT t.name, COUNT(it.item_id) AS n
              FROM tags t
              JOIN item_tags it ON it.tag_id = t.id
-             WHERE ?1 = '' OR t.folded LIKE ?2 ESCAPE '\\'
+             WHERE (?1 = '' OR t.folded LIKE ?2 ESCAPE '\\')
+               AND (?5 OR t.id NOT IN (SELECT tag_id FROM tag_blacklist))
              GROUP BY t.id
              ORDER BY n DESC, t.folded ASC
              LIMIT ?3 OFFSET ?4",
         )
         .map_err(|e| format!("tags: prepare list: {e}"))?;
     let rows = stmt
-        .query_map(params![query, pattern, limit, offset], |r| {
+        .query_map(params![query, pattern, limit, offset, include_blacklisted], |r| {
             Ok(TagSummary { name: r.get(0)?, count: r.get(1)? })
         })
         .map_err(|e| format!("tags: list: {e}"))?;
@@ -412,12 +414,15 @@ pub(crate) fn suggest_tags(
 ) -> Result<Vec<TagSummary>, String> {
     let limit = limit.min(MAX_LIMIT);
     let pattern = like_prefix(prefix);
+    // Typeahead has no "show blacklisted" affordance, so it always excludes:
+    // suggesting a tag the user has hidden would put it straight back on screen.
     let mut stmt = conn
         .prepare(
             "SELECT t.name, COUNT(it.item_id) AS n
              FROM tags t
              JOIN item_tags it ON it.tag_id = t.id
-             WHERE ?1 = '' OR t.folded LIKE ?2 ESCAPE '\\'
+             WHERE (?1 = '' OR t.folded LIKE ?2 ESCAPE '\\')
+               AND t.id NOT IN (SELECT tag_id FROM tag_blacklist)
              GROUP BY t.id
              ORDER BY n DESC, t.folded ASC
              LIMIT ?3",
@@ -431,6 +436,84 @@ pub(crate) fn suggest_tags(
     let mut out = Vec::new();
     for row in rows {
         out.push(row.map_err(|e| format!("tags: suggest row: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// Blacklist or un-blacklist one tag (tags-003).
+///
+/// This writes NOTHING but a row in `tag_blacklist`: the tag keeps its name, its
+/// members keep the tag, and no file is touched. Un-blacklisting restores the
+/// previous state exactly, which is what makes the feature safe to try.
+///
+/// A tag that does not exist is an error rather than a silent no-op — the only
+/// way to reach this is from a list of real tags, so a miss means the caller and
+/// the store disagree about what exists, and swallowing that would hide it.
+pub(crate) fn set_blacklist(conn: &Connection, tag: &str, on: bool) -> Result<(), String> {
+    let (_, folded) = fold_tag(tag)?;
+    let id: i64 = conn
+        .query_row("SELECT id FROM tags WHERE folded = ?1", params![folded], |r| r.get(0))
+        .map_err(|e| format!("tags: blacklist unknown tag: {e}"))?;
+    if on {
+        // OR IGNORE, not an existence check: blacklisting twice is something a
+        // double-click does, and it must be a no-op rather than an error.
+        conn.execute(
+            "INSERT OR IGNORE INTO tag_blacklist (tag_id, created_at) VALUES (?1, ?2)",
+            params![id, now_secs()],
+        )
+        .map_err(|e| format!("tags: blacklist insert: {e}"))?;
+    } else {
+        conn.execute("DELETE FROM tag_blacklist WHERE tag_id = ?1", params![id])
+            .map_err(|e| format!("tags: blacklist delete: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The display names of every blacklisted tag, for the index's toggle state.
+pub(crate) fn list_blacklist(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT t.name FROM tags t
+             JOIN tag_blacklist b ON b.tag_id = t.id
+             ORDER BY t.folded ASC",
+        )
+        .map_err(|e| format!("tags: prepare blacklist list: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("tags: blacklist list: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("tags: blacklist list row: {e}"))?);
+    }
+    Ok(out)
+}
+
+/// The identity of every item carrying ANY blacklisted tag (tags-003).
+///
+/// The blacklist is a veto, not a vote: `DISTINCT` over the join means an item
+/// with five ordinary tags and one blacklisted one appears exactly once, and is
+/// hidden. Rust owns the key format so there is one authority on it — the
+/// TypeScript side compares against these strings and never rebuilds them.
+///
+/// NUL is the separator because it cannot occur in a path, so an archive page
+/// ("book.cbz" + page) can never collide with a real file of the joined name.
+pub(crate) fn hidden_keys(conn: &Connection) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT i.archive, i.path
+             FROM items i
+             JOIN item_tags it      ON it.item_id = i.id
+             JOIN tag_blacklist b   ON b.tag_id   = it.tag_id",
+        )
+        .map_err(|e| format!("tags: prepare hidden keys: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(format!("{}\u{0}{}", r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("tags: hidden keys: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("tags: hidden keys row: {e}"))?);
     }
     Ok(out)
 }
@@ -810,7 +893,10 @@ pub(crate) async fn tag_list(
     offset: u32,
 ) -> Result<Vec<TagSummary>, String> {
     let db = db.inner().clone();
-    blocking(move || with_db(&db, |conn| list_tags(conn, &query, limit, offset)))
+    // TODO(tags-003 task 3): thread the real include_blacklisted argument
+    // through from the frontend; `false` keeps today's behavior (blacklisted
+    // tags stay off the Home chips and the all-tags index) until it does.
+    blocking(move || with_db(&db, |conn| list_tags(conn, false, &query, limit, offset)))
         .await
         .map_err(|e| crate::ipc_error("tag_list", e, "could not read tags"))
 }
@@ -1437,15 +1523,15 @@ mod tests {
         }
         apply_tag(&conn, &item("C:\\p\\c.jpg", "c.jpg"), "toss").unwrap();
 
-        let all = list_tags(&conn, "", 10, 0).unwrap();
+        let all = list_tags(&conn, false, "", 10, 0).unwrap();
         assert_eq!(
             all.iter().map(|t| (t.name.as_str(), t.count)).collect::<Vec<_>>(),
             vec![("keep", 3), ("edit", 2), ("toss", 1)]
         );
 
         // Paging must be stable: page 2 continues where page 1 stopped.
-        let first = list_tags(&conn, "", 2, 0).unwrap();
-        let second = list_tags(&conn, "", 2, 2).unwrap();
+        let first = list_tags(&conn, false, "", 2, 0).unwrap();
+        let second = list_tags(&conn, false, "", 2, 2).unwrap();
         assert_eq!(first.len(), 2);
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].name, "toss");
@@ -1458,10 +1544,10 @@ mod tests {
         apply_tag(&conn, &item("C:\\p\\b.jpg", "b.jpg"), "trinket").unwrap();
         apply_tag(&conn, &item("C:\\p\\c.jpg", "c.jpg"), "keep").unwrap();
 
-        assert_eq!(list_tags(&conn, "tri", 10, 0).unwrap().len(), 2);
+        assert_eq!(list_tags(&conn, false, "tri", 10, 0).unwrap().len(), 2);
         // Case-insensitive, because `folded` is already lowercased.
-        assert_eq!(list_tags(&conn, "TRI", 10, 0).unwrap().len(), 2);
-        assert_eq!(list_tags(&conn, "trip", 10, 0).unwrap()[0].name, "Trip 2024");
+        assert_eq!(list_tags(&conn, false, "TRI", 10, 0).unwrap().len(), 2);
+        assert_eq!(list_tags(&conn, false, "trip", 10, 0).unwrap()[0].name, "Trip 2024");
     }
 
     #[test]
@@ -1469,8 +1555,8 @@ mod tests {
         // Same hazard suggest_tags guards: a typed '%' must not list the library.
         let conn = open_db(&temp_db("list-wild")).unwrap();
         apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "keep").unwrap();
-        assert!(list_tags(&conn, "%", 10, 0).unwrap().is_empty());
-        assert!(list_tags(&conn, "_", 10, 0).unwrap().is_empty());
+        assert!(list_tags(&conn, false, "%", 10, 0).unwrap().is_empty());
+        assert!(list_tags(&conn, false, "_", 10, 0).unwrap().is_empty());
     }
 
     #[test]
@@ -1484,7 +1570,7 @@ mod tests {
         apply_tag(&conn, &item("C:\\p\\a.jpg", "a.jpg"), "a\\%b").unwrap();
         apply_tag(&conn, &item("C:\\p\\b.jpg", "b.jpg"), "plain").unwrap();
 
-        let hit = list_tags(&conn, "a\\%", 10, 0).unwrap();
+        let hit = list_tags(&conn, false, "a\\%", 10, 0).unwrap();
         assert_eq!(hit.len(), 1, "a backslash-then-percent prefix must match its tag");
         assert_eq!(hit[0].name, "a\\%b");
     }
@@ -1497,7 +1583,7 @@ mod tests {
             [],
         )
         .unwrap();
-        assert!(list_tags(&conn, "", 10, 0).unwrap().is_empty());
+        assert!(list_tags(&conn, false, "", 10, 0).unwrap().is_empty());
     }
 
     #[test]
@@ -1530,12 +1616,12 @@ mod tests {
         tx.commit().unwrap();
         // Verify the clamp works: requesting u32::MAX tags should return exactly MAX_LIMIT.
         assert_eq!(
-            list_tags(&conn, "", u32::MAX, 0).unwrap().len(),
+            list_tags(&conn, false, "", u32::MAX, 0).unwrap().len(),
             MAX_LIMIT as usize,
             "list_tags must clamp to MAX_LIMIT"
         );
         // Verify zero limit returns empty result.
-        assert!(list_tags(&conn, "", 0, 0).unwrap().is_empty());
+        assert!(list_tags(&conn, false, "", 0, 0).unwrap().is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -2013,5 +2099,128 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tag_blacklist", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 0, "the blacklist row outlived its tag");
+    }
+
+    /// Two tags, three items: `a.jpg` carries both `keep` and `hide`, `b.jpg`
+    /// carries only `keep`, `c.jpg` carries only `hide`. Returns the connection.
+    fn seed_blacklist_fixture(path: &PathBuf) -> Connection {
+        let conn = open_db(path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tags (id, name, folded, created_at) VALUES
+               (1, 'Keep', 'keep', 1), (2, 'Hide', 'hide', 1);
+             INSERT INTO items (id, archive, path, kind, name, sort_key, added_at) VALUES
+               (1, '', 'C:\\pics\\a.jpg', 'image', 'a.jpg', 'a.jpg', 1),
+               (2, '', 'C:\\pics\\b.jpg', 'image', 'b.jpg', 'b.jpg', 1),
+               (3, '', 'C:\\pics\\c.jpg', 'image', 'c.jpg', 'c.jpg', 1);
+             INSERT INTO item_tags (item_id, tag_id) VALUES
+               (1, 1), (1, 2), (2, 1), (3, 2);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn set_blacklist_adds_and_removes_and_is_idempotent() {
+        let path = temp_db("bl-set");
+        let conn = seed_blacklist_fixture(&path);
+
+        set_blacklist(&conn, "hide", true).unwrap();
+        set_blacklist(&conn, "hide", true).unwrap(); // twice must not error or duplicate
+        assert_eq!(list_blacklist(&conn).unwrap(), vec!["Hide".to_string()]);
+
+        set_blacklist(&conn, "hide", false).unwrap();
+        set_blacklist(&conn, "hide", false).unwrap(); // removing twice is a no-op
+        assert!(list_blacklist(&conn).unwrap().is_empty());
+    }
+
+    /// Folding is the identity, so the case typed must not matter.
+    #[test]
+    fn set_blacklist_matches_a_tag_by_its_folded_name() {
+        let path = temp_db("bl-fold");
+        let conn = seed_blacklist_fixture(&path);
+        set_blacklist(&conn, "  HIDE  ", true).unwrap();
+        assert_eq!(list_blacklist(&conn).unwrap(), vec!["Hide".to_string()]);
+    }
+
+    #[test]
+    fn set_blacklist_refuses_a_tag_that_does_not_exist() {
+        let path = temp_db("bl-missing");
+        let conn = seed_blacklist_fixture(&path);
+        assert!(set_blacklist(&conn, "nosuchtag", true).is_err());
+    }
+
+    /// The veto rule: `a.jpg` carries `keep` as well as `hide`, and must still
+    /// be hidden. An item is hidden if ANY of its tags is blacklisted.
+    #[test]
+    fn hidden_keys_is_the_union_and_one_blacklisted_tag_is_enough() {
+        let path = temp_db("bl-hidden");
+        let conn = seed_blacklist_fixture(&path);
+        assert!(hidden_keys(&conn).unwrap().is_empty(), "nothing hidden before blacklisting");
+
+        set_blacklist(&conn, "hide", true).unwrap();
+        let mut keys = hidden_keys(&conn).unwrap();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "\u{0}C:\\pics\\a.jpg".to_string(), // carries keep AND hide -> hidden anyway
+                "\u{0}C:\\pics\\c.jpg".to_string(),
+            ],
+            "b.jpg carries only `keep` and must not be hidden"
+        );
+    }
+
+    #[test]
+    fn hidden_keys_are_restored_by_un_blacklisting() {
+        let path = temp_db("bl-restore");
+        let conn = seed_blacklist_fixture(&path);
+        set_blacklist(&conn, "hide", true).unwrap();
+        assert_eq!(hidden_keys(&conn).unwrap().len(), 2);
+        set_blacklist(&conn, "hide", false).unwrap();
+        assert!(hidden_keys(&conn).unwrap().is_empty(), "un-blacklisting must restore everything");
+    }
+
+    /// An archive page's identity must not collide with a real file's.
+    #[test]
+    fn hidden_keys_separate_an_archive_page_from_a_real_file() {
+        let path = temp_db("bl-archive");
+        let conn = seed_blacklist_fixture(&path);
+        conn.execute_batch(
+            "INSERT INTO items (id, archive, path, kind, name, sort_key, added_at) VALUES
+               (4, 'C:\\pics\\book.cbz', 'page1.jpg', 'image', 'page1.jpg', 'page1.jpg', 1);
+             INSERT INTO item_tags (item_id, tag_id) VALUES (4, 2);",
+        )
+        .unwrap();
+        set_blacklist(&conn, "hide", true).unwrap();
+        let keys = hidden_keys(&conn).unwrap();
+        assert!(keys.contains(&"C:\\pics\\book.cbz\u{0}page1.jpg".to_string()));
+    }
+
+    #[test]
+    fn list_tags_hides_blacklisted_unless_asked_for_them() {
+        let path = temp_db("bl-list");
+        let conn = seed_blacklist_fixture(&path);
+        set_blacklist(&conn, "hide", true).unwrap();
+
+        let visible: Vec<String> =
+            list_tags(&conn, false, "", 50, 0).unwrap().into_iter().map(|t| t.name).collect();
+        assert_eq!(visible, vec!["Keep".to_string()], "a blacklisted tag must not be listed");
+
+        let all: Vec<String> =
+            list_tags(&conn, true, "", 50, 0).unwrap().into_iter().map(|t| t.name).collect();
+        assert!(all.contains(&"Hide".to_string()), "the index must be able to ask for them");
+        assert!(all.contains(&"Keep".to_string()));
+    }
+
+    /// Typeahead has no "show blacklisted" affordance, so it always excludes:
+    /// suggesting a tag the user has hidden would put it straight back on screen.
+    #[test]
+    fn suggest_tags_always_excludes_blacklisted() {
+        let path = temp_db("bl-suggest");
+        let conn = seed_blacklist_fixture(&path);
+        set_blacklist(&conn, "hide", true).unwrap();
+        let names: Vec<String> =
+            suggest_tags(&conn, "h", 50).unwrap().into_iter().map(|t| t.name).collect();
+        assert!(names.is_empty(), "typeahead offered a blacklisted tag");
     }
 }
