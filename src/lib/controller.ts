@@ -134,6 +134,7 @@ import {
   indexAfterDelete,
   DELETE_ARM_MS,
   type DeleteArm,
+  filterBlacklisted,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -2234,7 +2235,12 @@ async function buildPhotoQueue(openedPath: string): Promise<void> {
     // pull in the rest on demand (extendPhotoQueueFromTag) when a step runs off
     // the end of what this saw, rather than dead-ending at a page nobody has
     // fetched yet.
-    const imageItems = tagRowsAsImages();
+    // tags-003: filtered BEFORE `paths`/`byIdentity` are derived from it, not
+    // after the map into `ui.photoQueue` — those two are computed against
+    // `imageItems`'s indices, and filtering only the mapped result would leave
+    // them pointing at positions from the unfiltered array while `ui.photoQueue`
+    // had shrunk out from under them.
+    const imageItems = filterBlacklisted(tagRowsAsImages(), hiddenKeys);
     const paths = imageItems.map((row) => row.path);
     ui.photoQueue = imageItems.map((row): QueueItem => ({
       path: row.path,
@@ -2258,8 +2264,18 @@ async function buildPhotoQueue(openedPath: string): Promise<void> {
   if (currentPath !== openedPath) return; // a newer open superseded this one
   if (!paths || paths.length === 0) paths = [openedPath];
   const sorted = sortPathsNatural(paths);
-  ui.photoQueue = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
-  ui.photoIndex = resolveQueueIndex(sorted, openedPath);
+  // tags-003: filter the mapped QueueItems, then derive the index from that
+  // SAME filtered list -- resolving against the unfiltered `sorted` would hand
+  // back a position meant for a longer array than `ui.photoQueue` now is.
+  const queueItems = filterBlacklisted(
+    sorted.map((p): QueueItem => ({ path: p, name: basename(p) })),
+    hiddenKeys,
+  );
+  ui.photoQueue = queueItems;
+  ui.photoIndex = resolveQueueIndex(
+    queueItems.map((q) => q.path),
+    openedPath,
+  );
 }
 
 /** The images tagRows currently knows about (loaded pages only), in tag order,
@@ -2392,7 +2408,10 @@ async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
       // is nothing to tell them, they navigated away deliberately.
       if (galleryToken !== token || ui.galleryTag !== tag || imgToken !== imgTok) return;
       if (failed) break;
-      const imageItems = tagRowsAsImages();
+      // tags-003: same reasoning as buildPhotoQueue's tag branch -- filter
+      // BEFORE deriving `idx` from `imageItems`, so the index below lands on
+      // the same array `ui.photoQueue` was just built from.
+      const imageItems = filterBlacklisted(tagRowsAsImages(), hiddenKeys);
       ui.photoQueue = imageItems.map((row): QueueItem => ({
         path: row.path,
         name: row.name,
@@ -2867,7 +2886,10 @@ export function clearRecents(): void {
 
 /** Refresh the reactive recents list from storage. */
 function renderRecents(): void {
-  ui.recents = loadRecents();
+  // tags-003: Home's recents are browsing, same as a gallery grid — a
+  // blacklisted item must not linger here just because it was opened before
+  // its tag was hidden.
+  ui.recents = filterBlacklisted(loadRecents(), hiddenKeys);
   void fillRecentThumbs();
 }
 
@@ -4189,6 +4211,11 @@ async function applyOne(tag: string, target: TagTarget): Promise<string> {
       tag,
     });
     perfMark("tags.apply", `${tag}=>${tags.join("|")}`);
+    // tags-003: applying a (possibly blacklisted) tag can change what browsing
+    // hides. Refresh unconditionally on success — the popover-target check
+    // below is only about whether the POPOVER still cares, not whether the
+    // backend mutation happened.
+    void refreshHiddenKeys();
     // The popover may have moved to another item while this was in flight.
     if (ui.tagTarget !== target) return "";
     ui.tagTargetTags = tags;
@@ -4208,7 +4235,11 @@ export async function removeTagFromTarget(tag: string): Promise<void> {
     path: target.path,
     tag,
   }).catch(() => null);
-  if (!tags || ui.tagTarget !== target) return;
+  if (!tags) return; // the call failed -- nothing changed, nothing to refresh
+  // tags-003: removing the last blacklisted tag can bring this item back —
+  // refresh unconditionally on success, same reasoning as applyOne above.
+  void refreshHiddenKeys();
+  if (ui.tagTarget !== target) return;
   ui.tagTargetTags = tags;
   perfMark("tags.remove", `${tag}=>${tags.join("|")}`);
 }
@@ -4301,6 +4332,11 @@ async function applyWindow(tag: string, focus: number, token: number): Promise<v
   // element, so `.map` runs its callback for all of them.
   const windowSlice: (TaggedItem | undefined)[] = [];
   for (let idx = start; idx < end; idx++) windowSlice.push(tagRows[idx]);
+  // tags-003: deliberately NOT filtered by hiddenKeys. This is the blacklisted
+  // tag's OWN view — filtering it would render an empty grid for a tag the
+  // user navigated to on purpose, and put its members out of reach for
+  // un-tagging. Only OTHER surfaces (other galleries, recents, photo queues)
+  // hide items carrying this tag.
   ui.galleryItems = windowSlice.map((it, i) => {
     if (!it) {
       // A row whose page is still in flight: render a placeholder rather than
@@ -4519,10 +4555,32 @@ export async function loadTagLibrary(): Promise<void> {
     query: "",
     limit: 24,
     offset: 0,
+    includeBlacklisted: false,
   }).catch(() => null);
   if (!rows) return;
   ui.tagLibrary = rows;
   perfMark("tag.library", String(rows.length));
+}
+
+/**
+ * The identities of items carrying a blacklisted tag (tags-003).
+ *
+ * Cached rather than queried per item: this is consulted for every tile in
+ * every folder, and a round trip there would undo what perf-008/009 bought.
+ * Refreshed when the blacklist changes and when a tag is applied or removed —
+ * either can change what is hidden.
+ *
+ * It starts EMPTY and a failed refresh leaves it empty, so the filter fails
+ * OPEN: a broken tag database shows the user everything rather than hiding
+ * their library behind an error they cannot see.
+ */
+let hiddenKeys = new Set<string>();
+
+export async function refreshHiddenKeys(): Promise<void> {
+  const rows = await tauriInvoke<string[]>("tag_hidden_keys", {}).catch(() => null);
+  if (!rows) return; // fail open — see above
+  hiddenKeys = new Set(rows);
+  perfMark("tag.hidden", String(rows.length));
 }
 
 export function openTagIndex(): void {
@@ -4555,6 +4613,9 @@ async function refreshTagIndex(query: string): Promise<void> {
     query,
     limit: 200,
     offset: 0,
+    // tags-003: the index's own blacklist toggle lands in Task 6 — until then,
+    // show only what browsing shows.
+    includeBlacklisted: false,
   }).catch(() => null);
   if (!rows || !ui.tagIndexOpen || token !== tagIndexToken) return;
   ui.tagIndexRows = rows;
@@ -5361,7 +5422,10 @@ export async function openGalleryForFolder(
     // sub-folder of an already-open gallery grants no new filesystem reach.
     await authorizeMediaDir(path);
     const nodes = await readGalleryNodes(path);
-    const items = toGalleryItems(nodes);
+    // tags-003: filtered before the length check below, so a folder that is
+    // entirely blacklisted reports "nothing to show" instead of rendering an
+    // unexplained empty grid.
+    const items = filterBlacklisted(toGalleryItems(nodes), hiddenKeys);
     if (ui.view !== "gallery" || ui.galleryPath !== path) return; // superseded by a newer open
     setGalleryIndex(-1); // ux-004: a fresh grid starts with no keyboard cursor
     // Reset the thumbnail pipeline BEFORE the items land. startGalleryThumbs
@@ -5428,7 +5492,10 @@ export async function openArchiveGallery(
     // gates on the archive and materializes only into its own cache.
     await authorizeMediaDir(archive);
     const nodes = await readArchiveNodes(archive, inner);
-    const items = toGalleryItems(nodes, archive);
+    // tags-003: same reasoning as openGalleryForFolder — filter before the
+    // length check so an entirely-blacklisted archive level reports "nothing
+    // to show" instead of an unexplained empty grid.
+    const items = filterBlacklisted(toGalleryItems(nodes, archive), hiddenKeys);
     if (ui.view !== "gallery" || ui.galleryArchive !== archive || ui.galleryInner !== inner) {
       return; // superseded by a newer open
     }
@@ -6517,6 +6584,8 @@ export function init(): void {
   renderRecents();
   void loadTagLibrary(); // tags-002: the shelf must be populated on the FIRST
                          // Home paint, not only after a navigation back to it
+  void refreshHiddenKeys(); // tags-003: the app must know the blacklist before
+                             // the first gallery, same reasoning as above
   renderPlaylists();
   renderTimestamps();
   render();
