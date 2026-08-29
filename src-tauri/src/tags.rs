@@ -895,6 +895,28 @@ pub(crate) fn delete_tag_members(
     Ok(ids.len() as u32)
 }
 
+/// Delete the `tags` row for `tag` (tags-004).
+///
+/// The counterpart `delete_tag_members` deliberately does NOT do this: a prune
+/// removes memberships and must leave the tag itself, or pruning a tag whose
+/// files are temporarily on an unplugged drive would destroy the tag too.
+/// tags-004 wants the opposite — once its sweep has emptied a tag there is
+/// nothing left for the tag to name, so it goes.
+///
+/// An unknown tag is a no-op rather than an error. The sweep can race a
+/// concurrent untag that already emptied and removed it, and reporting a
+/// failure for work that is already done would be wrong.
+///
+/// The `tag_blacklist` row, if any, goes with it via the schema's
+/// `ON DELETE CASCADE` (tags-003) — `open_db` enables `foreign_keys`, without
+/// which that clause would parse and never fire.
+pub(crate) fn delete_tag(conn: &Connection, tag: &str) -> Result<(), String> {
+    let (_, folded) = fold_tag(tag)?;
+    conn.execute("DELETE FROM tags WHERE folded = ?1", params![folded])
+        .map_err(|e| format!("tags: delete tag: {e}"))?;
+    Ok(())
+}
+
 /// The tag library for the Home chips and the all-tags index.
 ///
 /// `include_blacklisted` is false everywhere except the index's "Show
@@ -2293,5 +2315,64 @@ mod tests {
             vec!["Keep".to_string()],
             "typeahead offered a blacklisted tag with an empty prefix"
         );
+    }
+
+    #[test]
+    fn delete_tag_removes_the_tag_row_only() {
+        let path = temp_db("del-tag");
+        let conn = open_db(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO tags (id, name, folded, created_at) VALUES
+               (1, 'Gone', 'gone', 1), (2, 'Keep', 'keep', 1);
+             INSERT INTO items (id, archive, path, kind, name, sort_key, added_at) VALUES
+               (1, '', 'C:\\pics\\a.jpg', 'image', 'a.jpg', 'a.jpg', 1);
+             INSERT INTO item_tags (item_id, tag_id) VALUES (1, 2);",
+        )
+        .unwrap();
+
+        delete_tag(&conn, "gone").unwrap();
+
+        let gone: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE folded = 'gone'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(gone, 0, "the tag row should be gone");
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE folded = 'keep'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "an unrelated tag must not be touched");
+        let items: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(items, 1, "delete_tag must not remove item rows");
+    }
+
+    /// The cascade tags-003 added is what keeps a deleted tag from leaving a
+    /// blacklist row pointing at an id a future tag could reuse.
+    #[test]
+    fn delete_tag_takes_its_blacklist_row_with_it() {
+        let path = temp_db("del-tag-bl");
+        let conn = open_db(&path).unwrap();
+        conn.execute(
+            "INSERT INTO tags (id, name, folded, created_at) VALUES (1, 'Gone', 'gone', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO tag_blacklist (tag_id, created_at) VALUES (1, 1)", [])
+            .unwrap();
+
+        delete_tag(&conn, "gone").unwrap();
+
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tag_blacklist", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "the blacklist row outlived its tag");
+    }
+
+    /// Deleting a tag that is not there is a no-op, not an error: the sweep may
+    /// race a concurrent untag that already removed it, and failing there would
+    /// report a failure for work that is already done.
+    #[test]
+    fn delete_tag_is_a_no_op_for_an_unknown_tag() {
+        let path = temp_db("del-tag-missing");
+        let conn = open_db(&path).unwrap();
+        assert!(delete_tag(&conn, "nosuchtag").is_ok());
     }
 }
