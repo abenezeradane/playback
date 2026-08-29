@@ -885,20 +885,62 @@ pub(crate) fn delete_tag_members(
 }
 
 /// The tag library for the Home chips and the all-tags index.
+///
+/// `include_blacklisted` is false everywhere except the index's "Show
+/// blacklisted" mode — which exists because a tag you cannot see is a tag you
+/// cannot un-blacklist, and a hide with no way back is a trap.
 #[tauri::command]
 pub(crate) async fn tag_list(
     db: tauri::State<'_, TagsDb>,
     query: String,
     limit: u32,
     offset: u32,
+    include_blacklisted: bool,
 ) -> Result<Vec<TagSummary>, String> {
     let db = db.inner().clone();
-    // TODO(tags-003 task 3): thread the real include_blacklisted argument
-    // through from the frontend; `false` keeps today's behavior (blacklisted
-    // tags stay off the Home chips and the all-tags index) until it does.
-    blocking(move || with_db(&db, |conn| list_tags(conn, false, &query, limit, offset)))
+    blocking(move || {
+        with_db(&db, |conn| list_tags(conn, include_blacklisted, &query, limit, offset))
+    })
+    .await
+    .map_err(|e| crate::ipc_error("tag_list", e, "could not read tags"))
+}
+
+/// Blacklist or un-blacklist one tag (tags-003). Writes no file and removes no
+/// tag from any item — see `set_blacklist`.
+#[tauri::command]
+pub(crate) async fn tag_blacklist_set(
+    db: tauri::State<'_, TagsDb>,
+    tag: String,
+    on: bool,
+) -> Result<(), String> {
+    let db = db.inner().clone();
+    // fold_tag's message is written for a person to read, so it is checked out
+    // here and passed through verbatim rather than flattened by ipc_error.
+    fold_tag(&tag)?;
+    blocking(move || with_db(&db, |conn| set_blacklist(conn, &tag, on)))
         .await
-        .map_err(|e| crate::ipc_error("tag_list", e, "could not read tags"))
+        .map_err(|e| crate::ipc_error("tag_blacklist_set", e, "could not change that tag"))
+}
+
+/// Every blacklisted tag's display name, so the index can mark its rows.
+#[tauri::command]
+pub(crate) async fn tag_blacklist_list(
+    db: tauri::State<'_, TagsDb>,
+) -> Result<Vec<String>, String> {
+    let db = db.inner().clone();
+    blocking(move || with_db(&db, |conn| list_blacklist(conn)))
+        .await
+        .map_err(|e| crate::ipc_error("tag_blacklist_list", e, "could not read tags"))
+}
+
+/// The identity of every item carrying a blacklisted tag, for the frontend's
+/// browsing filter (tags-003). One call per blacklist change, not per item.
+#[tauri::command]
+pub(crate) async fn tag_hidden_keys(db: tauri::State<'_, TagsDb>) -> Result<Vec<String>, String> {
+    let db = db.inner().clone();
+    blocking(move || with_db(&db, |conn| hidden_keys(conn)))
+        .await
+        .map_err(|e| crate::ipc_error("tag_hidden_keys", e, "could not read tags"))
 }
 
 /// One page of a tag's members, with the total and a per-row missing flag.
