@@ -1069,7 +1069,7 @@ function galleryNavEntry(): NavEntry {
       ui.galleryCrumbs = crumbs;
       ui.galleryError = "";
       ui.galleryLoading = false;
-      ui.galleryIndex = cursor;
+      setGalleryIndex(cursor);
       clearImageView();
       ui.view = "gallery";
       document.title = `${folder || "Gallery"} — Playback`;
@@ -4359,8 +4359,6 @@ export async function openGalleryForTag(tag: string): Promise<void> {
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false; // tags-002: the sliding window replaced the cap
   disarmPrune(); // tags-002 fix-wave: opening a tag, even this one afresh, is a new count
-  disarmGalleryDelete(); // img-003: same reasoning as disarmDelete in openImage -- an
-  // armed tile from the view being left must not keep claiming a press here deletes it
   ui.galleryWindowStart = 0;
   ui.galleryCrumbs = [];
   ui.galleryError = "";
@@ -4390,7 +4388,7 @@ export async function openGalleryForTag(tag: string): Promise<void> {
     await authorizePageDirs(first.items);
     if (galleryToken !== token) return;
 
-    ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
+    setGalleryIndex(-1); // ux-004: a fresh grid starts with no keyboard cursor
     // Same ordering constraint as openGalleryForFolder: reset the thumbnail
     // pipeline BEFORE the items land, or tiles that already mounted never
     // request a thumbnail and shimmer forever.
@@ -5078,7 +5076,7 @@ function focusGalleryTile(index: number): void {
   const token = galleryToken;
   const place = (): void => {
     if (token !== galleryToken) return; // superseded while the window loaded
-    ui.galleryIndex = next;
+    setGalleryIndex(next);
     void tick().then(() => {
       const grid = document.getElementById("gallery-grid");
       // Absolute index -> DOM position, converted here at the point of use rather
@@ -5206,6 +5204,24 @@ function disarmGalleryDelete(): void {
   galleryArmTimer = undefined;
 }
 
+/**
+ * The one place `ui.galleryIndex` is allowed to change (img-003 fix round 1).
+ *
+ * The arm names a TILE, not a position -- it is only valid while the cursor
+ * still points at the file it was armed for. `focusGalleryTile`'s own disarm
+ * only covered arrow-key movement; a plain tile click (`openGalleryItem`) set
+ * the cursor directly and slipped past it, leaving a stale red outline on the
+ * tile that was actually armed instead of the one now under the cursor. A
+ * scattered disarm call at every writer has already needed a second round to
+ * find the one that got missed, so every write is routed through here instead
+ * -- one choke point that stays correct even if a future call site forgets to
+ * think about deletion at all.
+ */
+function setGalleryIndex(next: number): void {
+  ui.galleryIndex = next;
+  disarmGalleryDelete();
+}
+
 /** Called by the grid's scroll handler (Gallery.svelte Step 2) when the row
  *  scrolled to leaves the middle third of the currently loaded window
  *  (tags-002). A no-op outside a tag view — only a tag view has a window to
@@ -5293,8 +5309,6 @@ export async function openGalleryForFolder(
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
   disarmPrune(); // tags-002 fix-wave: leaving the tag for a folder leaves any armed prune too
-  disarmGalleryDelete(); // img-003: same reasoning as disarmDelete in openImage -- an
-  // armed tile from the view being left must not keep claiming a press here deletes it
   // tags-002: a folder view is never windowed — every tile it renders IS the
   // gallery, so its absolute indices start at 0. Without this reset, leaving a
   // tag scrolled deep in (a non-zero windowStart) for a tagged FOLDER tile
@@ -5319,7 +5333,7 @@ export async function openGalleryForFolder(
     const nodes = await readGalleryNodes(path);
     const items = toGalleryItems(nodes);
     if (ui.view !== "gallery" || ui.galleryPath !== path) return; // superseded by a newer open
-    ui.galleryIndex = -1; // ux-004: a fresh grid starts with no keyboard cursor
+    setGalleryIndex(-1); // ux-004: a fresh grid starts with no keyboard cursor
     // Reset the thumbnail pipeline BEFORE the items land. startGalleryThumbs
     // disconnects the previous IntersectionObserver, so doing it afterwards can
     // throw away observations for tiles that already mounted — those tiles then
@@ -5367,8 +5381,6 @@ export async function openArchiveGallery(
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
   disarmPrune(); // tags-002 fix-wave: same as openGalleryForFolder — leaving the tag
-  disarmGalleryDelete(); // img-003: same reasoning as disarmDelete in openImage -- an
-  // armed tile from the view being left must not keep claiming a press here deletes it
   // tags-002: see the matching reset in openGalleryForFolder — an archive
   // level is never windowed either, so a stale non-zero windowStart carried
   // over from a tag session would break keyboard focus the same way.
@@ -5390,7 +5402,7 @@ export async function openArchiveGallery(
     if (ui.view !== "gallery" || ui.galleryArchive !== archive || ui.galleryInner !== inner) {
       return; // superseded by a newer open
     }
-    ui.galleryIndex = -1;
+    setGalleryIndex(-1);
     startGalleryThumbs(token);
     ui.galleryItems = items;
     perfMark("gallery.items", String(items.length));
@@ -5573,7 +5585,7 @@ export function openGalleryItem(item: GalleryItem): void {
   // offset by `galleryWindowStart` to land back on an absolute index, same as
   // everywhere else the cursor is written (tags-002).
   const index = ui.galleryItems.indexOf(item);
-  if (index >= 0) ui.galleryIndex = ui.galleryWindowStart + index;
+  if (index >= 0) setGalleryIndex(ui.galleryWindowStart + index);
   // ux-001: remember the grid (items + scroll + cursor) so Back returns to it in
   // place rather than dumping the user on the home screen.
   pushNav(galleryNavEntry());
