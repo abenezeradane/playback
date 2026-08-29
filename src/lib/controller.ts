@@ -3271,6 +3271,8 @@ async function openImage(path: string): Promise<void> {
   setShortcutsOpen(false);
   resetGifState();
   resetImageTools(); // img-001: a new photo never inherits the last one's framing
+  disarmDelete(); // img-003: nor the last one's arm -- the button must not claim
+  // one more press deletes THIS photo when the armed press was for a different one
   showImageChrome();
 
   const title = basename(path);
