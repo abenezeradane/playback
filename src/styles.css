@@ -4271,6 +4271,33 @@ button.shortcuts__backdrop {
   overflow-y: auto;
 }
 
+/* tags-003: the index is the only place a blacklisted tag is visible, so a row
+   in "Show blacklisted" mode has to read as hidden-elsewhere at a glance. */
+.tagindex__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* `.tagpop__suggestion` carries `width: 100%` for its single-button original
+   context; paired with a second flex item here, default flex-shrink would
+   still steal a few px from the icon button and squash its (square) glyph.
+   Pin the icon button's own size and let the name/count button give way. */
+.tagindex__row .iconbtn {
+  flex-shrink: 0;
+}
+.tagindex__row--blacklisted .tagpop__suggestion-name {
+  opacity: 0.55;
+  text-decoration: line-through;
+}
+.tagindex__showbl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 4px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
 /* ---------- Missing tag tiles + prune (tags-002, task 9) ---------- */
 /* A tag member whose file is gone from disk. Tags are never auto-deleted — a
    file on an unplugged drive comes back when the drive does — so the tile

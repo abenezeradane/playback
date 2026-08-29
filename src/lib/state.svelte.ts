@@ -290,6 +290,17 @@ export const ui = $state({
   tagIndexOpen: false,
   tagIndexQuery: "",
   tagIndexRows: [] as { name: string; count: number }[],
+  // tags-003: the index's "Show blacklisted" mode. OFF by default — the whole
+  // point of a blacklist is not seeing those tags — but reachable, because a
+  // tag you cannot see is a tag you cannot un-blacklist.
+  tagIndexShowBlacklisted: false,
+  // tags-003: display names of the blacklisted tags, so a row can mark itself.
+  tagBlacklist: [] as string[],
+  // tags-003: this overlay's own error surface. `galleryError` renders inside
+  // Gallery.svelte, which is hidden (`[hidden] { display: none !important }`)
+  // whenever the index is opened from Home — its own errors would be set but
+  // never seen. See `toggleTagBlacklist`.
+  tagIndexError: "",
   // Home's Tags section: the most-used tags, loaded once when Home is shown.
   tagLibrary: [] as { name: string; count: number }[],
 

@@ -4587,6 +4587,9 @@ export function openTagIndex(): void {
   ui.tagIndexOpen = true;
   ui.tagIndexQuery = "";
   ui.tagIndexRows = [];
+  ui.tagIndexShowBlacklisted = false; // each visit starts in the ordinary view
+  ui.tagIndexError = "";
+  void loadTagBlacklist();
   void refreshTagIndex("");
 }
 
@@ -4594,6 +4597,7 @@ export function closeTagIndex(): void {
   ui.tagIndexOpen = false;
   ui.tagIndexQuery = "";
   ui.tagIndexRows = [];
+  ui.tagIndexError = "";
   tagIndexToken++; // a response already in flight must not repopulate a closed list
 }
 
@@ -4613,12 +4617,52 @@ async function refreshTagIndex(query: string): Promise<void> {
     query,
     limit: 200,
     offset: 0,
-    // tags-003: the index's own blacklist toggle lands in Task 6 — until then,
-    // show only what browsing shows.
-    includeBlacklisted: false,
+    includeBlacklisted: ui.tagIndexShowBlacklisted,
   }).catch(() => null);
   if (!rows || !ui.tagIndexOpen || token !== tagIndexToken) return;
   ui.tagIndexRows = rows;
+}
+
+/** Load which tags are blacklisted, so the index can mark its rows. */
+export async function loadTagBlacklist(): Promise<void> {
+  const rows = await tauriInvoke<string[]>("tag_blacklist_list", {}).catch(() => null);
+  if (!rows) return;
+  ui.tagBlacklist = rows;
+}
+
+/**
+ * Blacklist or un-blacklist one tag (tags-003).
+ *
+ * Nothing here is destructive: the tag keeps its name and its members keep the
+ * tag, so this is fully reversible by pressing it again. That is why it needs
+ * no confirmation, unlike anything in img-003.
+ */
+export async function toggleTagBlacklist(tag: string): Promise<void> {
+  const on = !ui.tagBlacklist.includes(tag);
+  try {
+    await tauriInvoke("tag_blacklist_set", { tag, on });
+  } catch {
+    // Not `ui.galleryError`: Gallery.svelte is `hidden` (display:none) whenever
+    // this button is reachable, since "All tags…" only opens from Home. That
+    // error would be set and never seen, leaving the row's icon disagreeing
+    // with the store with no visible sign anything went wrong. `tagIndexError`
+    // renders in this overlay itself, mirroring `tagError` in TagPopover.svelte.
+    ui.tagIndexError = "Could not change that tag.";
+    return;
+  }
+  ui.tagIndexError = "";
+  // Order matters: the blacklist list drives the index's marks, the hidden set
+  // drives browsing, and Home's shelf must drop or regain the tag.
+  await loadTagBlacklist();
+  await refreshHiddenKeys();
+  await loadTagLibrary();
+  await refreshTagIndex(ui.tagIndexQuery.trim());
+}
+
+/** Show or hide blacklisted tags in the index, and reload its rows. */
+export function setShowBlacklisted(on: boolean): void {
+  ui.tagIndexShowBlacklisted = on;
+  void refreshTagIndex(ui.tagIndexQuery.trim());
 }
 
 // ---------------------------------------------------------------------------
