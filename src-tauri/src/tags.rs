@@ -1090,6 +1090,87 @@ pub(crate) async fn tag_prune_missing(
     .map_err(|e| crate::ipc_error("tag_prune_missing", e, "could not check that tag"))
 }
 
+/// Recycle every file a tag carries, then delete the emptied tag (tags-004).
+///
+/// The WebView passes only a tag NAME and the count its confirmation showed.
+/// The paths come from this store, never from the caller — so `ensure_allowed`
+/// (sec-002) is not widened for a tag that spans drives; it is simply not
+/// needed, because the untrusted side never names a file.
+///
+/// Three phases, the same shape and the same reason as `tag_prune_missing`:
+/// the recycling pass can run for minutes on a large tag, and holding the
+/// shared connection across it would freeze every other tag command for the
+/// duration.
+#[tauri::command]
+pub(crate) async fn tag_delete_all(
+    db: tauri::State<'_, TagsDb>,
+    tag: String,
+    expect_count: u32,
+) -> Result<TagDeleteResult, String> {
+    let db = db.inner().clone();
+    fold_tag(&tag)?;
+    blocking(move || {
+        // Phase 1 — read the members under the lock.
+        let rows = with_db(&db, |conn| tag_member_paths(conn, &tag))?;
+
+        // The interlock. The count the user confirmed against is the count we
+        // must still be looking at; if a concurrent tag-apply changed it, abort
+        // having deleted NOTHING rather than sweep a different set than the one
+        // the confirmation described.
+        if rows.len() as u32 != expect_count {
+            return Err(crate::ipc_error(
+                "tag_delete_all: count changed",
+                format!("expected {expect_count}, found {}", rows.len()),
+                "this tag changed while you were confirming - open it again",
+            ));
+        }
+
+        // Phase 2 — stat and recycle with the lock RELEASED.
+        let plan = classify_for_delete(rows);
+        let mut result = TagDeleteResult {
+            recycled: 0,
+            skipped_in_archive: plan.skipped_in_archive,
+            skipped_missing: plan.skipped_missing,
+            failed: 0,
+        };
+        let mut done: Vec<i64> = Vec::new();
+        for (id, path) in plan.to_recycle {
+            // A per-file failure is counted and the run CONTINUES. One file
+            // locked by another process must not strand the other 399. There is
+            // deliberately no fallback to a permanent delete: when the Recycle
+            // Bin is unavailable the file stays where it is.
+            match crate::recycle::recycle(std::path::Path::new(&path)) {
+                Ok(()) => {
+                    result.recycled += 1;
+                    done.push(id);
+                }
+                Err(e) => {
+                    eprintln!("[playback] tag_delete_all: {path}: {e}");
+                    result.failed += 1;
+                }
+            }
+        }
+
+        // Phase 3 — under the lock again, and bounded to what phase 2 actually
+        // recycled. A file that failed keeps its tag, so the tag still names
+        // something real and the user can retry.
+        with_db(&db, |conn| {
+            delete_tag_members(conn, &tag, &done)?;
+            // The tag goes only when nothing it named survives. If a file failed
+            // to recycle or a page inside an archive was skipped, the tag still
+            // has members and deleting it would strand them.
+            let remaining = result.failed + result.skipped_in_archive + result.skipped_missing;
+            if remaining == 0 {
+                delete_tag(conn, &tag)?;
+            }
+            Ok(())
+        })?;
+
+        Ok(result)
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

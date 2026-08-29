@@ -1925,6 +1925,7 @@ pub fn run() {
             tags::tag_list,
             tags::tag_items,
             tags::tag_prune_missing,
+            tags::tag_delete_all,
             tags::tag_blacklist_set,
             tags::tag_blacklist_list,
             tags::tag_hidden_keys,
