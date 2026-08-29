@@ -6158,7 +6158,15 @@ function handleImageKey(e: KeyboardEvent): boolean {
       // tag popover can hold focus on a plain <button> (a chip or a
       // suggestion), which does not suppress this hotkey, while the popover's
       // scrim hides both the armed toolbar button and the flash toast.
-      if (ui.tagPopoverOpen) return false;
+      //
+      // tags-004 fix round 2: the delete-tagged confirmation panel is the
+      // identical case, reached the identical way — it traps no focus either,
+      // so Tab can land back on a gallery tile and Enter falls through to the
+      // browser's default click, opening the image UNDER the panel while
+      // tagDeleteOpen stays true. A destructive key must not fire while the
+      // arm feedback it depends on is hidden behind an overlay; that rule
+      // covers both panels, not just the one img-003 happened to ship first.
+      if (ui.tagPopoverOpen || ui.tagDeleteOpen) return false;
       e.preventDefault();
       void doImageDelete();
       return true;
