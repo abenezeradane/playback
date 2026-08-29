@@ -143,6 +143,9 @@ import {
   indexAfterDelete,
   deleteButtonText,
   DELETE_ARM_MS,
+  hiddenKey,
+  isHidden,
+  filterBlacklisted,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -2450,6 +2453,90 @@ describe("img-003 delete confirmation", () => {
       const t = deleteButtonText(true, "a.jpg");
       expect(t.title).toBe("Press again to delete a.jpg");
       expect(t.label).toBe("Press again to move a.jpg to the Recycle Bin");
+    });
+  });
+});
+
+describe("tags-003 blacklist filter", () => {
+  // Rust builds these strings (tags.rs hidden_keys) and is the authority on the
+  // format; these fixtures mirror exactly what it returns.
+  const hidden = new Set([
+    "\u0000C:\\pics\\a.jpg",
+    "C:\\pics\\book.cbz\u0000page1.jpg",
+  ]);
+
+  describe("hiddenKey", () => {
+    it("matches the key Rust builds for a real file", () => {
+      expect(hiddenKey("", "C:\\pics\\a.jpg")).toBe("\u0000C:\\pics\\a.jpg");
+    });
+
+    it("matches the key Rust builds for a page inside an archive", () => {
+      expect(hiddenKey("C:\\pics\\book.cbz", "page1.jpg")).toBe(
+        "C:\\pics\\book.cbz\u0000page1.jpg",
+      );
+    });
+
+    // A real file whose path happens to spell out an archive identity must not
+    // collide with the archive page. NUL cannot occur in a path, which is why.
+    it("cannot collide an archive page with a real file", () => {
+      expect(hiddenKey("", "C:\\pics\\book.cbzpage1.jpg")).not.toBe(
+        hiddenKey("C:\\pics\\book.cbz", "page1.jpg"),
+      );
+    });
+  });
+
+  describe("isHidden", () => {
+    it("hides a blacklisted real file", () => {
+      expect(isHidden({ path: "C:\\pics\\a.jpg" }, hidden)).toBe(true);
+    });
+
+    it("hides a blacklisted archive page", () => {
+      expect(
+        isHidden({ archive: "C:\\pics\\book.cbz", path: "page1.jpg" }, hidden),
+      ).toBe(true);
+    });
+
+    it("leaves anything not on the list alone", () => {
+      expect(isHidden({ path: "C:\\pics\\b.jpg" }, hidden)).toBe(false);
+    });
+
+    // An item with no `archive` field at all is an ordinary file (a recent, a
+    // queue entry) — it must key the same as one with archive: "".
+    it("treats a missing archive field as an empty one", () => {
+      expect(isHidden({ path: "C:\\pics\\a.jpg" }, hidden)).toBe(
+        isHidden({ archive: "", path: "C:\\pics\\a.jpg" }, hidden),
+      );
+    });
+
+    it("hides nothing when the blacklist is empty", () => {
+      expect(isHidden({ path: "C:\\pics\\a.jpg" }, new Set())).toBe(false);
+    });
+  });
+
+  describe("filterBlacklisted", () => {
+    it("drops hidden items and keeps the rest in order", () => {
+      const items = [
+        { path: "C:\\pics\\a.jpg", name: "a" },
+        { path: "C:\\pics\\b.jpg", name: "b" },
+        { path: "C:\\pics\\c.jpg", name: "c" },
+      ];
+      expect(filterBlacklisted(items, hidden).map((i) => i.name)).toEqual(["b", "c"]);
+    });
+
+    it("returns the list untouched when nothing is blacklisted", () => {
+      const items = [{ path: "C:\\pics\\a.jpg" }, { path: "C:\\pics\\b.jpg" }];
+      expect(filterBlacklisted(items, new Set())).toHaveLength(2);
+    });
+
+    it("survives an empty list", () => {
+      expect(filterBlacklisted([], hidden)).toEqual([]);
+    });
+
+    it("keeps the caller's element type intact", () => {
+      const items = [{ path: "C:\\pics\\b.jpg", kind: "image" as const, extra: 7 }];
+      const out = filterBlacklisted(items, hidden);
+      expect(out[0].extra).toBe(7);
+      expect(out[0].kind).toBe("image");
     });
   });
 });

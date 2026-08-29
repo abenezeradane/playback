@@ -2319,3 +2319,47 @@ export function deleteButtonText(
     label: `Press again to move ${name} to the Recycle Bin`,
   };
 }
+
+// ---------------------------------------------------------------------------
+// The blacklist browsing filter (tags-003)
+// ---------------------------------------------------------------------------
+// Blacklisting a tag hides the items carrying it from BROWSING. It deletes
+// nothing and un-tags nothing, so turning it off restores everything exactly.
+//
+// The set of hidden identities comes from Rust in one call per blacklist change
+// (tags.rs `hidden_keys`), not per item — an item-by-item lookup would put a
+// database round trip on the gallery's hot path, which perf-008/009 spent two
+// features clearing.
+//
+// Rust is the sole authority on the key format. These helpers rebuild it only
+// to look items up in a set Rust produced; if the two ever disagreed, nothing
+// would be hidden — a fail-open the filter's own tests pin down.
+
+/** The identity of one item, matching what tags.rs `hidden_keys` returns.
+ *  `archive` is "" for a real file; otherwise `path` is the path INSIDE that
+ *  archive. NUL separates them because it cannot occur in a path, so an
+ *  archive page can never collide with a real file of the joined name. */
+export function hiddenKey(archive: string, path: string): string {
+  return `${archive}\u0000${path}`;
+}
+
+/** True when this item carries a blacklisted tag. An absent `archive` field is
+ *  an ordinary file, keyed the same as an explicit "". */
+export function isHidden(
+  item: { archive?: string; path: string },
+  hidden: Set<string>,
+): boolean {
+  return hidden.has(hiddenKey(item.archive ?? "", item.path));
+}
+
+/** Drop every item carrying a blacklisted tag, preserving order and element
+ *  type. Generic because the three places items enter the UI carry three
+ *  different shapes — a gallery tile, a photo-queue entry and a recent file —
+ *  which agree only on `path` and an optional `archive`. */
+export function filterBlacklisted<T extends { archive?: string; path: string }>(
+  items: T[],
+  hidden: Set<string>,
+): T[] {
+  if (hidden.size === 0) return items; // the overwhelmingly common case
+  return items.filter((item) => !isHidden(item, hidden));
+}
