@@ -75,12 +75,7 @@ at the end) cannot be tailed until recording stops.
 | `src/main.ts` | Wires the DOM + Tauri APIs + `<video>` to `player-core`. |
 | `src/styles.css` | App styling — being reworked to the `docs/DESIGN.md` spec. |
 | `docs/DESIGN.md` | Current design spec for the UI (Raycast-inspired dark editorial). |
-| `docs/playback.pen` | Earlier design (glassmorphic); superseded by `docs/DESIGN.md`. |
 | `src-tauri/` | Rust/Tauri 2.0 shell (dialog plugin, asset protocol, livestream byte-streaming commands). |
-| `samples/sample.mp4` | A 30-second test clip with an on-screen timecode. |
-| `samples/live-source.mp4` | Fragmented (fMP4) build of the clip, for the livestream smoke. |
-| `scripts/live-writer.mjs` | Writes a file in real time to simulate a live capture. |
-| `scripts/smoke-*.ps1` | Visual end-to-end smoke tests (play-001/002/003). |
 
 ## Prerequisites
 
@@ -119,5 +114,7 @@ to the libmpv bundling overlay.
 ## Verify
 
 ```bash
-./init.sh            # install deps + run the baseline test suite
+npm run check                # svelte-check (0 errors / 0 warnings expected)
+npm test                     # vitest suite
+(cd src-tauri && cargo test) # Rust unit tests
 ```
