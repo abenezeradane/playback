@@ -2363,3 +2363,48 @@ export function filterBlacklisted<T extends { archive?: string; path: string }>(
   if (hidden.size === 0) return items; // the overwhelmingly common case
   return items.filter((item) => !isHidden(item, hidden));
 }
+
+/**
+ * Re-derive an OPEN folder/archive grid after the hidden set changes under it
+ * — a blacklisted tag applied to, or removed from, a tile while the grid is
+ * up. The grid used to be `filterBlacklisted(listing)` computed once at load,
+ * so a tile tagged with a blacklisted tag stayed on screen until the folder
+ * was reopened; this is that same derivation, re-run against the retained
+ * `listing` with what is currently `shown` and where the `cursor` sits.
+ *
+ * Returns `changed: false` (and `shown` itself) when the visible set is the
+ * same, so the caller can skip every side effect in the common case of a tag
+ * that hides nothing. Tiles are matched by identity key, never by reference:
+ * the grid holds reactive proxies of the listing's objects, so reference
+ * equality is exactly what a live grid cannot offer.
+ *
+ * The cursor follows its own tile. When that tile was hidden out from under
+ * it, it lands on the nearest tile still shown — the one after it first, then
+ * the one before — which is where `indexAfterDelete` lands after a delete, for
+ * the same reason: what slid into the gap is what the user is now looking at.
+ * -1 when there was no cursor, or nothing is left to point at.
+ */
+export function reviseGrid<T extends { archive?: string; path: string }>(
+  listing: T[],
+  hidden: Set<string>,
+  shown: T[],
+  cursor: number,
+): { items: T[]; cursor: number; changed: boolean } {
+  const items = filterBlacklisted(listing, hidden);
+  const keyOf = (it: T): string => hiddenKey(it.archive ?? "", it.path);
+  const same =
+    items.length === shown.length && items.every((it, i) => keyOf(it) === keyOf(shown[i]));
+  if (same) return { items: shown, cursor, changed: false };
+  if (cursor < 0 || shown.length === 0) return { items, cursor: -1, changed: true };
+  const at = new Map(items.map((it, i) => [keyOf(it), i]));
+  const from = Math.min(cursor, shown.length - 1);
+  for (let j = from; j < shown.length; j++) {
+    const idx = at.get(keyOf(shown[j]));
+    if (idx !== undefined) return { items, cursor: idx, changed: true };
+  }
+  for (let j = from - 1; j >= 0; j--) {
+    const idx = at.get(keyOf(shown[j]));
+    if (idx !== undefined) return { items, cursor: idx, changed: true };
+  }
+  return { items, cursor: -1, changed: true };
+}

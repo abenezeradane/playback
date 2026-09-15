@@ -146,6 +146,7 @@ import {
   hiddenKey,
   isHidden,
   filterBlacklisted,
+  reviseGrid,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -2537,6 +2538,89 @@ describe("tags-003 blacklist filter", () => {
       const out = filterBlacklisted(items, hidden);
       expect(out[0].extra).toBe(7);
       expect(out[0].kind).toBe("image");
+    });
+  });
+
+  // Live re-filter of an OPEN folder/archive grid, after the hidden set changes
+  // under it (a blacklisted tag applied or removed while the grid is up). The
+  // grid used to be filtered once at load, so a tile tagged with a blacklisted
+  // tag stayed on screen until the folder was reopened.
+  describe("reviseGrid", () => {
+    const a = { path: "/pics/a.jpg", name: "a" };
+    const b = { path: "/pics/b.jpg", name: "b" };
+    const c = { path: "/pics/c.jpg", name: "c" };
+    const listing = [a, b, c];
+    const names = (xs: { name: string }[]) => xs.map((x) => x.name);
+    const hiding = (...paths: string[]) => new Set(paths.map((p) => hiddenKey("", p)));
+
+    it("reports no change and hands back the grid as it is when nothing new is hidden", () => {
+      const shown = [a, b, c];
+      const r = reviseGrid(listing, new Set(), shown, 1);
+      expect(r.changed).toBe(false);
+      expect(r.items).toBe(shown);
+      expect(r.cursor).toBe(1);
+    });
+
+    it("drops a tile that just became hidden", () => {
+      const r = reviseGrid(listing, hiding("/pics/b.jpg"), [a, b, c], -1);
+      expect(r.changed).toBe(true);
+      expect(names(r.items)).toEqual(["a", "c"]);
+    });
+
+    it("keeps the cursor on its own tile when an earlier tile is hidden", () => {
+      // cursor on c (index 2); a goes -> c is now index 1
+      const r = reviseGrid(listing, hiding("/pics/a.jpg"), [a, b, c], 2);
+      expect(r.cursor).toBe(1);
+    });
+
+    it("leaves the cursor alone when a later tile is hidden", () => {
+      const r = reviseGrid(listing, hiding("/pics/c.jpg"), [a, b, c], 0);
+      expect(r.cursor).toBe(0);
+    });
+
+    it("lands the cursor on the tile that slid into its hidden tile's place", () => {
+      // cursor on b (1); b goes -> c slides into index 1, exactly where a delete lands
+      const r = reviseGrid(listing, hiding("/pics/b.jpg"), [a, b, c], 1);
+      expect(names(r.items)).toEqual(["a", "c"]);
+      expect(r.cursor).toBe(1);
+    });
+
+    it("lands the cursor on the new last tile when its hidden tile was last", () => {
+      const r = reviseGrid(listing, hiding("/pics/c.jpg"), [a, b, c], 2);
+      expect(r.cursor).toBe(1);
+    });
+
+    it("clears the cursor when every tile is hidden", () => {
+      const r = reviseGrid(listing, hiding("/pics/a.jpg", "/pics/b.jpg", "/pics/c.jpg"), [a, b, c], 1);
+      expect(r.changed).toBe(true);
+      expect(r.items).toEqual([]);
+      expect(r.cursor).toBe(-1);
+    });
+
+    it("keeps a cleared cursor cleared", () => {
+      const r = reviseGrid(listing, hiding("/pics/a.jpg"), [a, b, c], -1);
+      expect(r.cursor).toBe(-1);
+    });
+
+    it("brings a tile back, in listing order, once it is no longer hidden", () => {
+      // b was hidden when the grid loaded; its blacklisted tag has since been
+      // removed. Cursor on c (index 1 of what was shown) follows c to index 2.
+      const r = reviseGrid(listing, new Set(), [a, c], 1);
+      expect(r.changed).toBe(true);
+      expect(names(r.items)).toEqual(["a", "b", "c"]);
+      expect(r.cursor).toBe(2);
+    });
+
+    it("compares tiles by identity key, never by object reference", () => {
+      // The grid holds reactive proxies of the listing's objects, so reference
+      // equality is exactly what a live grid cannot offer.
+      const copies = listing.map((x) => ({ ...x }));
+      expect(reviseGrid(listing, new Set(), copies, 0).changed).toBe(false);
+    });
+
+    it("hands back the listing's own objects, not copies", () => {
+      const r = reviseGrid(listing, hiding("/pics/a.jpg"), [a, b, c], -1);
+      expect(r.items[0]).toBe(b);
     });
   });
 });

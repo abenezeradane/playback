@@ -136,6 +136,7 @@ import {
   type DeleteArm,
   filterBlacklisted,
   isHidden,
+  reviseGrid,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -1017,6 +1018,10 @@ function pushNav(entry: NavEntry): void {
 /** Snapshot the gallery so Back can restore it exactly, with no re-read of disk. */
 function galleryNavEntry(): NavEntry {
   const items = ui.galleryItems;
+  // tags-003 live hide: the unfiltered listing travels with the grid, so Back
+  // can re-run the blacklist filter over it rather than trusting `items` —
+  // which is what the filter left at the time, not what it leaves now.
+  const listing = ui.galleryListing;
   const folder = ui.galleryFolder;
   // gallery-002: the path and breadcrumb trail are part of "where you were" too —
   // restoring a nested sub-gallery without them would show the right tiles under
@@ -1060,6 +1065,7 @@ function galleryNavEntry(): NavEntry {
       // grid left mid-fill, opened into a photo and backed out of, sat at 186
       // of 3,000 tiles and never moved again.
       scheduleThumbFill();
+      ui.galleryListing = listing;
       ui.galleryFolder = folder;
       ui.galleryPath = path;
       ui.galleryArchive = archive;
@@ -1072,6 +1078,14 @@ function galleryNavEntry(): NavEntry {
       ui.galleryError = "";
       ui.galleryLoading = false;
       setGalleryIndex(cursor);
+      // tags-003 live hide: the snapshot is the grid as the blacklist filter
+      // left it when the user went forward. A tag applied or removed since —
+      // in the viewer, or in a deeper grid that shares this one's items — can
+      // have changed what it should show, so re-derive against the hidden set
+      // as it is NOW. Runs after every field above is back in place: which
+      // branch it takes depends on `galleryTag`, and where the cursor lands
+      // depends on the index just restored.
+      applyHiddenToGrid();
       clearImageView();
       ui.view = "gallery";
       document.title = `${folder || "Gallery"} — Playback`;
@@ -1082,12 +1096,15 @@ function galleryNavEntry(): NavEntry {
         if (body) body.scrollTop = scrollTop;
         // Put keyboard focus back on the tile that was opened, so Back leaves the
         // user exactly where they were rather than at the top of the grid.
-        if (cursor >= 0) {
+        // Read from `ui`, not the captured `cursor`: applyHiddenToGrid may have
+        // moved it onto the tile that slid into a hidden one's place.
+        const landing = ui.galleryIndex;
+        if (landing >= 0) {
           const grid = document.getElementById("gallery-grid");
           // Absolute index -> DOM position, converted here at the point of use —
           // same reasoning as focusGalleryTile (tags-002).
           (
-            grid?.querySelector(`[data-gallery-index="${cursor}"]`) as HTMLElement | null
+            grid?.querySelector(`[data-gallery-index="${landing}"]`) as HTMLElement | null
           )?.focus({ preventScroll: true });
         }
       });
@@ -1133,6 +1150,7 @@ export function goHome(): void {
   ui.view = "empty";
   ui.emptyError = "";
   ui.galleryItems = [];
+  ui.galleryListing = [];
   ui.galleryFolder = "";
   ui.galleryError = "";
   ui.galleryLoading = false;
@@ -4435,6 +4453,7 @@ export async function openGalleryForTag(tag: string): Promise<void> {
   perfMark("tag.open", tag);
   const token = ++galleryToken;
   ui.galleryItems = [];
+  ui.galleryListing = []; // tags-003 live hide: a tag view marks its rows hidden in place instead
   ui.galleryFolder = tag;
   ui.galleryPath = "";
   ui.galleryArchive = "";
@@ -4796,6 +4815,59 @@ export async function refreshHiddenKeys(): Promise<void> {
   // here, once, rather than trusting every caller of refreshHiddenKeys to
   // remember to.
   renderRecents();
+  // And the grid, for the same reason: a folder grid was filtered once at load
+  // and a tag grid's rows were marked once per window, so a tile tagged with a
+  // blacklisted tag stayed on screen until its gallery was reopened.
+  applyHiddenToGrid();
+}
+
+/**
+ * Re-derive what the OPEN grid shows from the hidden set as it is now
+ * (tags-003 live hide). Called after every refresh of `hiddenKeys` and when
+ * Back restores a grid — the two moments the set the grid was derived from can
+ * differ from the set it should reflect.
+ *
+ * Two grids, two mechanisms, both already established:
+ *  - A tag view keeps every loaded row and marks the hidden ones (`applyWindow`
+ *    explains why dropping them would break the window arithmetic); here the
+ *    same mark is recomputed in place over the rows that are loaded.
+ *  - A folder/archive grid DROPS hidden tiles, because every index in it is a
+ *    rendered tile — End, the delete landing and `galleryTotalCount` all rely
+ *    on that — so it is re-derived from the retained `ui.galleryListing`, the
+ *    cursor following its tile (`reviseGrid`). Reassigning `ui.galleryItems`
+ *    is safe for the thumbnail pipeline: a result in flight for an index whose
+ *    tile moved is dropped by `renderThumb`'s own path check, and the fill is
+ *    re-armed below so the tile it belonged to is picked up again.
+ *
+ * Nothing happens when the visible set is unchanged — the common case, a tag
+ * that hides nothing — so this costs a key comparison, not a re-render. Any
+ * change disarms a pending delete: an arm that outlives the listing it was
+ * aimed at is not a confirmation (the rule disarmGalleryDelete already states).
+ */
+function applyHiddenToGrid(): void {
+  if (ui.galleryTag) {
+    const filterThisView = shouldFilterTagView(ui.galleryTag);
+    let changed = false;
+    for (const it of ui.galleryItems) {
+      if (it.pending) continue; // no identity yet; applyWindow marks it when its page lands
+      const hidden = filterThisView && isHidden(it, hiddenKeys);
+      if (hidden === !!it.hidden) continue;
+      it.hidden = hidden;
+      changed = true;
+    }
+    if (!changed) return;
+    disarmGalleryDelete();
+    const shown = ui.galleryItems.filter((it) => !it.pending && !it.hidden).length;
+    perfMark("gallery.rehide", String(shown));
+    return;
+  }
+  if (ui.galleryListing.length === 0) return; // no folder/archive grid is loaded
+  const r = reviseGrid(ui.galleryListing, hiddenKeys, ui.galleryItems, ui.galleryIndex);
+  if (!r.changed) return;
+  ui.galleryItems = r.items;
+  setGalleryIndex(r.cursor); // the cursor moved, or its tile went — either disarms
+  rearmThumbFill();
+  perfMark("gallery.rehide", String(r.items.length));
 }
 
 export function openTagIndex(): void {
@@ -5066,6 +5138,22 @@ function scheduleThumbFill(): void {
   }, 0);
 }
 
+/**
+ * Wake the background fill after the grid's tiles moved under it (tags-003
+ * live hide, `applyHiddenToGrid`). Lighter than `resetThumbPipeline`, on
+ * purpose: the observer and `thumbFocus` are still right for the tiles that
+ * stayed mounted, and a full reset would walk the fill out from tile 0 rather
+ * than from the viewport. What a shift can leave behind is a tile whose
+ * in-flight result was dropped by `renderThumb`'s path check after a pass had
+ * already declared the fill done — clearing that flag is what lets the next
+ * pass find it. An index still queued simply renders whichever tile is at
+ * that position now, or bails if it already has one.
+ */
+function rearmThumbFill(): void {
+  thumbFillDone = false;
+  scheduleThumbFill();
+}
+
 function runThumbFill(token: number): void {
   if (token !== galleryToken) return; // a different gallery owns the pipeline now
   // Background work must not run behind another view. Opening a photo from the
@@ -5123,7 +5211,10 @@ function startGalleryThumbs(token: number): void {
  * a screenful of the viewport. One-shot — the tile is unobserved as soon as it
  * qualifies, so scrolling back and forth never re-queues it.
  */
-export function galleryTile(node: HTMLElement, index: number): { destroy(): void } {
+export function galleryTile(
+  node: HTMLElement,
+  index: number,
+): { update(index: number): void; destroy(): void } {
   node.dataset.galleryIndex = String(index);
   if (!thumbObserver) {
     thumbObserver = new IntersectionObserver(
@@ -5142,6 +5233,18 @@ export function galleryTile(node: HTMLElement, index: number): { destroy(): void
   }
   thumbObserver.observe(node);
   return {
+    // tags-003 live hide: when a folder grid drops a hidden tile, every tile
+    // after it moves up one — and the keyed {#each} keeps their DOM nodes, so
+    // the index stamped at mount would go stale. A tag view never needed this
+    // (a member's absolute index survives the window sliding), but here it is
+    // the only thing keeping the index the observer reports (enqueueThumb) and
+    // the one focusGalleryTile / the Back restore look up true for a tile that
+    // has moved. Found by smoke-tag-livehide.ps1's Oracle G2: with tile 0
+    // hidden, Home + Enter opened nothing, because the surviving tile still
+    // answered to index 1.
+    update(next: number): void {
+      node.dataset.galleryIndex = String(next);
+    },
     destroy(): void {
       thumbObserver?.unobserve(node);
     },
@@ -5662,6 +5765,7 @@ export async function openGalleryForFolder(
   const token = ++galleryToken;
   const label = basename(path);
   ui.galleryItems = [];
+  ui.galleryListing = [];
   ui.galleryFolder = label;
   ui.galleryPath = path;
   ui.galleryArchive = ""; // gallery-004: a real folder is not inside an archive
@@ -5692,10 +5796,6 @@ export async function openGalleryForFolder(
     // sub-folder of an already-open gallery grants no new filesystem reach.
     await authorizeMediaDir(path);
     const nodes = await readGalleryNodes(path);
-    // tags-003: filtered before the length check below, so a folder that is
-    // entirely blacklisted reports "nothing to show" instead of rendering an
-    // unexplained empty grid.
-    const items = filterBlacklisted(toGalleryItems(nodes), hiddenKeys);
     if (ui.view !== "gallery" || ui.galleryPath !== path) return; // superseded by a newer open
     setGalleryIndex(-1); // ux-004: a fresh grid starts with no keyboard cursor
     // Reset the thumbnail pipeline BEFORE the items land. startGalleryThumbs
@@ -5703,7 +5803,10 @@ export async function openGalleryForFolder(
     // throw away observations for tiles that already mounted — those tiles then
     // never request a thumbnail and shimmer forever.
     startGalleryThumbs(token);
-    ui.galleryItems = items;
+    // tags-003: filtered before the length check below, so a folder that is
+    // entirely blacklisted reports "nothing to show" instead of rendering an
+    // unexplained empty grid.
+    const items = showListing(toGalleryItems(nodes));
     perfMark("gallery.items", String(items.length)); // perf-005
     // gallery-002: a folder holding only SUB-folders is a perfectly good gallery,
     // so this is only an error when there is nothing of either kind to show.
@@ -5737,6 +5840,7 @@ export async function openArchiveGallery(
   perfMark("gallery.begin", label);
   const token = ++galleryToken;
   ui.galleryItems = [];
+  ui.galleryListing = [];
   ui.galleryFolder = label;
   ui.galleryPath = archive;
   ui.galleryArchive = archive;
@@ -5762,16 +5866,15 @@ export async function openArchiveGallery(
     // gates on the archive and materializes only into its own cache.
     await authorizeMediaDir(archive);
     const nodes = await readArchiveNodes(archive, inner);
-    // tags-003: same reasoning as openGalleryForFolder — filter before the
-    // length check so an entirely-blacklisted archive level reports "nothing
-    // to show" instead of an unexplained empty grid.
-    const items = filterBlacklisted(toGalleryItems(nodes, archive), hiddenKeys);
     if (ui.view !== "gallery" || ui.galleryArchive !== archive || ui.galleryInner !== inner) {
       return; // superseded by a newer open
     }
     setGalleryIndex(-1);
     startGalleryThumbs(token);
-    ui.galleryItems = items;
+    // tags-003: same reasoning as openGalleryForFolder — filter before the
+    // length check so an entirely-blacklisted archive level reports "nothing
+    // to show" instead of an unexplained empty grid.
+    const items = showListing(toGalleryItems(nodes, archive));
     perfMark("gallery.items", String(items.length));
     if (items.length === 0) ui.galleryError = "Nothing to show in this archive.";
   } catch (err) {
@@ -5783,6 +5886,27 @@ export async function openArchiveGallery(
       ui.galleryLoading = false;
     }
   }
+}
+
+/**
+ * Land a folder/archive listing in the grid (tags-003 live hide). The listing
+ * is kept whole in `ui.galleryListing` so the blacklist filter can be re-run
+ * over it later (`applyHiddenToGrid`); the grid shows what the filter leaves.
+ * Returns the tiles shown, for the caller's count and empty-state message.
+ *
+ * ORDER MATTERS: the listing is assigned to `ui` FIRST and the filter runs over
+ * `ui.galleryListing` — the reactive proxy — not over the plain array. Svelte 5
+ * keeps a proxied object's writes in the proxy, not on the raw object, so a
+ * grid filtered from the raw array would hold DIFFERENT proxies of the same
+ * items than the listing does: a `thumbSrc` written into a tile would never
+ * reach the listing's copy, and the first re-filter would blank every
+ * thumbnail. Filtering through `ui` hands the grid the listing's own proxies.
+ */
+function showListing(listing: GalleryItem[]): GalleryItem[] {
+  ui.galleryListing = listing;
+  const items = filterBlacklisted(ui.galleryListing, hiddenKeys);
+  ui.galleryItems = items;
+  return items;
 }
 
 /** Trailing segment of an archive INNER path (always '/'-separated). */

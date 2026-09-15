@@ -324,6 +324,17 @@ export const ui = $state({
   // from the image viewer's Grid button (reuses `photoQueue`, no extra IPC) or from
   // Home's "Open folder" action (a fresh `list_folder_images` call).
   galleryItems: [] as GalleryItem[],
+  // tags-003 live hide: a folder/archive grid's WHOLE listing, blacklist filter
+  // not yet applied — `galleryItems` is what that filter leaves of it. Kept so
+  // the filter can be re-run when the hidden set changes under an open grid (a
+  // blacklisted tag applied to, or removed from, a tile), instead of the grid
+  // staying as it was filtered at load until the folder is reopened. Empty in
+  // a tag view, whose members live in the controller's own `tagRows` and get
+  // marked `hidden` in place rather than dropped. Lives HERE, not as a plain
+  // controller array, so both lists hold the same reactive item objects: a
+  // `thumbSrc` written through one is seen through the other, and a re-filter
+  // never blanks a thumbnail that has already landed.
+  galleryListing: [] as GalleryItem[],
   galleryFolder: "",
   galleryLoading: false,
   galleryError: "",
