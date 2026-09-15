@@ -1086,6 +1086,14 @@ function galleryNavEntry(): NavEntry {
       // branch it takes depends on `galleryTag`, and where the cursor lands
       // depends on the index just restored.
       applyHiddenToGrid();
+      // Whichever viewer the user is backing out of, it must be torn down —
+      // the grid is opaque, so a player left running under it was HEARD, not
+      // seen (gallery-003 bugfix): a video tile opens into the player and
+      // this restore only ever cleared the image viewer. The folder queue
+      // goes with the player: with it, a pending "Up Next" could have loaded
+      // the next clip into a view the user had already left.
+      clearVideoView();
+      clearQueue();
       clearImageView();
       ui.view = "gallery";
       document.title = `${folder || "Gallery"} — Playback`;
@@ -3311,11 +3319,17 @@ function clearImageView(): void {
   // Note: the section visibility follows ui.view; callers move ui.view away.
 }
 
-/** Open an animated / still image in the dedicated viewer (play-012). */
-async function openImage(path: string): Promise<void> {
-  perfMark("image.begin", basename(path)); // perf-005
-  const token = ++imgToken;
-  syncVideoHole(false); // the image viewer paints on the opaque app canvas
+/**
+ * Tear down the video player — the counterpart of clearImageView for a view
+ * that leaves the player without opening another file: silence whichever
+ * engine is active (the pause + removeAttribute("src") + load() idiom the
+ * native adapter maps onto a stop), close the native hole (under it `.app` is
+ * transparent — the grid would draw over a still-rendering mpv surface), and
+ * drop the player-only layers so the next open starts clean.
+ * Like clearImageView, callers move ui.view away.
+ */
+function clearVideoView(): void {
+  syncVideoHole(false);
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -3324,6 +3338,13 @@ async function openImage(path: string): Promise<void> {
   resetShuttle();
   setPanelOpen(false);
   setShortcutsOpen(false);
+}
+
+/** Open an animated / still image in the dedicated viewer (play-012). */
+async function openImage(path: string): Promise<void> {
+  perfMark("image.begin", basename(path)); // perf-005
+  const token = ++imgToken;
+  clearVideoView(); // the image viewer paints on the opaque app canvas
   resetGifState();
   resetImageTools(); // img-001: a new photo never inherits the last one's framing
   disarmDelete(); // img-003: nor the last one's arm -- the button must not claim

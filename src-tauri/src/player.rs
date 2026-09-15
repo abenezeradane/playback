@@ -395,6 +395,10 @@ fn event_loop(ctx: EventCtx) {
                 } else {
                     None
                 };
+                // Why the file ended, in mpv's own words: "stop" is the core
+                // honouring a `stop` command (the teardown oracle for a view
+                // that leaves the player), "eof" is the clip running out.
+                test_log(&ctx.log, ctx.start, &format!("ev=end-file reason={reason}"));
                 emit(&PlayerEventMsg::EndFile { load_seq: seq, reason, message });
             }
             MpvEvent::Log { level, text } => {

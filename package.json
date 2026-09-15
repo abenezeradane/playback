@@ -1,6 +1,6 @@
 {
   "name": "playback",
-  "version": "0.67.2",
+  "version": "0.67.3",
   "description": "A fully featured video player built with Tauri 2.0",
   "type": "module",
   "license": "MIT",
