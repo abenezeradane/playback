@@ -208,18 +208,6 @@ impl Mpv {
         })
     }
 
-    pub fn set_prop_f64(&self, name: &str, mut value: f64) -> Result<(), MpvError> {
-        let n = Self::cstr(name)?;
-        self.check(unsafe {
-            (self.lib.set_property)(
-                self.h.as_ptr(),
-                n.as_ptr(),
-                ffi::MPV_FORMAT_DOUBLE,
-                &mut value as *mut f64 as *mut c_void,
-            )
-        })
-    }
-
     pub fn set_prop_str(&self, name: &str, value: &str) -> Result<(), MpvError> {
         // mpv_set_property with MPV_FORMAT_STRING takes a char** — but
         // mpv_set_option_string works for properties post-init too via the
