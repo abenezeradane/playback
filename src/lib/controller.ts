@@ -6146,10 +6146,21 @@ async function onFolderChanged(dir: string, touched: string[]): Promise<void> {
     if (merged.changed) {
       ui.galleryListing = merged.listing;
       const r = reviseGrid(ui.galleryListing, hiddenKeys, ui.galleryItems, ui.galleryIndex);
-      ui.galleryItems = r.items;
+      // `reviseGrid` decides "nothing moved" by comparing KEYS, which is exactly
+      // right for the blacklist caller it was written for: there an item's identity
+      // never changes, only whether it is shown. A disk refresh breaks that
+      // assumption -- a file replaced in place keeps its path, so its key and the
+      // grid's length are both unchanged while its CONTENT, and therefore the
+      // thumbnail it needs, is not. In that case reviseGrid hands back the caller's
+      // own stale array and the replaced tile keeps its old picture forever. We are
+      // already inside `merged.changed`, so we know better than its short-circuit:
+      // take the freshly-filtered listing, whose replaced entry carries no thumbSrc
+      // and will therefore be re-rendered. Filtering through `ui.galleryListing`
+      // (not the local `merged.listing`) keeps the proxy rule above intact.
+      ui.galleryItems = r.changed ? r.items : filterBlacklisted(ui.galleryListing, hiddenKeys);
       setGalleryIndex(r.cursor);
       rearmThumbFill();
-      perfMark("gallery.relist", String(r.items.length));
+      perfMark("gallery.relist", String(ui.galleryItems.length));
     }
   }
   await refreshOpenQueues(dir);
