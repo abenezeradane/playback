@@ -2448,3 +2448,44 @@ export function reviseGrid<T extends { archive?: string; path: string }>(
   }
   return { items, cursor: -1, changed: true };
 }
+
+/**
+ * Merge a freshly-read folder listing into the one an open grid is holding
+ * (gallery-005) — files added, removed or replaced outside the app.
+ *
+ * Surviving items are handed back as THEIR OWN OBJECTS, not copies, because a
+ * `thumbSrc` already rendered is expensive: re-rendering a 1,999-photo folder
+ * because one file arrived is seconds of churn for no new information. Only
+ * items whose path is in `touched` — rewritten in place, so their picture is
+ * now wrong — are taken from `fresh` instead.
+ *
+ * `touched` is a HINT, never an authority. Membership and order come from
+ * `fresh` alone. A path in `touched` that is not in `fresh` is ignored, and a
+ * `touched` set that missed a change (the watcher coalesced it) costs one stale
+ * thumbnail, never a wrong listing.
+ *
+ * Returns `changed: false` (and `current` itself) when the folder matches what
+ * is already shown, so an event that turns out to change nothing costs a key
+ * comparison rather than a re-render — the same contract `reviseGrid` keeps.
+ */
+export function mergeListing<T extends { archive?: string; path: string }>(
+  current: T[],
+  fresh: T[],
+  touched: Set<string>,
+): { listing: T[]; changed: boolean } {
+  const keyOf = (it: T): string => hiddenKey(it.archive ?? "", it.path);
+  const held = new Map(current.map((it) => [keyOf(it), it]));
+  let changed = fresh.length !== current.length;
+  const listing = fresh.map((next, i) => {
+    const kept = held.get(keyOf(next));
+    // A rewritten file keeps its path, so only `touched` can tell us its
+    // picture is stale.
+    if (!kept || touched.has(next.path)) {
+      changed = true;
+      return next;
+    }
+    if (!changed && current[i] !== kept) changed = true; // reordered
+    return kept;
+  });
+  return changed ? { listing, changed: true } : { listing: current, changed: false };
+}

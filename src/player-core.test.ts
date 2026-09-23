@@ -148,6 +148,7 @@ import {
   isHidden,
   filterBlacklisted,
   reviseGrid,
+  mergeListing,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -2665,6 +2666,102 @@ describe("tags-003 blacklist filter", () => {
     it("hands back the listing's own objects, not copies", () => {
       const r = reviseGrid(listing, hiding("/pics/a.jpg"), [a, b, c], -1);
       expect(r.items[0]).toBe(b);
+    });
+  });
+
+  // gallery-005: the listing itself changing under an open grid — files added,
+  // removed or replaced outside the app. Surviving items must keep their OWN
+  // objects so a rendered thumbnail is not thrown away; on a 1,999-photo folder
+  // re-rendering everything for one added file is seconds of churn.
+  describe("mergeListing", () => {
+    const item = (name: string, thumb = "") => ({
+      path: `/pics/${name}`,
+      name,
+      thumbSrc: thumb,
+      archive: "",
+    });
+    const names = (xs: { name: string }[]) => xs.map((x) => x.name);
+    const none = new Set<string>();
+
+    it("reports no change and hands back the listing as it is when disk matches", () => {
+      const a = item("a.jpg", "asset://a");
+      const b = item("b.jpg", "asset://b");
+      const current = [a, b];
+      const r = mergeListing(current, [item("a.jpg"), item("b.jpg")], none);
+      expect(r.changed).toBe(false);
+      expect(r.listing).toBe(current);
+    });
+
+    it("keeps a surviving item's own object, so its thumbnail survives", () => {
+      const a = item("a.jpg", "asset://a");
+      const r = mergeListing([a], [item("a.jpg"), item("b.jpg")], none);
+      expect(r.changed).toBe(true);
+      expect(r.listing[0]).toBe(a);
+      expect(r.listing[0].thumbSrc).toBe("asset://a");
+    });
+
+    it("adds a file that appeared, in the fresh listing's order", () => {
+      const a = item("a.jpg", "asset://a");
+      const c = item("c.jpg", "asset://c");
+      const r = mergeListing([a, c], [item("a.jpg"), item("b.jpg"), item("c.jpg")], none);
+      expect(names(r.listing)).toEqual(["a.jpg", "b.jpg", "c.jpg"]);
+      expect(r.listing[1].thumbSrc).toBe(""); // the new one has no picture yet
+    });
+
+    it("drops a file that disappeared", () => {
+      const a = item("a.jpg", "asset://a");
+      const b = item("b.jpg", "asset://b");
+      const r = mergeListing([a, b], [item("a.jpg")], none);
+      expect(r.changed).toBe(true);
+      expect(names(r.listing)).toEqual(["a.jpg"]);
+    });
+
+    it("takes order from the fresh listing, never from the current one", () => {
+      const a = item("a.jpg", "asset://a");
+      const b = item("b.jpg", "asset://b");
+      const r = mergeListing([b, a], [item("a.jpg"), item("b.jpg")], none);
+      expect(names(r.listing)).toEqual(["a.jpg", "b.jpg"]);
+      expect(r.changed).toBe(true);
+    });
+
+    it("replaces a touched item, so a file rewritten in place loses its stale picture", () => {
+      // The thumb DISK cache is keyed on path+size+mtime so it re-renders, but
+      // the in-memory thumbSrc is keyed on path alone — without `touched` this
+      // file would keep showing the previous picture.
+      const a = item("a.jpg", "asset://a-old");
+      const r = mergeListing([a], [item("a.jpg")], new Set(["/pics/a.jpg"]));
+      expect(r.changed).toBe(true);
+      expect(r.listing[0]).not.toBe(a);
+      expect(r.listing[0].thumbSrc).toBe("");
+    });
+
+    it("ignores a touched path that is no longer in the folder", () => {
+      // REVIEW FOCUS 4: created then deleted inside one quiet window.
+      const a = item("a.jpg", "asset://a");
+      const r = mergeListing([a], [item("a.jpg")], new Set(["/pics/ghost.jpg"]));
+      expect(r.changed).toBe(false);
+      expect(r.listing[0]).toBe(a);
+    });
+
+    it("handles an emptied folder", () => {
+      const r = mergeListing([item("a.jpg", "asset://a")], [], none);
+      expect(r.changed).toBe(true);
+      expect(r.listing).toEqual([]);
+    });
+
+    it("handles a folder that was empty and now is not", () => {
+      const r = mergeListing([], [item("a.jpg")], none);
+      expect(r.changed).toBe(true);
+      expect(names(r.listing)).toEqual(["a.jpg"]);
+    });
+
+    it("keys items by archive as well as path", () => {
+      // Two archives can hold the same inner path; they are different items.
+      const inner = { path: "p/1.jpg", name: "1.jpg", thumbSrc: "t", archive: "/a.cbz" };
+      const fresh = { path: "p/1.jpg", name: "1.jpg", thumbSrc: "", archive: "/b.cbz" };
+      const r = mergeListing([inner], [fresh], none);
+      expect(r.changed).toBe(true);
+      expect(r.listing[0]).toBe(fresh);
     });
   });
 });
