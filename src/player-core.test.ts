@@ -151,6 +151,7 @@ import {
   mergeListing,
   folderChangeApplies,
   gridShouldRelist,
+  queueIndexAfterRefresh,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -2812,6 +2813,41 @@ describe("tags-003 blacklist filter", () => {
     it("re-derives the grid only when it is showing this folder", () => {
       expect(gridShouldRelist(base)).toBe(true);
       expect(gridShouldRelist({ ...base, view: "image" })).toBe(false);
+    });
+  });
+
+  // gallery-005: where a viewer's cursor lands after its folder was re-listed
+  // underneath it. Re-resolved BY PATH, never by number — the number means a
+  // different photo once anything before it was added or removed.
+  describe("queueIndexAfterRefresh", () => {
+    const paths = ["/p/a.jpg", "/p/b.jpg", "/p/c.jpg"];
+
+    it("follows the open photo when files were added before it", () => {
+      const r = queueIndexAfterRefresh("/p/c.jpg", 1, ["/p/a.jpg", "/p/b.jpg", "/p/c.jpg"]);
+      expect(r).toBe(2);
+    });
+
+    it("leaves the index alone when nothing moved", () => {
+      expect(queueIndexAfterRefresh("/p/b.jpg", 1, paths)).toBe(1);
+    });
+
+    it("lands on the photo that slid into the open one's place when it is gone", () => {
+      // b was open at index 1 and has been deleted; c slides into index 1 —
+      // exactly where an in-app delete lands (indexAfterDelete).
+      expect(queueIndexAfterRefresh("/p/b.jpg", 1, ["/p/a.jpg", "/p/c.jpg"])).toBe(1);
+    });
+
+    it("lands on the new last photo when the open one was last and is gone", () => {
+      expect(queueIndexAfterRefresh("/p/c.jpg", 2, ["/p/a.jpg", "/p/b.jpg"])).toBe(1);
+    });
+
+    // REVIEW FOCUS 5: nothing left to land on.
+    it("reports -1 when the folder emptied", () => {
+      expect(queueIndexAfterRefresh("/p/a.jpg", 0, [])).toBe(-1);
+    });
+
+    it("reports -1 when there was no open photo to begin with", () => {
+      expect(queueIndexAfterRefresh("", -1, paths)).toBe(-1);
     });
   });
 });

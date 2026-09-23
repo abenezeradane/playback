@@ -148,6 +148,7 @@ import {
   folderChangeApplies,
   gridShouldRelist,
   type FolderChangeContext,
+  queueIndexAfterRefresh,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -6154,8 +6155,80 @@ async function onFolderChanged(dir: string, touched: string[]): Promise<void> {
   await refreshOpenQueues(dir);
 }
 
-/** Replaced in full by gallery-005's viewer + queue refresh (Task 8). */
-async function refreshOpenQueues(_dir: string): Promise<void> {}
+/**
+ * Bring the photo queue and the video folder queue back in step with `dir`
+ * (gallery-005).
+ *
+ * This is a TARGETED exception to perf-010's `keepQueue`, not a reversal of it:
+ * the queue is still never rebuilt per arrow key, only when disk actually
+ * changed — and those events arrive at human speed, not at key-repeat speed.
+ */
+async function refreshOpenQueues(dir: string): Promise<void> {
+  if (ui.galleryTag) return; // a tag's queue IS the tag; it does not come from disk
+
+  if (ui.view === "image" && ui.photoQueue.length > 0) {
+    const openIndex = ui.photoIndex;
+    const open = ui.photoQueue[openIndex]?.path ?? "";
+    if (dirnameOf(open) === dir) {
+      const paths = await tauriInvoke<string[]>("list_folder_images", { path: dir }).catch(
+        () => null,
+      );
+      // Re-checked AFTER the await on every count that can change during it: the
+      // folder can stop being the watched one, the user can leave the viewer, and
+      // they can step to a different photo. A listing measured at up to 9.8s worst
+      // case is a wide window, and acting on the captured `open` afterwards would
+      // re-point the queue at a photo the user has moved off -- or, through
+      // openImage, drag them back into a viewer they had already left.
+      if (
+        paths &&
+        dir === watchedDir &&
+        ui.view === "image" &&
+        ui.photoIndex === openIndex &&
+        ui.photoQueue[openIndex]?.path === open
+      ) {
+        const sorted = sortPathsNatural(paths);
+        // tags-003: filter the mapped QueueItems and derive the index from that
+        // SAME filtered list, exactly as buildPhotoQueue does. Resolving against
+        // the unfiltered `sorted` would hand back a position meant for a longer
+        // array, and a blacklisted photo would reappear in the counter and in
+        // Prev/Next after every live refresh.
+        const queueItems = filterBlacklisted(
+          sorted.map((p): QueueItem => ({ path: p, name: basename(p) })),
+          hiddenKeys,
+        );
+        ui.photoQueue = queueItems;
+        const visible = queueItems.map((q) => q.path);
+        const next = queueIndexAfterRefresh(open, openIndex, visible);
+        ui.photoIndex = next;
+        perfMark("photoqueue.relist", String(visible.length));
+        // The open photo is gone from disk. Land where an in-app delete lands,
+        // or leave for the grid when nothing is left.
+        if (next < 0) goBack();
+        else if (visible[next] !== open) void openImage(visible[next], true);
+      }
+    }
+  }
+
+  if (ui.queue.length > 0) {
+    const openIndex = ui.queueIndex;
+    const open = ui.queue[openIndex]?.path ?? "";
+    if (dirnameOf(open) === dir) {
+      const paths = await tauriInvoke<string[]>("list_folder_videos", { path: open }).catch(
+        () => null,
+      );
+      if (paths && paths.length > 0 && dir === watchedDir && ui.queue[openIndex]?.path === open) {
+        const sorted = sortPathsNatural(paths);
+        ui.queue = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
+        // A DELIBERATE ASYMMETRY with the photo branch above: if the playing
+        // file has gone, playback is LEFT ALONE. It is streaming from an open
+        // handle, and taking the picture away mid-watch is worse than a stale
+        // queue row. (On Windows an open file usually cannot be deleted at all.)
+        ui.queueIndex = resolveQueueIndex(sorted, open);
+        perfMark("queue.relist", String(sorted.length));
+      }
+    }
+  }
+}
 
 /**
  * Open the Gallery grid for a folder: Home's "Open folder", the image viewer's G,

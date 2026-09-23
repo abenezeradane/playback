@@ -2490,6 +2490,28 @@ export function mergeListing<T extends { archive?: string; path: string }>(
   return changed ? { listing, changed: true } : { listing: current, changed: false };
 }
 
+/**
+ * Where a viewer's cursor belongs after its folder was re-listed under it
+ * (gallery-005).
+ *
+ * Resolved BY PATH, never by number: once a file has been added or removed
+ * ahead of it, the old index names a different photo. When the open file has
+ * gone from disk, this lands exactly where an in-app delete lands — the tile
+ * that slid into its place, or the new last one — so the two behaviours cannot
+ * drift apart (`indexAfterDelete`).
+ */
+export function queueIndexAfterRefresh(
+  openPath: string,
+  openIndex: number,
+  fresh: string[],
+): number {
+  if (fresh.length === 0) return -1;
+  const found = fresh.indexOf(openPath);
+  if (found >= 0) return found;
+  if (openIndex < 0) return -1;
+  return Math.min(openIndex, fresh.length - 1);
+}
+
 /** What a `folder-changed` event has to be judged against (gallery-005). */
 export interface FolderChangeContext {
   dir: string;
