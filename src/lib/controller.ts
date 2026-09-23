@@ -1158,6 +1158,7 @@ export function goHome(): void {
   setMoreOpen(false);
   clearImageView();
   clearQueue();
+  void watchFolder(null); // gallery-005: nothing to keep in step with
   video.removeAttribute("src");
   video.load();
   state = createInitialState();
@@ -2217,6 +2218,7 @@ async function buildFolderQueue(openedPath: string): Promise<void> {
   const sorted = sortPathsNatural(paths);
   ui.queue = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
   ui.queueIndex = resolveQueueIndex(sorted, openedPath);
+  void watchFolder(dirnameOf(openedPath)); // gallery-005
 }
 
 /** Drop the queue (returning home, or opening an image / livestream). */
@@ -2352,6 +2354,7 @@ async function buildPhotoQueue(openedPath: string, keepQueue = false): Promise<v
     hiddenKeys,
   );
   ui.photoQueue = queueItems;
+  void watchFolder(dirnameOf(openedPath)); // gallery-005
   ui.photoIndex = resolveQueueIndex(
     queueItems.map((q) => q.path),
     openedPath,
@@ -4707,6 +4710,7 @@ async function applyWindow(tag: string, focus: number, token: number): Promise<v
  * DOM (`applyWindow`), so the grid's size no longer depends on the tag's.
  */
 export async function openGalleryForTag(tag: string): Promise<void> {
+  void watchFolder(null); // gallery-005: a tag's membership is not a folder's
   perfMark("tag.open", tag);
   const token = ++galleryToken;
   ui.galleryItems = [];
@@ -6028,6 +6032,75 @@ export async function openGalleryFromImage(): Promise<void> {
   await openGalleryForFolder(folder);
 }
 
+// ---------------------------------------------------------------------------
+// gallery-005: keeping the open view in step with the folder behind it.
+//
+// One watch at a time, because one folder backs the active view. An archive
+// gallery and a tag gallery are deliberately NOT watched: an archive's inside
+// is not a directory, and a tag's membership comes from SQLite, not from disk.
+// ---------------------------------------------------------------------------
+
+/** The folder currently watched (""), so a re-target to the same folder is a
+ *  no-op — moving from a grid into a photo in the SAME folder must not churn
+ *  the native watcher. */
+let watchedDir = "";
+
+/** False when the native watcher could not attach (a network share, a removed
+ *  drive). The poll fallback is armed instead — see `startWatchPoll`. */
+let watchLive = false;
+
+/**
+ * Point the single folder watch at `path`, or drop it when `path` is null.
+ * Best-effort throughout: a failure here costs liveness, never the view.
+ */
+async function watchFolder(path: string | null): Promise<void> {
+  const want = path ?? "";
+  if (want === watchedDir) return; // already pointed here — no churn
+  stopWatchPoll();
+  watchedDir = want;
+  watchLive = false;
+  if (!want) {
+    await tauriInvoke<void>("unwatch_folder", {}).catch(() => {});
+    return;
+  }
+  const status = await tauriInvoke<{ watching: boolean; reason: string }>("watch_folder", {
+    path: want,
+  }).catch(() => null);
+  if (watchedDir !== want) return; // superseded while the call was in flight
+  watchLive = !!status?.watching;
+  perfMark("watch.begin", `${want}|${watchLive ? "live" : "poll"}`);
+  if (!watchLive) startWatchPoll(want);
+}
+
+/** The poll fallback's timer. Only armed when the native watcher could not
+ *  attach, and only ticking while the window has focus — a background window
+ *  polling a network share is IO nobody asked for. */
+let watchPollTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 4s: long enough not to be IO the user pays for, short enough that the
+ *  feature still feels like it works on a folder that cannot be watched. */
+const WATCH_POLL_MS = 4000;
+
+function startWatchPoll(dir: string): void {
+  stopWatchPoll();
+  watchPollTimer = setInterval(() => {
+    if (document.hidden || !document.hasFocus()) return;
+    if (watchedDir !== dir) return;
+    // Same downstream path as the watcher, with no `touched` hint: a poll
+    // cannot tell a rewritten file from an untouched one without stat-ing
+    // every entry, which perf-010 measured at ~600ms on a 19,522-entry walk.
+    void onFolderChanged(dir, []);
+  }, WATCH_POLL_MS);
+}
+
+function stopWatchPoll(): void {
+  if (watchPollTimer !== null) clearInterval(watchPollTimer);
+  watchPollTimer = null;
+}
+
+/** Replaced in full by gallery-005's re-list + merge (Task 7). */
+async function onFolderChanged(_dir: string, _touched: string[]): Promise<void> {}
+
 /**
  * Open the Gallery grid for a folder: Home's "Open folder", the image viewer's G,
  * and (gallery-002) clicking a sub-folder tile all land here.
@@ -6074,6 +6147,7 @@ export async function openGalleryForFolder(
     // scope to it. The IPC read gate is a prefix check, so descending into a
     // sub-folder of an already-open gallery grants no new filesystem reach.
     await authorizeMediaDir(path, "dir");
+    void watchFolder(path); // gallery-005: keep this grid in step with the folder
     const nodes = await readGalleryNodes(path);
     if (ui.view !== "gallery" || ui.galleryPath !== path) return; // superseded by a newer open
     setGalleryIndex(-1); // ux-004: a fresh grid starts with no keyboard cursor
@@ -6144,6 +6218,7 @@ export async function openArchiveGallery(
     // The ARCHIVE FILE's directory is what needs authorizing; the native side
     // gates on the archive and materializes only into its own cache.
     await authorizeMediaDir(archive);
+    void watchFolder(null); // gallery-005: an archive's inside is not a directory
     const nodes = await readArchiveNodes(archive, inner);
     if (ui.view !== "gallery" || ui.galleryArchive !== archive || ui.galleryInner !== inner) {
       return; // superseded by a newer open
