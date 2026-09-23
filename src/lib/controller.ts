@@ -19,7 +19,13 @@ import {
   type GalleryItem,
   type TagTarget,
 } from "./state.svelte";
-import { initPerf, mark as perfMark, span as perfSpan, recordIpc } from "./perf";
+import {
+  initPerf,
+  mark as perfMark,
+  span as perfSpan,
+  recordIpc,
+  perfEnabled,
+} from "./perf";
 import {
   createInitialState,
   clamp,
@@ -128,6 +134,7 @@ import {
   pageRange,
   windowBounds,
   nextThumbFillBatch,
+  nearestQueuedThumb,
   deleteArmKey,
   armDelete,
   isArmedFor,
@@ -891,6 +898,7 @@ function onNativeEngineError(message: string): void {
   ui.prepping = false;
   syncVideoHole(false);
   ui.view = "empty";
+  resumeRecentThumbs(); // perf-010: this route to Home does not re-render recents
   showError(`Could not play this file: ${message}`);
 }
 
@@ -1338,11 +1346,36 @@ async function tauriInvoke<T>(cmd: string, args: Record<string, unknown>): Promi
  * running under Tauri the invoke just rejects and the (also absent) read commands
  * never run.
  */
-async function authorizeMediaDir(path: string): Promise<void> {
-  await tauriInvoke("allow_media_dir", { path }).catch(() => {
+async function authorizeMediaDir(path: string, kind: "file" | "dir" = "file"): Promise<void> {
+  // perf-010: the grant this produces is a DIRECTORY, and the native allow-list
+  // is a HashSet that only ever grows — so a second grant for a directory
+  // already authorized this session changes nothing at all. It is not free,
+  // though: `allow_media_dir` is a synchronous Tauri command (it runs on the
+  // main thread) and `loadFromPath` AWAITS it before the open can start. While
+  // the main thread was busy, that round trip was measured at 261 ms mean and
+  // 9.79 s worst case — pure queueing delay in front of every photo the user
+  // stepped to. Stepping through one folder now pays it once.
+  //
+  // The key has to be the directory the native side will actually grant, which
+  // depends on what `path` IS: a file authorizes its parent, a folder
+  // authorizes itself (see allow_media_dir). Callers say which, because the
+  // frontend cannot tell without a filesystem round trip of its own — and
+  // guessing wrong in the "dir" direction would memo a grant that was never
+  // made and leave real reads rejected.
+  const granted = kind === "dir" ? path : dirnameOf(path);
+  if (granted && authorizedDirs.has(granted)) return;
+  try {
+    await tauriInvoke("allow_media_dir", { path });
+    // Only a grant that actually succeeded is remembered: a directory that
+    // could not be authorized must be retried, not recorded as done.
+    if (granted) authorizedDirs.add(granted);
+  } catch {
     /* Not under Tauri, or authorization failed — reads will be rejected. */
-  });
+  }
 }
+
+/** Directories `authorizeMediaDir` has successfully granted this session. */
+const authorizedDirs = new Set<string>();
 
 /** Decode a base64 chunk (the `read_stream_chunk` transport) into bytes. */
 function b64ToBytes(b64: string): Uint8Array {
@@ -2241,7 +2274,7 @@ export function openQueueItem(item: QueueItem): void {
  * `currentPath` so a slow enumeration that resolves after a newer open is
  * discarded.
  */
-async function buildPhotoQueue(openedPath: string): Promise<void> {
+async function buildPhotoQueue(openedPath: string, keepQueue = false): Promise<void> {
   // tags-002: the siblings are the whole TAG, which lives in tagRows — NOT in
   // ui.galleryItems, which is only the slice currently in the DOM. Reading the
   // window here would make Prev/Next stop at the window's edge and look like a
@@ -2294,6 +2327,17 @@ async function buildPhotoQueue(openedPath: string): Promise<void> {
     return;
   }
 
+  // perf-010: a SIBLING STEP within the queue this function already built is
+  // the one case where the answer cannot have changed — the folder is the same
+  // folder and the path being opened is already in the queue. Re-listing it
+  // meant a full-folder `list_folder_images` on every arrow key (measured at
+  // 496 ms mean and 9.79 s worst case while the main thread was congested),
+  // only to recompute the very index `stepPhoto` had just set. A fresh open
+  // (dialog, drop, Recent, launch argument) still rebuilds, so a folder whose
+  // contents changed is picked up the next time the user opens into it.
+  if (keepQueue && ui.photoQueue.some((q) => !q.archive && q.path === openedPath)) {
+    return;
+  }
   let paths = await tauriInvoke<string[]>("list_folder_images", { path: openedPath }).catch(
     () => null,
   );
@@ -2496,6 +2540,12 @@ async function extendPhotoQueueFromTag(direction: 1 | -1): Promise<void> {
 function clearPhotoQueue(): void {
   ui.photoQueue = [];
   ui.photoIndex = -1;
+  // perf-010: a step the user asked for in a viewer they have since left must
+  // not be honoured — it would re-open a photo over whatever they went to.
+  // `photoStepInFlight` is owned by stepPhoto's own `finally` and is
+  // deliberately NOT cleared here: the open it guards is still running, and
+  // clearing the flag would let a second one start alongside it.
+  photoStepWanted = -1;
 }
 
 /** Prev/Next controls in the image viewer (buttons + Left/Right arrows): step
@@ -2597,9 +2647,43 @@ async function stepPhoto(i: number): Promise<void> {
     if (outcome !== "declined") ui.photoIndex = i;
     return;
   }
+  // The cursor moves now, so the counter and the Prev/Next disabled states
+  // track the key even while the picture is still catching up. The title goes
+  // with it: the header names the photo the cursor is ON, and `openImage` sets
+  // the same value again when it actually loads.
   ui.photoIndex = i;
-  void loadFromPath(item.path);
+  ui.imgTitle = item.name;
+  // perf-010: LATEST WINS. A held arrow key repeats at roughly 30/s and every
+  // repeat used to start a full open -- authorize, list the folder, decode,
+  // fit. Measured on 40 rapid presses: 31 opens of which 26 NEVER showed a
+  // picture, because each new open superseded the previous one's decode before
+  // it could finish, and the last one took 11.4 s. Now at most one open is in
+  // flight; presses that arrive during it only move the cursor, and when it
+  // finishes the viewer converges on wherever the key actually left off. The
+  // photo the user stops on is always the one that gets loaded.
+  if (photoStepInFlight) {
+    photoStepWanted = i;
+    return;
+  }
+  photoStepInFlight = true;
+  photoStepWanted = -1;
+  try {
+    await loadFromPath(item.path, false, { keepPhotoQueue: true });
+  } finally {
+    photoStepInFlight = false;
+  }
+  // Converge. Re-read rather than trusting the index captured above: the queue
+  // itself can have moved under a slow open (a blacklisted tag hiding an item,
+  // a delete), and `stepPhoto` re-resolves the item from the queue anyway.
+  const wanted = photoStepWanted;
+  photoStepWanted = -1;
+  if (wanted >= 0 && wanted !== i) void stepPhoto(wanted);
 }
+
+/** True while a sibling step's open is in flight (perf-010). */
+let photoStepInFlight = false;
+/** The newest index a key press asked for while an open was in flight, or -1. */
+let photoStepWanted = -1;
 
 /**
  * When the current item ends, move on in the queue (play-013). A per-item loop
@@ -2947,8 +3031,50 @@ function renderRecents(): void {
  * a failure simply leaves the gradient in place.
  */
 async function fillRecentThumbs(): Promise<void> {
-  const wanted = ui.recents.filter((r) => !ui.recentThumbs[r.path]);
+  // perf-010: these cards belong to Home. `addRecent` runs on every open, so
+  // every arrow-key step used to start a pass — and the pass renders thumbnails
+  // for a view the user is not looking at, competing with the open they ARE
+  // waiting for. Deferred behind the same rule `runThumbFill` already keeps for
+  // the grid's background fill, and re-armed when Home comes back.
+  if (ui.view !== "empty") {
+    recentThumbsDeferred = true;
+    return;
+  }
+  // perf-010: a pass writes `ui.recentThumbs[path]` only when a request
+  // COMPLETES, so that map cannot dedupe passes that OVERLAP — and each request
+  // is a full-resolution decode that can take a second. Holding an arrow key
+  // measured 284 media_thumbnail calls for 31 photo steps (mean 1136 ms, max
+  // 11.3 s), of which ~215 were the same up-to-8 recents re-requested by
+  // overlapping passes. Both guards below are needed: the flag stops a second
+  // pass starting, and the set stops a later pass re-requesting a card whose
+  // first attempt is still in flight or came back empty.
+  if (fillingRecentThumbs) return;
+  const wanted = ui.recents.filter(
+    (r) => !ui.recentThumbs[r.path] && !recentThumbsRequested.has(r.path),
+  );
   if (wanted.length === 0) return;
+  fillingRecentThumbs = true;
+  for (const r of wanted) recentThumbsRequested.add(r.path);
+  try {
+    await fillRecentThumbsPass(wanted);
+  } finally {
+    fillingRecentThumbs = false;
+  }
+}
+
+/** True while a `fillRecentThumbs` pass is between its first await and its last. */
+let fillingRecentThumbs = false;
+/** Recents already asked for, so overlapping passes cannot re-request them. */
+const recentThumbsRequested = new Set<string>();
+/** Set when a pass was skipped because Home was not the visible view. */
+let recentThumbsDeferred = false;
+
+/**
+ * Run the recents pass that `fillRecentThumbs` has already de-duplicated and
+ * decided to allow. Split out only so the guard above owns one concern (may
+ * this run?) and this one owns the other (do the work).
+ */
+async function fillRecentThumbsPass(wanted: RecentFile[]): Promise<void> {
   await tauriInvoke("prepare_thumb_cache", {}).catch(() => {
     /* no cache dir — the cards keep their gradients */
   });
@@ -2976,14 +3102,39 @@ async function fillRecentThumbs(): Promise<void> {
           )
         : null;
     }
-    if (!source) continue;
+    // perf-010: a card that did NOT get a picture is released from
+    // `recentThumbsRequested`, so a later visit to Home can try it again. The
+    // set exists to stop CONCURRENT passes duplicating work, not to remember a
+    // failure for the rest of the session — a file on a drive that was
+    // unplugged and plugged back in must be able to get its thumbnail.
+    if (!source) {
+      recentThumbsRequested.delete(r.path);
+      continue;
+    }
     // The recents list can change under a slow pass (a new open re-renders it);
     // only keep a result the current list still wants.
     const thumb = await tauriInvoke<string>("media_thumbnail", { path: source }).catch(() => null);
-    if (!thumb) continue;
-    if (!ui.recents.some((x) => x.path === r.path)) continue;
+    if (!thumb) {
+      recentThumbsRequested.delete(r.path);
+      continue;
+    }
+    if (!ui.recents.some((x) => x.path === r.path)) {
+      recentThumbsRequested.delete(r.path);
+      continue;
+    }
     ui.recentThumbs[r.path] = convertFileSrc(thumb);
   }
+}
+
+/**
+ * Run the recents pass that was skipped while another view was up (perf-010).
+ * Called wherever Home becomes the visible view; a no-op when nothing was
+ * deferred, so it is safe to call on every return to Home.
+ */
+function resumeRecentThumbs(): void {
+  if (!recentThumbsDeferred) return;
+  recentThumbsDeferred = false;
+  void fillRecentThumbs();
 }
 
 /**
@@ -3032,7 +3183,7 @@ function archiveOriginMeta(origin: { archive: string; innerDir: string }): strin
 async function loadFromPath(
   path: string,
   fromQueue = false,
-  opts: { noFolderQueue?: boolean } = {},
+  opts: { noFolderQueue?: boolean; keepPhotoQueue?: boolean } = {},
 ): Promise<void> {
   perfMark("open.begin", basename(path)); // perf-004: paired with open.firstframe
   currentPath = path;
@@ -3073,7 +3224,7 @@ async function loadFromPath(
   if (isImagePath(path)) {
     clearQueue(); // images aren't part of the auto-advancing video queue
     loadTimestampsFor(null);
-    await openImage(path);
+    await openImage(path, opts.keepPhotoQueue === true);
     return;
   }
   perfMark("open.authorized"); // perf-004: phase boundaries inside the open
@@ -3168,6 +3319,7 @@ async function remuxForPlayback(path: string): Promise<string | null> {
   } catch (err) {
     ui.prepping = false;
     ui.view = "empty";
+    resumeRecentThumbs(); // perf-010: as in onNativeEngineError
     showError(`Could not open this file: ${String(err)}`);
     return null;
   } finally {
@@ -3341,12 +3493,21 @@ function clearVideoView(): void {
 }
 
 /** Open an animated / still image in the dedicated viewer (play-012). */
-async function openImage(path: string): Promise<void> {
+async function openImage(path: string, keepPhotoQueue = false): Promise<void> {
   perfMark("image.begin", basename(path)); // perf-005
   const token = ++imgToken;
   clearVideoView(); // the image viewer paints on the opaque app canvas
   resetGifState();
-  resetImageTools(); // img-001: a new photo never inherits the last one's framing
+  // perf-010: the FRAMING reset used to happen here, and that was a defect of
+  // its own. It clears the surface's size and drops the transform to
+  // { zoom: 1, mode: "fit" } -- 100% -- while the PREVIOUS photo is still the
+  // one on screen, so the outgoing picture jumped to actual size the instant
+  // the arrow key was pressed. img-001's rule (a new photo never inherits the
+  // last one's framing) is now kept in `revealImage`, which resets the
+  // transform in the same synchronous block that installs the new picture's
+  // natural size and fit -- no frame in between. The GESTURE reset still
+  // belongs here: a drag in progress belongs to the photo being left.
+  resetImageGestures();
   disarmDelete(); // img-003: nor the last one's arm -- the button must not claim
   // one more press deletes THIS photo when the armed press was for a different one
   showImageChrome();
@@ -3363,11 +3524,19 @@ async function openImage(path: string): Promise<void> {
 
   ui.view = "image";
   ui.emptyError = "";
-  ui.imgMode = "loading";
   ui.imgErrorHidden = true;
-  ui.imgCanvasHidden = true;
-  ui.imgElHidden = true;
-  void buildPhotoQueue(path); // gallery-001: sibling Prev/Next, derived fresh
+  // perf-010: blank the viewer ONLY when there is nothing worth keeping. A
+  // sibling step used to empty it for however long the next decode took --
+  // ten seconds and worse under the load the recents storm created, which is
+  // the "the images don't load" in the report. When a picture is already up,
+  // the honest thing is to leave it there until its replacement is decoded and
+  // fitted (`revealImage`), so the viewer always shows a real photo.
+  if (!imageMeasured()) {
+    ui.imgMode = "loading";
+    ui.imgCanvasHidden = true;
+    ui.imgElHidden = true;
+  }
+  void buildPhotoQueue(path, keepPhotoQueue); // gallery-001: sibling Prev/Next, derived fresh
 
   let src: string;
   try {
@@ -3476,37 +3645,91 @@ async function tryDecodeAnimation(path: string, token: number): Promise<boolean>
 }
 
 /** Native fallback: let the WebView animate + loop the image itself (no transport). */
-function showNativeImage(src: string, token: number): Promise<void> {
-  ui.imgCanvasHidden = true;
-  ui.imgMode = "native";
+async function showNativeImage(src: string, token: number): Promise<void> {
   // perf-007: resolves once the picture is actually up (or has failed), so the
   // caller can hold the heavy frame decode back until then. The decode reads the
   // whole file and base64-decodes it on the main thread, which otherwise delays
   // this very paint -- measured at 108 ms for a 3.6 MB GIF, versus 40 ms when the
   // decode waits its turn.
-  return new Promise<void>((resolve) => {
-    imgEl.onload = () => {
-      if (token !== imgToken) return resolve();
-      if (imgEl.naturalWidth === 0) {
-        showImageError();
-        return resolve();
-      }
-      perfMark("image.shown", `native ${imgEl.naturalWidth}x${imgEl.naturalHeight}`); // perf-005
-      imgNativeShownAt = performance.now(); // perf-007: handover reference point
-      // img-001: the first tier to know the picture's real size sets up the
-      // transform (surface sizing + the initial fit).
-      setImageNaturalSize(imgEl.naturalWidth, imgEl.naturalHeight);
-      ui.imgElHidden = false;
-      ui.imgErrorHidden = true;
-      resolve();
-    };
-    imgEl.onerror = () => {
-      if (token === imgToken) showImageError();
-      resolve();
-    };
-    ui.imgElHidden = false;
-    imgEl.src = src;
+  //
+  // perf-010: the picture is loaded into a DETACHED image first and only handed
+  // to the live element once it is decoded and its fit is known. Assigning `src`
+  // to the live element up front caused two of the three defects in the report:
+  //
+  //   * THE UNFITTED FLASH. `resetImageTransform` is { zoom: 1, mode: "fit" } --
+  //     the mode says fit, the scale says 100% -- because the real fit cannot be
+  //     computed until the natural size is known. The natural size arrives with
+  //     `onload`, but Chromium can PAINT a large progressive JPEG before then,
+  //     so a 3406x5897 photo got painted at actual size in a ~1660x1000
+  //     viewport and snapped down to 17% a frame or two later. Caught in the
+  //     reproduction's own UI state: the zoom readout read 100% with the fit
+  //     button lit (docs/evidence/photoscroll-02-during-burst.png).
+  //   * THE BLANK VIEWER. The live element stops painting the old picture as
+  //     soon as a new `src` is assigned, so the viewer went empty for the whole
+  //     load and decode.
+  //
+  // Loading off to the side fixes both at once: the previous photo stays up,
+  // and the frame that first shows the new one already carries its fit.
+  const probe = new Image();
+  const loaded = await new Promise<boolean>((resolve) => {
+    probe.onload = () => resolve(true);
+    probe.onerror = () => resolve(false);
+    probe.src = src;
   });
+  if (token !== imgToken) return;
+  if (!loaded || probe.naturalWidth === 0) {
+    showImageError();
+    return;
+  }
+  // Best-effort, and deliberately not fatal: getting the decode done here keeps
+  // the frame that reveals the picture from also being the frame that decodes
+  // it. A rejected decode only means the paint does that work, which is what
+  // always used to happen.
+  await probe.decode().catch(() => {});
+  if (token !== imgToken) return;
+  perfMark("image.shown", `native ${probe.naturalWidth}x${probe.naturalHeight}`); // perf-005
+  imgNativeShownAt = performance.now(); // perf-007: handover reference point
+  revealImage(src, probe.naturalWidth, probe.naturalHeight);
+}
+
+/**
+ * Put a loaded, decoded picture on screen already fitted (perf-010).
+ *
+ * Everything here happens in ONE synchronous block on purpose. img-001 sizes the
+ * surface to the picture's natural pixels so that the transform's scale is an
+ * absolute zoom, which means the element's size and the transform have to agree
+ * or the zoom readout is a lie and the picture is the wrong size on screen.
+ * Resetting the framing, installing the new size, fitting it, and assigning the
+ * src in the same task denies the browser any frame boundary in which to paint a
+ * half-applied state.
+ */
+function revealImage(src: string, width: number, height: number): void {
+  // img-001: a new photo never inherits the last one's framing. This is the
+  // reset that used to sit at the top of `openImage`, moved to the one moment
+  // where dropping the old transform cannot be seen.
+  imgTransform = resetImageTransform();
+  setImageNaturalSize(width, height); // sizes the surface AND applies the fit
+  // Observability, and it checks a real assumption rather than restating one:
+  // `image.shown` is marked when the DETACHED probe finished, which says
+  // nothing about the live element. This src is expected to be a cache hit off
+  // the probe's own fetch, so this mark should land within a frame or two of
+  // the reveal. If it ever drifts out to the probe's own load time, the asset
+  // protocol has stopped being cacheable and this reveal is paying for a second
+  // fetch and decode -- in which case the decoded bitmap should be handed over
+  // directly instead (via the canvas tier) rather than re-requested by URL.
+  if (perfEnabled()) {
+    const at = performance.now();
+    imgEl.addEventListener(
+      "load",
+      () => perfMark("image.painted", (performance.now() - at).toFixed(1)),
+      { once: true },
+    );
+  }
+  imgEl.src = src; // already loaded and decoded: a cache hit, not a second decode
+  ui.imgMode = "native";
+  ui.imgCanvasHidden = true;
+  ui.imgElHidden = false;
+  ui.imgErrorHidden = true;
 }
 
 /** Clear, honest error state for a corrupt / unsupported image. */
@@ -3642,15 +3865,28 @@ function setImageNaturalSize(width: number, height: number): void {
 function resetImageTools(): void {
   imgTransform = resetImageTransform();
   imgNatural = { width: 0, height: 0 };
-  imgDragging = false;
-  imgDragMoved = false;
-  imgDragPointer = null;
+  resetImageGestures();
   const surface = els.imgSurface;
   if (surface) {
     surface.style.width = "";
     surface.style.height = "";
   }
   applyImageTransform();
+}
+
+/**
+ * Drop any in-progress pointer gesture, without touching the framing (perf-010).
+ *
+ * Opening the next photo needs exactly this much of the reset and no more: a
+ * drag belongs to the picture it started on, but clearing the transform and the
+ * surface size while the previous picture is still on screen is what made the
+ * outgoing photo jump to 100% on every arrow key. `revealImage` does the
+ * framing half, at the moment it cannot be seen.
+ */
+function resetImageGestures(): void {
+  imgDragging = false;
+  imgDragMoved = false;
+  imgDragPointer = null;
 }
 
 /** Re-fit (or re-clamp) after the viewer box changes size. */
@@ -4782,7 +5018,7 @@ async function authorizePageDirs(items: TaggedItem[]): Promise<void> {
     const cut = Math.max(onDisk.lastIndexOf("\\"), onDisk.lastIndexOf("/"));
     if (cut > 0) dirs.add(onDisk.slice(0, cut));
   }
-  for (const dir of dirs) await authorizeMediaDir(dir);
+  for (const dir of dirs) await authorizeMediaDir(dir, "dir");
 }
 
 /** The most-used tags, for Home's Tags section. Loaded when Home is shown, and
@@ -5136,6 +5372,11 @@ function resetThumbPipeline(): void {
 export function setThumbFocus(index: number): void {
   if (!Number.isFinite(index) || index < 0) return;
   thumbFocus = Math.floor(index);
+  // Observability: where the eye is, over time. Comparing this against the
+  // `thumb.render` marks is the only way to tell "the pipeline is slow" apart
+  // from "the pipeline is busy rendering somewhere the user is not looking" —
+  // the two feel identical and have opposite fixes.
+  perfMark("thumb.focus", String(thumbFocus));
 }
 
 function cancelThumbFill(): void {
@@ -5296,15 +5537,27 @@ function enqueueThumb(index: number): void {
 
 function pumpThumbs(): void {
   while (thumbActive < THUMB_CONCURRENCY && thumbQueue.length > 0) {
-    // Plain FIFO, deliberately. A nearest-to-the-viewport dequeue was built,
-    // tested and MEASURED NOT TO MATTER, so it was removed rather than shipped
-    // on theory — see perf-009's entry in docs/feature_list.json. The ordering
-    // that does matter comes from `nextThumbFillBatch`, which enqueues outward
-    // from the viewport in the first place; by the time work reaches this
-    // queue it is already in the right order, and the queue is kept short
-    // enough (topped up only at the low-water mark) that re-sorting it changes
-    // nothing.
-    const index = thumbQueue.shift() as number;
+    // perf-010: nearest-to-the-viewport, not FIFO.
+    //
+    // perf-009 built exactly this, measured it to change nothing, and deleted
+    // it rather than ship it on theory — and that was the right call at the
+    // time: it ran four probes, including a deep jump mid-fill, and BOTH BUILDS
+    // EMITTED THE IDENTICAL RENDER SEQUENCE. Its reasoning still holds too. The
+    // ordering normally comes from `nextThumbFillBatch`, which enqueues outward
+    // from the viewport already, so while the viewport stays put
+    // `nearestQueuedThumb` returns 0 and this IS a FIFO.
+    //
+    // That feature's own note said the question was "closed only at CURRENT
+    // speeds" and named what would re-open it: thumbnails getting much slower.
+    // They have. perf-009 measured 18-47 ms a thumbnail on its fixtures; a cold
+    // 1,999-photo folder of 3 MB photos runs at 118 ms, and there the stale
+    // batch is no longer too short to matter. Pressing End to jump the viewport
+    // from tile 0 to tile 1980 rendered 49 tiles from 761-809 first and did not
+    // REQUEST a single on-screen tile until 2.83 s after the jump — a full
+    // THUMB_FILL_BATCH of work for a viewport the user had already left, with
+    // the tiles they were looking at queued behind it by the observer.
+    const next = nearestQueuedThumb(thumbQueue, thumbFocus);
+    const index = thumbQueue.splice(next, 1)[0];
     thumbQueued.delete(index);
     thumbInFlight.add(index);
     void renderThumb(index);
@@ -5443,6 +5696,11 @@ async function renderTilePoster(
   if (!src) return source;
   const { convertFileSrc } = await import("@tauri-apps/api/core");
   current.thumbSrc = convertFileSrc(src);
+  // Observability: `thumb.render` marks where work STARTED, which says nothing
+  // about when a tile got a picture. This is the completion side, and the pair
+  // is what measures "how long after the viewport moved did the tiles the user
+  // is looking at actually fill in".
+  perfMark("thumb.shown", String(index));
   return source;
 }
 
@@ -5815,7 +6073,7 @@ export async function openGalleryForFolder(
     // Authorizing the folder is what extends the (non-recursive) asset-protocol
     // scope to it. The IPC read gate is a prefix check, so descending into a
     // sub-folder of an already-open gallery grants no new filesystem reach.
-    await authorizeMediaDir(path);
+    await authorizeMediaDir(path, "dir");
     const nodes = await readGalleryNodes(path);
     if (ui.view !== "gallery" || ui.galleryPath !== path) return; // superseded by a newer open
     setGalleryIndex(-1); // ux-004: a fresh grid starts with no keyboard cursor

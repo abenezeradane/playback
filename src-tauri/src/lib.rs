@@ -1448,10 +1448,37 @@ async fn media_thumbnail(
 #[tauri::command]
 fn prepare_thumb_cache(app: tauri::AppHandle, allow: tauri::State<'_, AllowList>) {
     let Some(dir) = thumb_cache_dir() else { return };
-    prune_thumb_cache(&dir);
+    // What the caller actually needs before it may request a tile: the directory
+    // exists (thumb_cache_dir created it) and both read gates allow it. Two
+    // cheap inserts, so this half stays here on the calling thread.
     let canonical = fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
     authorize_dir(&app, &allow, canonical, Some(dir.as_path()));
+
+    // perf-010: the prune used to run RIGHT HERE, and this is a synchronous
+    // command — Tauri runs those on the main thread. `prune_thumb_cache` is a
+    // read_dir plus a `metadata()` stat per entry, and the frontend called this
+    // command once per open (fillRecentThumbs runs on every open), so on a
+    // cache with 19,522 entries it measured 597 ms mean / 882 ms max of FROZEN
+    // MAIN THREAD, 33 times in a 40 s arrow-key burst. The knock-on was the
+    // real damage: `allow_media_dir` is also a main-thread command and is
+    // awaited on the critical path of every open, and it went from 1.8 ms to
+    // 261 ms mean with a 9.79 s worst case purely queueing behind these prunes.
+    //
+    // Two changes, both needed. The stat walk moves to a blocking thread, and
+    // it runs ONCE per process: a 30-day expiry is cache hygiene, not something
+    // whose answer changes between two photos, so re-walking the directory on
+    // every open bought nothing at all. Not awaited — no caller has ever needed
+    // the prune to have finished, only the authorization above.
+    if THUMB_CACHE_PRUNED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || prune_thumb_cache(&dir));
 }
+
+/// Set once the thumbnail cache has been pruned in this process — see
+/// `prepare_thumb_cache` for why once is enough.
+static THUMB_CACHE_PRUNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Parse the running time out of what `ffmpeg -i <file>` writes to stderr.
 ///

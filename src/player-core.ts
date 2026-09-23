@@ -2229,6 +2229,46 @@ export function nextThumbFillBatch(
   return out;
 }
 
+/**
+ * Which QUEUED tile the thumbnail pipeline should pick up next: the position in
+ * `queue` of the entry closest to `focus`, or -1 when the queue is empty
+ * (perf-010).
+ *
+ * `nextThumbFillBatch` above puts work INTO the queue in outward order from the
+ * focus, so while the viewport stays put this returns 0 and the queue drains as
+ * a plain FIFO — which is why perf-009 measured its predecessor to change
+ * nothing and deleted it. What that measurement did not cover is the focus
+ * MOVING after a batch was enqueued. The queue is then in outward order from a
+ * viewport the user has left, and the tiles they are actually looking at (put
+ * there by the grid's IntersectionObserver) sit BEHIND up to a full batch of
+ * work nobody wants any more.
+ *
+ * Measured on a cold 1,999-photo folder, pressing End to jump the viewport from
+ * tile 0 to tile 1980: 49 stale tiles (761-809, one THUMB_FILL_BATCH plus the
+ * one in flight) rendered first, and the first on-screen tile was not even
+ * REQUESTED until 2.83 s after the jump. perf-009's own note named this the
+ * condition that would re-open the question -- its measurements ran at 18-47 ms
+ * a thumbnail, and this folder runs at 118 ms, so one stale batch costs seconds
+ * rather than a fraction of one.
+ *
+ * Ties go to the earlier entry, so equal-distance tiles drain in the order they
+ * were queued instead of oscillating. Linear, and deliberately so: the queue is
+ * held near the low-water mark (see scheduleThumbFill), a few dozen entries at
+ * most, so the scan is cheaper than keeping a sorted structure correct.
+ */
+export function nearestQueuedThumb(queue: readonly number[], focus: number): number {
+  let best = -1;
+  let bestDistance = Infinity;
+  for (let i = 0; i < queue.length; i++) {
+    const distance = Math.abs(queue[i] - focus);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = i;
+    }
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------------------
 // Deleting a file (img-003)
 // ---------------------------------------------------------------------------

@@ -90,6 +90,7 @@ import {
   tagMeta,
   windowBounds,
   nextThumbFillBatch,
+  nearestQueuedThumb,
   type PlaylistStore,
   DEFAULT_FRAME_DURATION,
   DEFAULT_FPS,
@@ -2380,6 +2381,49 @@ describe("nextThumbFillBatch", () => {
     // side of the focus a tile happens to sit on. 0 is 9 away and 20 is 11, so
     // 0 comes first even though it means going back up past a filled gap.
     expect(nextThumbFillBatch([0, 5, 9, 20], 9, 3)).toEqual([9, 5, 0]);
+  });
+});
+
+// --- perf-010: which QUEUED tile the pipeline picks up next ----------------
+//
+// nextThumbFillBatch above decides what to ENQUEUE, in outward order from the
+// focus at that moment. This decides what to DEQUEUE, and it only earns its
+// keep when the focus has MOVED since that batch was enqueued — then the queue
+// is in outward order from a viewport the user has already left.
+//
+// perf-009 built this helper, measured it to change nothing, and deleted it. It
+// is back because the measurement that closed the question has been re-run at
+// four times the per-thumbnail cost and no longer holds: see that feature's
+// note, which named this exact condition as the one that would re-open it.
+
+describe("nearestQueuedThumb", () => {
+  it("picks the queued tile closest to the focus, not the oldest", () => {
+    // The shape of a stale background batch (761..809, enqueued when the
+    // viewport was there) with the tile the user is now looking at appended
+    // behind it by the IntersectionObserver.
+    expect(nearestQueuedThumb([761, 762, 763, 1980], 1980)).toBe(3);
+  });
+
+  it("is a plain FIFO when the focus is where the queue was built", () => {
+    // The settled case, and the common one: an outward batch already in the
+    // right order must not be reshuffled. Index 0 is the head.
+    expect(nearestQueuedThumb([50, 49, 51, 48, 52], 50)).toBe(0);
+  });
+
+  it("returns -1 for an empty queue", () => {
+    expect(nearestQueuedThumb([], 7)).toBe(-1);
+  });
+
+  it("breaks a tie toward the tile that has waited longer", () => {
+    // 8 and 12 are both 2 away from 10. The earlier entry wins, so the queue
+    // still drains in a stable order rather than oscillating.
+    expect(nearestQueuedThumb([12, 8], 10)).toBe(0);
+    expect(nearestQueuedThumb([8, 12], 10)).toBe(0);
+  });
+
+  it("handles a focus below and above everything queued", () => {
+    expect(nearestQueuedThumb([100, 101, 102], 0)).toBe(0);
+    expect(nearestQueuedThumb([100, 101, 102], 999)).toBe(2);
   });
 });
 
