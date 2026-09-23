@@ -2489,3 +2489,35 @@ export function mergeListing<T extends { archive?: string; path: string }>(
   });
   return changed ? { listing, changed: true } : { listing: current, changed: false };
 }
+
+/** What a `folder-changed` event has to be judged against (gallery-005). */
+export interface FolderChangeContext {
+  dir: string;
+  watchedDir: string;
+  view: string;
+  galleryPath: string;
+  archive: string;
+  tag: string;
+}
+
+/**
+ * Whether a `folder-changed` event belongs to the view on screen.
+ *
+ * The debounce means an event can arrive AFTER the user left the folder it is
+ * about; applying it then would overwrite the new view's listing with a stale
+ * folder's contents. An archive and a tag grid are never watched, so an event
+ * arriving while one is up is not about what is being shown.
+ */
+export function folderChangeApplies(c: FolderChangeContext): boolean {
+  if (!c.dir || c.dir !== c.watchedDir) return false;
+  if (c.archive || c.tag) return false;
+  return true;
+}
+
+/** Whether the grid itself should be re-derived — true only when a folder grid
+ *  for THIS folder is the view. The viewer's queue refresh is a separate
+ *  question (`folderChangeApplies`), because a photo opened straight from the
+ *  dialog has no grid behind it at all. */
+export function gridShouldRelist(c: FolderChangeContext): boolean {
+  return folderChangeApplies(c) && c.view === "gallery" && c.galleryPath === c.dir;
+}

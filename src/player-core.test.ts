@@ -149,6 +149,8 @@ import {
   filterBlacklisted,
   reviseGrid,
   mergeListing,
+  folderChangeApplies,
+  gridShouldRelist,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -2762,6 +2764,54 @@ describe("tags-003 blacklist filter", () => {
       const r = mergeListing([inner], [fresh], none);
       expect(r.changed).toBe(true);
       expect(r.listing[0]).toBe(fresh);
+    });
+  });
+
+  // gallery-005: which folder-changed events belong to the view on screen.
+  describe("folderChangeApplies", () => {
+    const base = {
+      dir: "/pics",
+      watchedDir: "/pics",
+      view: "gallery",
+      galleryPath: "/pics",
+      archive: "",
+      tag: "",
+    };
+
+    it("applies an event for the open folder grid", () => {
+      expect(folderChangeApplies(base)).toBe(true);
+    });
+
+    // REVIEW FOCUS 3: the user left the gallery while the debounce was still
+    // counting. Applying this would overwrite the new view with a stale
+    // folder's contents.
+    it("ignores an event for a folder that is no longer watched", () => {
+      expect(folderChangeApplies({ ...base, dir: "/other" })).toBe(false);
+    });
+
+    it("ignores an event while an archive gallery is up", () => {
+      // An archive's inside is not a directory; it is never watched.
+      expect(folderChangeApplies({ ...base, archive: "/c.cbz" })).toBe(false);
+    });
+
+    it("ignores an event while a tag gallery is up", () => {
+      // A tag's membership comes from SQLite, not from this folder.
+      expect(folderChangeApplies({ ...base, tag: "keep" })).toBe(false);
+    });
+
+    it("applies to the viewer as well as the grid, so the queue can refresh", () => {
+      expect(folderChangeApplies({ ...base, view: "image", galleryPath: "" })).toBe(true);
+    });
+
+    it("does not re-derive a grid that is showing a different folder", () => {
+      const other = { ...base, galleryPath: "/elsewhere" };
+      expect(folderChangeApplies(other)).toBe(true); // the queues may still care
+      expect(gridShouldRelist(other)).toBe(false); // but this grid must not move
+    });
+
+    it("re-derives the grid only when it is showing this folder", () => {
+      expect(gridShouldRelist(base)).toBe(true);
+      expect(gridShouldRelist({ ...base, view: "image" })).toBe(false);
     });
   });
 });

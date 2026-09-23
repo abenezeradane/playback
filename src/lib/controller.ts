@@ -144,6 +144,10 @@ import {
   filterBlacklisted,
   isHidden,
   reviseGrid,
+  mergeListing,
+  folderChangeApplies,
+  gridShouldRelist,
+  type FolderChangeContext,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
 
@@ -6098,8 +6102,60 @@ function stopWatchPoll(): void {
   watchPollTimer = null;
 }
 
-/** Replaced in full by gallery-005's re-list + merge (Task 7). */
-async function onFolderChanged(_dir: string, _touched: string[]): Promise<void> {}
+/**
+ * The open folder changed on disk (gallery-005). Re-list it canonically and
+ * merge, rather than trusting the event to say what is in there.
+ *
+ * ORDER MATTERS, for the same reason `showListing` documents: `ui` is a Svelte 5
+ * `$state` proxy, so a merge built from raw objects would hand the grid
+ * different proxies of the same items than the listing holds — a `thumbSrc`
+ * written afterwards would land on one and be read from the other, and every
+ * thumbnail would silently blank. The merge therefore reads its `current` FROM
+ * `ui.galleryListing` and the result is assigned back BEFORE anything filters it.
+ */
+async function onFolderChanged(dir: string, touched: string[]): Promise<void> {
+  const context = (): FolderChangeContext => ({
+    dir,
+    watchedDir,
+    view: ui.view,
+    galleryPath: ui.galleryPath,
+    archive: ui.galleryArchive,
+    tag: ui.galleryTag,
+  });
+  if (!folderChangeApplies(context())) return;
+
+  let nodes;
+  try {
+    nodes = await readGalleryNodes(dir);
+  } catch {
+    // REVIEW FOCUS 2: the folder was deleted or the drive was unmounted.
+    // Leave the grid as it is — blanking a populated view on a transient error
+    // is worse than being briefly out of date — and stop watching, so an
+    // unmounted drive cannot drive an endless failing re-list loop.
+    perfMark("watch.failed", dir);
+    void watchFolder(null);
+    return;
+  }
+  // Re-checked AFTER the await: the user can leave, or a newer watch can land,
+  // while the listing is in flight.
+  if (!folderChangeApplies(context())) return;
+
+  if (gridShouldRelist(context())) {
+    const merged = mergeListing(ui.galleryListing, toGalleryItems(nodes), new Set(touched));
+    if (merged.changed) {
+      ui.galleryListing = merged.listing;
+      const r = reviseGrid(ui.galleryListing, hiddenKeys, ui.galleryItems, ui.galleryIndex);
+      ui.galleryItems = r.items;
+      setGalleryIndex(r.cursor);
+      rearmThumbFill();
+      perfMark("gallery.relist", String(r.items.length));
+    }
+  }
+  await refreshOpenQueues(dir);
+}
+
+/** Replaced in full by gallery-005's viewer + queue refresh (Task 8). */
+async function refreshOpenQueues(_dir: string): Promise<void> {}
 
 /**
  * Open the Gallery grid for a folder: Home's "Open folder", the image viewer's G,
