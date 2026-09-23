@@ -13,6 +13,7 @@
 //! stale thumbnail — never a wrong grid.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::sync::Mutex;
@@ -62,14 +63,27 @@ pub(crate) struct Active {
 /// Monotonic, so a superseded debounce thread can recognise itself as stale.
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Flatten one quiet window's batches into the distinct paths it touched.
-/// Pure, so the dedupe is testable without real timing.
-fn coalesce_paths(batches: &[Vec<PathBuf>]) -> Vec<String> {
+/// Flatten one quiet window's batches into the distinct paths it touched,
+/// re-rooted onto `raw_dir`.
+///
+/// The watcher watches the CANONICAL directory, so on Windows every event
+/// path arrives `\\?\`-prefixed. `list_folder_entries` deliberately builds
+/// the paths the frontend holds from the RAW directory instead, so each one
+/// round-trips through `convertFileSrc` and the asset-protocol scope grant
+/// (see `list_dir_entries_matching`). Handing the frontend canonical paths
+/// would leave `touched` unmatchable against its own listing, and a file
+/// replaced in place -- same name, same count -- would keep its stale
+/// thumbnail forever with nothing anywhere reporting a failure. The watch is
+/// non-recursive, so every event path is a direct child of the watched
+/// directory and its file name is all that is needed to re-root it.
+fn coalesce_paths(batches: &[Vec<PathBuf>], raw_dir: &str) -> Vec<String> {
+    let root = Path::new(raw_dir);
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
     for batch in batches {
         for p in batch {
-            let s = p.to_string_lossy().into_owned();
+            let Some(name) = p.file_name() else { continue };
+            let s = root.join(name).to_string_lossy().into_owned();
             if seen.insert(s.clone()) {
                 out.push(s);
             }
@@ -181,7 +195,7 @@ fn debounce_loop(app: tauri::AppHandle, rx: Receiver<Vec<PathBuf>>, dir: String,
         }
         let _ = app.emit(
             "folder-changed",
-            FolderChanged { dir: dir.clone(), touched: coalesce_paths(&batches) },
+            FolderChanged { dir: dir.clone(), touched: coalesce_paths(&batches, &dir) },
         );
     }
 }
@@ -278,7 +292,10 @@ mod tests {
         let batches = vec![vec![PathBuf::from(r"C:\pics\ghost.jpg")]];
         // coalesce_paths reports it verbatim and makes no claim it exists —
         // the frontend's merge intersects it against the fresh listing.
-        assert_eq!(coalesce_paths(&batches), vec![r"C:\pics\ghost.jpg".to_string()]);
+        assert_eq!(
+            coalesce_paths(&batches, r"C:\pics"),
+            vec![r"C:\pics\ghost.jpg".to_string()]
+        );
     }
 
     #[test]
@@ -290,14 +307,29 @@ mod tests {
             vec![PathBuf::from(r"C:\pics\a.jpg"), PathBuf::from(r"C:\pics\b.jpg")],
             vec![PathBuf::from(r"C:\pics\a.jpg")],
         ];
-        let mut got = coalesce_paths(&batches);
+        let mut got = coalesce_paths(&batches, r"C:\pics");
         got.sort();
         assert_eq!(got, vec![r"C:\pics\a.jpg".to_string(), r"C:\pics\b.jpg".to_string()]);
     }
 
     #[test]
     fn coalesce_of_nothing_is_empty() {
-        assert!(coalesce_paths(&[]).is_empty());
+        assert!(coalesce_paths(&[], r"C:\pics").is_empty());
+    }
+
+    // The watcher watches the CANONICAL directory, so on Windows every event path
+    // arrives `\\?\`-prefixed, while the listing the frontend holds is built from
+    // the RAW directory. Re-rooting is what makes `touched` matchable at all --
+    // without it, a file replaced in place keeps its stale thumbnail forever and
+    // nothing reports a failure. Found by the end-to-end smoke (Oracle F), not by
+    // any unit test, which is why this one exists.
+    #[test]
+    fn coalesce_reroots_canonical_event_paths_onto_the_raw_directory() {
+        let batches = vec![vec![PathBuf::from(r"\\?\C:\pics\a.jpg")]];
+        assert_eq!(
+            coalesce_paths(&batches, r"C:\pics"),
+            vec![r"C:\pics\a.jpg".to_string()]
+        );
     }
 
     // REVIEW FOCUS 1: a large file being copied in fires events for as long as it
