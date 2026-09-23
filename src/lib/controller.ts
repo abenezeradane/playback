@@ -7292,6 +7292,24 @@ async function wireSecondInstance(): Promise<void> {
   }
 }
 
+/**
+ * gallery-005: the native watcher's announcement that the open folder changed.
+ * Mirrors `wireSecondInstance` — same event channel, same tolerance of not
+ * running under Tauri.
+ */
+async function wireFolderWatch(): Promise<void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen<{ dir: string; touched: string[] }>("folder-changed", (event) => {
+      const { dir, touched } = event.payload ?? { dir: "", touched: [] };
+      if (!dir) return;
+      void onFolderChanged(dir, touched ?? []);
+    });
+  } catch {
+    /* Not running under Tauri — a live gallery is unavailable. */
+  }
+}
+
 /** The deck canvases are display-sized — repaint them when the window resizes.
  *  The native letterbox margins are window-fractions of a fixed-px layout, so
  *  they are re-measured on every resize too (native-002). */
@@ -7349,6 +7367,7 @@ export function init(): void {
   void registerDragAndDrop();
   void loadLaunchFile();
   void wireSecondInstance();
+  void wireFolderWatch(); // gallery-005
   renderRecents();
   void loadTagLibrary(); // tags-002: the shelf must be populated on the FIRST
                          // Home paint, not only after a navigation back to it
