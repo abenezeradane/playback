@@ -78,6 +78,17 @@ fn coalesce_paths(batches: &[Vec<PathBuf>]) -> Vec<String> {
     out
 }
 
+/// The gate `watch_folder` applies, split out so it is unit-testable without a
+/// `tauri::State`. Same shape as `list_folder_images_impl` relative to its
+/// command wrapper.
+fn check_watchable(allow: &AllowList, path: &str) -> Result<PathBuf, String> {
+    let canonical = ensure_allowed(allow, path)?;
+    if !canonical.is_dir() {
+        return Err("not a folder".to_string());
+    }
+    Ok(canonical)
+}
+
 /// Watch `path` (a directory), replacing any previous watch.
 ///
 /// Routed through `ensure_allowed`, the SAME gate as `list_folder_images_impl`,
@@ -90,10 +101,7 @@ pub(crate) fn watch_folder(
     state: tauri::State<'_, GalleryWatch>,
     path: String,
 ) -> Result<WatchStatus, String> {
-    let canonical = ensure_allowed(&allow, &path)?;
-    if !canonical.is_dir() {
-        return Err("not a folder".to_string());
-    }
+    let canonical = check_watchable(&allow, &path)?;
     // Bump FIRST, then stop: dropping the old watcher is what wakes a draining
     // debounce thread, and that thread checks GENERATION on its way out. If the
     // bump came after the drop, a woken thread could pass the check and emit a
@@ -213,6 +221,65 @@ pub(crate) fn watched_dir(state: &GalleryWatch) -> Option<String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    use crate::AllowList;
+    use std::fs;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("playback-watch-{tag}"));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    // The spec's security claim, as an executable assertion: watching is gated
+    // by the SAME allow-list as reading. Mirrors
+    // `list_folder_images_denies_an_unauthorized_folder`.
+    #[test]
+    fn watching_denies_an_unauthorized_folder() {
+        let base = temp_dir("deny");
+        let media = base.join("photos");
+        fs::create_dir_all(&media).unwrap();
+        let allow = AllowList::default(); // nothing authorized -> deny by default
+        assert_eq!(
+            check_watchable(&allow, media.to_str().unwrap()),
+            Err("path not allowed".to_string())
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn watching_refuses_a_file_because_only_folders_are_watched() {
+        let base = temp_dir("file");
+        let photo = base.join("a.jpg");
+        fs::write(&photo, b"x").unwrap();
+        let allow = AllowList::default();
+        allow.authorize_for_test(&base);
+        assert_eq!(
+            check_watchable(&allow, photo.to_str().unwrap()),
+            Err("not a folder".to_string())
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn watching_allows_an_authorized_folder() {
+        let base = temp_dir("allow");
+        let allow = AllowList::default();
+        allow.authorize_for_test(&base);
+        assert!(check_watchable(&allow, base.to_str().unwrap()).is_ok());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // REVIEW FOCUS 4: a file created and deleted inside one quiet window is in
+    // `touched` but not in the folder. Coalescing must not assume it survives.
+    #[test]
+    fn ignores_a_touched_path_that_is_no_longer_in_the_folder() {
+        let batches = vec![vec![PathBuf::from(r"C:\pics\ghost.jpg")]];
+        // coalesce_paths reports it verbatim and makes no claim it exists —
+        // the frontend's merge intersects it against the fresh listing.
+        assert_eq!(coalesce_paths(&batches), vec![r"C:\pics\ghost.jpg".to_string()]);
+    }
 
     #[test]
     fn coalesce_deduplicates_paths_across_one_quiet_window() {

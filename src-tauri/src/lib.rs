@@ -77,6 +77,17 @@ const SW_DECODE_FLAG: &str = "--disable-accelerated-video-decode";
 #[derive(Default)]
 pub(crate) struct AllowList(Mutex<HashSet<PathBuf>>);
 
+impl AllowList {
+    /// Test-only: authorize a root directly, without going through the
+    /// `allow_media_dir` command (which needs an `AppHandle`).
+    #[cfg(test)]
+    pub(crate) fn authorize_for_test(&self, root: &Path) {
+        if let Ok(mut roots) = self.0.lock() {
+            roots.insert(fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
+        }
+    }
+}
+
 /// True when `candidate` (already canonicalized) resolves inside one of the
 /// allowed `roots`. `Path::starts_with` compares whole path components, so a
 /// sibling sharing a name prefix (".../Videos-secret" vs an allowed ".../Videos")
