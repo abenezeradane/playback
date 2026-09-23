@@ -73,6 +73,15 @@ image = { version = "0.25.6", default-features = false, features = ["jpeg", "png
 # the default set, which also pulls in `chrono` (used for trash LISTING and
 # RESTORE timestamps, neither of which this app exposes).
 trash = "=5.2.3"
+# gallery-005: the folder watcher behind a live gallery. On Windows this is
+# ReadDirectoryChangesW. Version 8 is pinned by MAJOR deliberately: 8.2.0
+# declares rust-version 1.77, exactly this crate's 1.77.2 floor, and the MSRV
+# cliff is in major 9 (notify 9 requires 1.88), which a caret cannot reach.
+# Contrast `trash` above, where the floor-breaking release was a PATCH bump and
+# an exact `=` pin was the only defence. Default features are macOS fsevent
+# only — dead weight on a Windows-only app — so they are off, matching how
+# `zip` and `image` are configured for this opt-level = "s" profile.
+notify = { version = "8", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 # Child-window z-order management for the mpv wid embed (push mpv's child HWND
