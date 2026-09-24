@@ -1,6 +1,6 @@
 [package]
 name = "playback"
-version = "0.68.0"
+version = "0.69.0"
 description = "A fully featured video player built with Tauri 2.0"
 authors = ["Playback"]
 edition = "2021"
@@ -81,6 +81,10 @@ trash = "=5.2.3"
 # an exact `=` pin was the only defence. Default features are macOS fsevent
 # only — dead weight on a Windows-only app — so they are off, matching how
 # `zip` and `image` are configured for this opt-level = "s" profile.
+# That pin keeps notify ITSELF inside the floor, not the watcher as a whole: its
+# dependency notify-types 2.1.0 declares rust-version 1.85. This is not a new
+# breakage — main already locks image 0.25.10 and time 0.3.49, which need 1.88,
+# so the declared 1.77.2 floor was unmet before this dependency arrived.
 notify = { version = "8", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
