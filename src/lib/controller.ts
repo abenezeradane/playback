@@ -1017,6 +1017,10 @@ function resetNav(): void {
   ui.galleryTag = "";
   ui.galleryTagTotal = 0;
   ui.galleryTagCapped = false;
+  // gallery-005: and the ARCHIVE it was scoped to, for the same reason — left set, it
+  // makes folderChangeApplies reject every later event, so no direct open is ever live.
+  ui.galleryArchive = "";
+  ui.galleryInner = "";
   disarmPrune(); // tags-002 fix-wave: a fresh journey leaves any armed prune behind too
 }
 
@@ -1129,6 +1133,18 @@ function galleryNavEntry(): NavEntry {
           )?.focus({ preventScroll: true });
         }
       });
+      // gallery-005: the snapshot is the grid as it was when the user went forward, and
+      // disk may have moved on since. Point the watch back at this grid's folder and
+      // re-list it now; the merge reads the restored `ui.galleryListing`, so surviving
+      // tiles keep their thumbnails. An archive or tag grid is never watched.
+      if (path && !archive && !tag) {
+        void watchFolder(path);
+        const carried = [...touchedWhileAway];
+        touchedWhileAway.clear();
+        void onFolderChanged(path, carried);
+      } else {
+        void watchFolder(null);
+      }
     },
   };
 }
@@ -1174,6 +1190,8 @@ export function goHome(): void {
   ui.galleryItems = [];
   ui.galleryListing = [];
   ui.galleryFolder = "";
+  ui.galleryArchive = ""; // gallery-005: else folderChangeApplies rejects every later event
+  ui.galleryInner = "";
   ui.galleryError = "";
   ui.galleryLoading = false;
   renderRecents();
@@ -2359,7 +2377,13 @@ async function buildPhotoQueue(openedPath: string, keepQueue = false): Promise<v
     hiddenKeys,
   );
   ui.photoQueue = queueItems;
-  void watchFolder(dirnameOf(openedPath)); // gallery-005
+  // gallery-005: an archive page's folder is its materialized level inside the
+  // thumbnail cache, not a place the user keeps files — an archive is never
+  // watched. `currentArchiveOrigin` is the reliable signal here: every write to it
+  // happens in the same synchronous block as the `currentPath` write of the open
+  // it belongs to, and the guard above has just confirmed that open is this one.
+  // (These folder-branch queue items never carry `archive`; only the tag branch's do.)
+  void watchFolder(currentArchiveOrigin ? null : dirnameOf(openedPath));
   ui.photoIndex = resolveQueueIndex(
     queueItems.map((q) => q.path),
     openedPath,
@@ -6050,6 +6074,13 @@ export async function openGalleryFromImage(): Promise<void> {
  *  the native watcher. */
 let watchedDir = "";
 
+/** gallery-005: `touched` paths that arrived while the grid for `watchedDir` was not the
+ *  view (the user was in the viewer or player). Back re-lists the grid, and without these a
+ *  file replaced in place meanwhile would come back with its old picture — the same bug the
+ *  `touched` hint exists to prevent, reintroduced through the Back button. Cleared when the
+ *  watch changes target and when a restore consumes it. */
+const touchedWhileAway = new Set<string>();
+
 /** False when the native watcher could not attach (a network share, a removed
  *  drive). The poll fallback is armed instead — see `startWatchPoll`. */
 let watchLive = false;
@@ -6063,6 +6094,7 @@ async function watchFolder(path: string | null): Promise<void> {
   if (want === watchedDir) return; // already pointed here — no churn
   stopWatchPoll();
   watchedDir = want;
+  touchedWhileAway.clear(); // those paths belonged to the folder being left
   watchLive = false;
   if (!want) {
     await tauriInvoke<void>("unwatch_folder", {}).catch(() => {});
@@ -6086,15 +6118,25 @@ let watchPollTimer: ReturnType<typeof setInterval> | null = null;
  *  feature still feels like it works on a folder that cannot be watched. */
 const WATCH_POLL_MS = 4000;
 
+/** True while a poll tick's re-list is still running. The poll exists for slow
+ *  folders (a network share), where one listing can outlast the 4s interval —
+ *  without this, each tick would start another on top of it and they would pile
+ *  up on the main thread. A tick that finds one in flight is simply skipped. */
+let watchPollInFlight = false;
+
 function startWatchPoll(dir: string): void {
   stopWatchPoll();
   watchPollTimer = setInterval(() => {
     if (document.hidden || !document.hasFocus()) return;
     if (watchedDir !== dir) return;
+    if (watchPollInFlight) return;
     // Same downstream path as the watcher, with no `touched` hint: a poll
     // cannot tell a rewritten file from an untouched one without stat-ing
     // every entry, which perf-010 measured at ~600ms on a 19,522-entry walk.
-    void onFolderChanged(dir, []);
+    watchPollInFlight = true;
+    void onFolderChanged(dir, []).finally(() => {
+      watchPollInFlight = false;
+    });
   }, WATCH_POLL_MS);
 }
 
@@ -6124,6 +6166,17 @@ async function onFolderChanged(dir: string, touched: string[]): Promise<void> {
     tag: ui.galleryTag,
   });
   if (!folderChangeApplies(context())) return;
+
+  // The canonical listing below only feeds the GRID. While the viewer or the
+  // player is the view, reading it would be a full-folder walk on the main
+  // thread whose result is thrown away — so skip straight to the queues, and
+  // keep the `touched` hint for when Back re-lists the grid (see
+  // `touchedWhileAway`).
+  if (!gridShouldRelist(context())) {
+    for (const p of touched) touchedWhileAway.add(p);
+    await refreshOpenQueues(dir);
+    return;
+  }
 
   let nodes;
   try {
@@ -6162,6 +6215,10 @@ async function onFolderChanged(dir: string, touched: string[]): Promise<void> {
       rearmThumbFill();
       perfMark("gallery.relist", String(ui.galleryItems.length));
     }
+  } else {
+    // The user left the grid while the listing was in flight — this event's
+    // hint is owed to the Back re-list, exactly as in the early exit above.
+    for (const p of touched) touchedWhileAway.add(p);
   }
   await refreshOpenQueues(dir);
 }
@@ -6210,24 +6267,37 @@ async function refreshOpenQueues(dir: string): Promise<void> {
         ui.photoQueue = queueItems;
         const visible = queueItems.map((q) => q.path);
         const next = queueIndexAfterRefresh(open, openIndex, visible);
-        ui.photoIndex = next;
         perfMark("photoqueue.relist", String(visible.length));
-        // The open photo is gone from disk. Land where an in-app delete lands,
-        // or leave for the grid when nothing is left.
-        if (next < 0) goBack();
-        else if (visible[next] !== open) void openImage(visible[next], true);
+        if (next < 0) {
+          goBack(); // nothing left to land on
+        } else if (visible[next] === open) {
+          ui.photoIndex = next; // the open photo survived; only its position moved
+        } else {
+          // The open photo is gone from disk. Land exactly as an in-app delete lands:
+          // stepPhoto goes through loadFromPath, so `currentPath` follows the picture —
+          // tagging, Delete, Reveal and Info then act on the photo actually on screen.
+          // It owns ui.photoIndex; do not set it here too.
+          void stepPhoto(next);
+        }
       }
     }
   }
 
-  if (ui.queue.length > 0) {
+  // A user playlist (play-014) is not the folder's queue; a disk change must not replace it.
+  if (ui.queue.length > 0 && !playlistActive) {
     const openIndex = ui.queueIndex;
     const open = ui.queue[openIndex]?.path ?? "";
     if (dirnameOf(open) === dir) {
       const paths = await tauriInvoke<string[]>("list_folder_videos", { path: open }).catch(
         () => null,
       );
-      if (paths && paths.length > 0 && dir === watchedDir && ui.queue[openIndex]?.path === open) {
+      if (
+        paths &&
+        paths.length > 0 &&
+        dir === watchedDir &&
+        !playlistActive && // re-checked: a playlist can start while the listing is in flight
+        ui.queue[openIndex]?.path === open
+      ) {
         const sorted = sortPathsNatural(paths);
         ui.queue = sorted.map((p): QueueItem => ({ path: p, name: basename(p) }));
         // A DELIBERATE ASYMMETRY with the photo branch above: if the playing
