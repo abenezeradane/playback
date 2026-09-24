@@ -57,7 +57,6 @@ pub(crate) struct GalleryWatch(Mutex<Option<Active>>);
 
 pub(crate) struct Active {
     _watcher: RecommendedWatcher,
-    dir: String,
 }
 
 /// Monotonic, so a superseded debounce thread can recognise itself as stale.
@@ -151,13 +150,10 @@ pub(crate) fn watch_folder(
 
     // The raw path the frontend passed, not the canonical `\\?\` form — the
     // frontend compares this against its own `ui.galleryPath`.
-    let dir = path.clone();
-    std::thread::spawn(move || debounce_loop(app, rx, dir, generation));
+    std::thread::spawn(move || debounce_loop(app, rx, path, generation));
 
-    *state.0.lock().map_err(|_| "watch state poisoned".to_string())? = Some(Active {
-        _watcher: watcher,
-        dir: path,
-    });
+    *state.0.lock().map_err(|_| "watch state poisoned".to_string())? =
+        Some(Active { _watcher: watcher });
     Ok(WatchStatus { watching: true, reason: String::new() })
 }
 
@@ -223,12 +219,6 @@ fn stop(state: &tauri::State<'_, GalleryWatch>) {
 pub(crate) fn unwatch_folder(state: tauri::State<'_, GalleryWatch>) {
     GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     stop(&state);
-}
-
-/// The folder currently watched, for tests and for the no-op check.
-#[allow(dead_code)]
-pub(crate) fn watched_dir(state: &GalleryWatch) -> Option<String> {
-    state.0.lock().ok().and_then(|s| s.as_ref().map(|a| a.dir.clone()))
 }
 
 #[cfg(test)]
