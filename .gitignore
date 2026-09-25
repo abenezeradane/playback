@@ -33,6 +33,7 @@ Thumbs.db
 # verification evidence, smoke/perf scripts, media fixtures, internal reports.
 CLAUDE.md
 .claude/
+.superpowers/
 init.sh
 claude-progress.md
 docs/claude-progress.md
