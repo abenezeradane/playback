@@ -33,6 +33,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
 
 mod archive;
+mod dirs;
 mod mp4probe;
 mod mpv;
 mod player;
@@ -152,19 +153,11 @@ fn launch_path(state: tauri::State<'_, LaunchPath>) -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Path of the native hardware-acceleration preference file (`hwaccel` under the
-/// app's per-user config dir). Computed from the environment — `%APPDATA%` on
-/// Windows, `$XDG_CONFIG_HOME`/`$HOME/.config` elsewhere — so it is available at
-/// startup without an `AppHandle`. The SAME function backs both the read (startup)
-/// and the write (`set_hwaccel`), so the two always agree on the location.
+/// app's per-user config dir). Resolved by dirs::config_root (android-001), which keeps the historical %APPDATA% / XDG_CONFIG_HOME / $HOME/.config location on desktop.
+/// The SAME function backs both the read (startup) and the write (`set_hwaccel`),
+/// so the two always agree on the location.
 fn hwaccel_pref_path() -> Option<PathBuf> {
-    let base = if cfg!(windows) {
-        std::env::var_os("APPDATA").map(PathBuf::from)
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-    }?;
-    Some(base.join(APP_IDENTIFIER).join("hwaccel"))
+    dirs::config_root().map(|root| root.join("hwaccel"))
 }
 
 /// Read the persisted hardware-acceleration preference. Defaults to `true`
@@ -276,14 +269,7 @@ fn set_engine_pref(engine: String) -> Result<(), String> {
 /// ~320 ms file open; with it the compile is paid once for the install. Created on
 /// demand — a failure here is non-fatal, the engine just recompiles as before.
 pub(crate) fn shader_cache_dir() -> Option<PathBuf> {
-    let base = if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-    } else {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-    }?;
-    let dir = base.join(APP_IDENTIFIER).join("shader-cache");
+    let dir = dirs::cache_root()?.join("shader-cache");
     fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
@@ -1054,14 +1040,7 @@ const THUMB_MAX_PX: u32 = 480;
 
 /// Persistent thumbnail cache directory (alongside the shader cache).
 pub(crate) fn thumb_cache_dir() -> Option<PathBuf> {
-    let base = if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-    } else {
-        std::env::var_os("XDG_CACHE_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-    }?;
-    let dir = base.join(APP_IDENTIFIER).join("thumb-cache");
+    let dir = dirs::cache_root()?.join("thumb-cache");
     fs::create_dir_all(&dir).ok()?;
     Some(dir)
 }
