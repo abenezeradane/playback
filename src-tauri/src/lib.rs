@@ -38,6 +38,7 @@ mod mpv;
 mod player;
 mod recycle;
 mod tags;
+mod watch;
 
 /// Holds a media path supplied on the command line, if any.
 struct LaunchPath(Option<String>);
@@ -75,6 +76,17 @@ const SW_DECODE_FLAG: &str = "--disable-accelerated-video-decode";
 /// `player_load` (native-001) routes through the same gate.
 #[derive(Default)]
 pub(crate) struct AllowList(Mutex<HashSet<PathBuf>>);
+
+impl AllowList {
+    /// Test-only: authorize a root directly, without going through the
+    /// `allow_media_dir` command (which needs an `AppHandle`).
+    #[cfg(test)]
+    pub(crate) fn authorize_for_test(&self, root: &Path) {
+        if let Ok(mut roots) = self.0.lock() {
+            roots.insert(fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()));
+        }
+    }
+}
 
 /// True when `candidate` (already canonicalized) resolves inside one of the
 /// allowed `roots`. `Path::starts_with` compares whole path components, so a
@@ -1897,6 +1909,7 @@ pub fn run() {
         }))
         .manage(LaunchPath(launch))
         .manage(AllowList::default())
+        .manage(watch::GalleryWatch::default())
         .manage(player::PlayerState::default())
         .manage(tags::TagsDb::default())
         .plugin(tauri_plugin_dialog::init())
@@ -1928,6 +1941,8 @@ pub fn run() {
             list_folder_videos,
             list_folder_images,
             list_folder_entries,
+            watch::watch_folder,
+            watch::unwatch_folder,
             folder_cover_image,
             archive::list_archive_entries,
             archive::archive_entry_file,

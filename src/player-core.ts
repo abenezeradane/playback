@@ -2448,3 +2448,98 @@ export function reviseGrid<T extends { archive?: string; path: string }>(
   }
   return { items, cursor: -1, changed: true };
 }
+
+/**
+ * Merge a freshly-read folder listing into the one an open grid is holding
+ * (gallery-005) — files added, removed or replaced outside the app.
+ *
+ * Surviving items are handed back as THEIR OWN OBJECTS, not copies, because a
+ * `thumbSrc` already rendered is expensive: re-rendering a 1,999-photo folder
+ * because one file arrived is seconds of churn for no new information. Only
+ * items whose path is in `touched` — rewritten in place, so their picture is
+ * now wrong — are taken from `fresh` instead.
+ *
+ * `touched` is a HINT, never an authority. Membership and order come from
+ * `fresh` alone. A path in `touched` that is not in `fresh` is ignored, and a
+ * `touched` set that missed a change (the watcher coalesced it) costs one stale
+ * thumbnail, never a wrong listing.
+ *
+ * Returns `changed: false` (and `current` itself) when the folder matches what
+ * is already shown, so an event that turns out to change nothing costs a key
+ * comparison rather than a re-render — the same contract `reviseGrid` keeps.
+ */
+export function mergeListing<T extends { archive?: string; path: string }>(
+  current: T[],
+  fresh: T[],
+  touched: Set<string>,
+): { listing: T[]; changed: boolean } {
+  const keyOf = (it: T): string => hiddenKey(it.archive ?? "", it.path);
+  const held = new Map(current.map((it) => [keyOf(it), it]));
+  let changed = fresh.length !== current.length;
+  const listing = fresh.map((next, i) => {
+    const kept = held.get(keyOf(next));
+    // A rewritten file keeps its path, so only `touched` can tell us its
+    // picture is stale.
+    if (!kept || touched.has(next.path)) {
+      changed = true;
+      return next;
+    }
+    if (!changed && current[i] !== kept) changed = true; // reordered
+    return kept;
+  });
+  return changed ? { listing, changed: true } : { listing: current, changed: false };
+}
+
+/**
+ * Where a viewer's cursor belongs after its folder was re-listed under it
+ * (gallery-005).
+ *
+ * Resolved BY PATH, never by number: once a file has been added or removed
+ * ahead of it, the old index names a different photo. When the open file has
+ * gone from disk, this lands exactly where an in-app delete lands — the tile
+ * that slid into its place, or the new last one — so the two behaviours cannot
+ * drift apart (`indexAfterDelete`).
+ */
+export function queueIndexAfterRefresh(
+  openPath: string,
+  openIndex: number,
+  fresh: string[],
+): number {
+  if (fresh.length === 0) return -1;
+  const found = fresh.indexOf(openPath);
+  if (found >= 0) return found;
+  if (openIndex < 0) return -1;
+  return Math.min(openIndex, fresh.length - 1);
+}
+
+/** What a `folder-changed` event has to be judged against (gallery-005). */
+export interface FolderChangeContext {
+  dir: string;
+  watchedDir: string;
+  view: string;
+  galleryPath: string;
+  archive: string;
+  tag: string;
+}
+
+/**
+ * Whether a `folder-changed` event belongs to the view on screen.
+ *
+ * The debounce means an event can arrive AFTER the user left the folder it is
+ * about; applying it then would overwrite the new view's listing with a stale
+ * folder's contents. An archive and a tag grid are never watched, so an event
+ * arriving while one is up is not about what is being shown.
+ */
+export function folderChangeApplies(c: FolderChangeContext): boolean {
+  if (!c.dir || c.dir !== c.watchedDir) return false;
+  if (c.archive || c.tag) return false;
+  return true;
+}
+
+/** Whether the grid itself should be re-derived — true only when a folder grid
+ *  for THIS folder is the view. The viewer's queue refresh is a separate
+ *  question (`folderChangeApplies`), because a photo opened straight from the
+ *  dialog has no grid behind it at all. */
+export function gridShouldRelist(c: FolderChangeContext): boolean {
+  return folderChangeApplies(c) && c.view === "gallery" && c.galleryPath === c.dir;
+}

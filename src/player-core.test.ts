@@ -148,6 +148,10 @@ import {
   isHidden,
   filterBlacklisted,
   reviseGrid,
+  mergeListing,
+  folderChangeApplies,
+  gridShouldRelist,
+  queueIndexAfterRefresh,
 } from "./player-core";
 
 const base = (overrides: Partial<PlayerState> = {}): PlayerState => ({
@@ -2665,6 +2669,185 @@ describe("tags-003 blacklist filter", () => {
     it("hands back the listing's own objects, not copies", () => {
       const r = reviseGrid(listing, hiding("/pics/a.jpg"), [a, b, c], -1);
       expect(r.items[0]).toBe(b);
+    });
+  });
+
+  // gallery-005: the listing itself changing under an open grid — files added,
+  // removed or replaced outside the app. Surviving items must keep their OWN
+  // objects so a rendered thumbnail is not thrown away; on a 1,999-photo folder
+  // re-rendering everything for one added file is seconds of churn.
+  describe("mergeListing", () => {
+    const item = (name: string, thumb = "") => ({
+      path: `/pics/${name}`,
+      name,
+      thumbSrc: thumb,
+      archive: "",
+    });
+    const names = (xs: { name: string }[]) => xs.map((x) => x.name);
+    const none = new Set<string>();
+
+    it("reports no change and hands back the listing as it is when disk matches", () => {
+      const a = item("a.jpg", "asset://a");
+      const b = item("b.jpg", "asset://b");
+      const current = [a, b];
+      const r = mergeListing(current, [item("a.jpg"), item("b.jpg")], none);
+      expect(r.changed).toBe(false);
+      expect(r.listing).toBe(current);
+    });
+
+    it("keeps a surviving item's own object, so its thumbnail survives", () => {
+      const a = item("a.jpg", "asset://a");
+      const r = mergeListing([a], [item("a.jpg"), item("b.jpg")], none);
+      expect(r.changed).toBe(true);
+      expect(r.listing[0]).toBe(a);
+      expect(r.listing[0].thumbSrc).toBe("asset://a");
+    });
+
+    it("adds a file that appeared, in the fresh listing's order", () => {
+      const a = item("a.jpg", "asset://a");
+      const c = item("c.jpg", "asset://c");
+      const r = mergeListing([a, c], [item("a.jpg"), item("b.jpg"), item("c.jpg")], none);
+      expect(names(r.listing)).toEqual(["a.jpg", "b.jpg", "c.jpg"]);
+      expect(r.listing[1].thumbSrc).toBe(""); // the new one has no picture yet
+    });
+
+    it("drops a file that disappeared", () => {
+      const a = item("a.jpg", "asset://a");
+      const b = item("b.jpg", "asset://b");
+      const r = mergeListing([a, b], [item("a.jpg")], none);
+      expect(r.changed).toBe(true);
+      expect(names(r.listing)).toEqual(["a.jpg"]);
+    });
+
+    it("takes order from the fresh listing, never from the current one", () => {
+      const a = item("a.jpg", "asset://a");
+      const b = item("b.jpg", "asset://b");
+      const r = mergeListing([b, a], [item("a.jpg"), item("b.jpg")], none);
+      expect(names(r.listing)).toEqual(["a.jpg", "b.jpg"]);
+      expect(r.changed).toBe(true);
+    });
+
+    it("replaces a touched item, so a file rewritten in place loses its stale picture", () => {
+      // The thumb DISK cache is keyed on path+size+mtime so it re-renders, but
+      // the in-memory thumbSrc is keyed on path alone — without `touched` this
+      // file would keep showing the previous picture.
+      const a = item("a.jpg", "asset://a-old");
+      const r = mergeListing([a], [item("a.jpg")], new Set(["/pics/a.jpg"]));
+      expect(r.changed).toBe(true);
+      expect(r.listing[0]).not.toBe(a);
+      expect(r.listing[0].thumbSrc).toBe("");
+    });
+
+    it("ignores a touched path that is no longer in the folder", () => {
+      // REVIEW FOCUS 4: created then deleted inside one quiet window.
+      const a = item("a.jpg", "asset://a");
+      const r = mergeListing([a], [item("a.jpg")], new Set(["/pics/ghost.jpg"]));
+      expect(r.changed).toBe(false);
+      expect(r.listing[0]).toBe(a);
+    });
+
+    it("handles an emptied folder", () => {
+      const r = mergeListing([item("a.jpg", "asset://a")], [], none);
+      expect(r.changed).toBe(true);
+      expect(r.listing).toEqual([]);
+    });
+
+    it("handles a folder that was empty and now is not", () => {
+      const r = mergeListing([], [item("a.jpg")], none);
+      expect(r.changed).toBe(true);
+      expect(names(r.listing)).toEqual(["a.jpg"]);
+    });
+
+    it("keys items by archive as well as path", () => {
+      // Two archives can hold the same inner path; they are different items.
+      const inner = { path: "p/1.jpg", name: "1.jpg", thumbSrc: "t", archive: "/a.cbz" };
+      const fresh = { path: "p/1.jpg", name: "1.jpg", thumbSrc: "", archive: "/b.cbz" };
+      const r = mergeListing([inner], [fresh], none);
+      expect(r.changed).toBe(true);
+      expect(r.listing[0]).toBe(fresh);
+    });
+  });
+
+  // gallery-005: which folder-changed events belong to the view on screen.
+  describe("folderChangeApplies", () => {
+    const base = {
+      dir: "/pics",
+      watchedDir: "/pics",
+      view: "gallery",
+      galleryPath: "/pics",
+      archive: "",
+      tag: "",
+    };
+
+    it("applies an event for the open folder grid", () => {
+      expect(folderChangeApplies(base)).toBe(true);
+    });
+
+    // REVIEW FOCUS 3: the user left the gallery while the debounce was still
+    // counting. Applying this would overwrite the new view with a stale
+    // folder's contents.
+    it("ignores an event for a folder that is no longer watched", () => {
+      expect(folderChangeApplies({ ...base, dir: "/other" })).toBe(false);
+    });
+
+    it("ignores an event while an archive gallery is up", () => {
+      // An archive's inside is not a directory; it is never watched.
+      expect(folderChangeApplies({ ...base, archive: "/c.cbz" })).toBe(false);
+    });
+
+    it("ignores an event while a tag gallery is up", () => {
+      // A tag's membership comes from SQLite, not from this folder.
+      expect(folderChangeApplies({ ...base, tag: "keep" })).toBe(false);
+    });
+
+    it("applies to the viewer as well as the grid, so the queue can refresh", () => {
+      expect(folderChangeApplies({ ...base, view: "image", galleryPath: "" })).toBe(true);
+    });
+
+    it("does not re-derive a grid that is showing a different folder", () => {
+      const other = { ...base, galleryPath: "/elsewhere" };
+      expect(folderChangeApplies(other)).toBe(true); // the queues may still care
+      expect(gridShouldRelist(other)).toBe(false); // but this grid must not move
+    });
+
+    it("re-derives the grid only when it is showing this folder", () => {
+      expect(gridShouldRelist(base)).toBe(true);
+      expect(gridShouldRelist({ ...base, view: "image" })).toBe(false);
+    });
+  });
+
+  // gallery-005: where a viewer's cursor lands after its folder was re-listed
+  // underneath it. Re-resolved BY PATH, never by number — the number means a
+  // different photo once anything before it was added or removed.
+  describe("queueIndexAfterRefresh", () => {
+    const paths = ["/p/a.jpg", "/p/b.jpg", "/p/c.jpg"];
+
+    it("follows the open photo when files were added before it", () => {
+      const r = queueIndexAfterRefresh("/p/c.jpg", 1, ["/p/a.jpg", "/p/b.jpg", "/p/c.jpg"]);
+      expect(r).toBe(2);
+    });
+
+    it("leaves the index alone when nothing moved", () => {
+      expect(queueIndexAfterRefresh("/p/b.jpg", 1, paths)).toBe(1);
+    });
+
+    it("lands on the photo that slid into the open one's place when it is gone", () => {
+      // b was open at index 1 and has been deleted; c slides into index 1 —
+      // exactly where an in-app delete lands (indexAfterDelete).
+      expect(queueIndexAfterRefresh("/p/b.jpg", 1, ["/p/a.jpg", "/p/c.jpg"])).toBe(1);
+    });
+
+    it("lands on the new last photo when the open one was last and is gone", () => {
+      expect(queueIndexAfterRefresh("/p/c.jpg", 2, ["/p/a.jpg", "/p/b.jpg"])).toBe(1);
+    });
+
+    // REVIEW FOCUS 5: nothing left to land on.
+    it("reports -1 when the folder emptied", () => {
+      expect(queueIndexAfterRefresh("/p/a.jpg", 0, [])).toBe(-1);
+    });
+
+    it("reports -1 when there was no open photo to begin with", () => {
+      expect(queueIndexAfterRefresh("", -1, paths)).toBe(-1);
     });
   });
 });
