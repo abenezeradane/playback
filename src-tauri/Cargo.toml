@@ -93,6 +93,11 @@ trash = "=5.2.3"
 # crate only ever decompresses.
 unrar = "0.5"
 
+# android-001: Playback's Android host (storage access, volumes, task control,
+# safe-area insets). Kotlin lives in plugins/playback-host/android.
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-playback-host = { path = "plugins/playback-host" }
+
 [target.'cfg(windows)'.dependencies]
 # Child-window z-order management for the mpv wid embed (push mpv's child HWND
 # below WebView2's so the web chrome composites above the video).

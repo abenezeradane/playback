@@ -62,6 +62,99 @@ pub(crate) fn features_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin
         .build()
 }
 
+/// `{ granted }` for the storage-access commands.
+#[derive(Serialize)]
+pub(crate) struct AccessReply {
+    granted: bool,
+}
+
+/// One storage volume, as Home's Storage row shows it. Android only: desktop
+/// never builds one (it answers an empty list), and an unconstructed struct
+/// would break the warning-free desktop build.
+#[cfg(target_os = "android")]
+#[derive(Serialize)]
+pub(crate) struct VolumeReply {
+    label: String,
+    path: String,
+    removable: bool,
+}
+
+/// Whether Playback may read the phone's shared storage (All-files access).
+/// Desktop has no such gate, so it always answers yes there.
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) async fn storage_access(app: tauri::AppHandle) -> Result<AccessReply, String> {
+    use tauri_plugin_playback_host::PlaybackHostExt;
+    let access = app
+        .playback_host()
+        .storage_access()
+        .map_err(|e| crate::ipc_error("storage_access", e, "could not check storage access"))?;
+    Ok(AccessReply { granted: access.granted })
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+pub(crate) async fn storage_access() -> Result<AccessReply, String> {
+    Ok(AccessReply { granted: true })
+}
+
+/// Open the system "All files access" page and report the user's choice when
+/// they come back. They may sit there for minutes, and the plugin call blocks
+/// until they return, so it runs off the async workers.
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) async fn request_storage_access(app: tauri::AppHandle) -> Result<AccessReply, String> {
+    use tauri_plugin_playback_host::PlaybackHostExt;
+    let access = tauri::async_runtime::spawn_blocking(move || app.playback_host().request_storage_access())
+        .await
+        .map_err(|e| crate::ipc_error("request_storage_access: join", e, "could not open storage settings"))?
+        .map_err(|e| crate::ipc_error("request_storage_access", e, "could not open storage settings"))?;
+    Ok(AccessReply { granted: access.granted })
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+pub(crate) async fn request_storage_access() -> Result<AccessReply, String> {
+    Ok(AccessReply { granted: true })
+}
+
+/// The phone's mounted storage volumes, labelled by the system.
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) async fn storage_volumes(app: tauri::AppHandle) -> Result<Vec<VolumeReply>, String> {
+    use tauri_plugin_playback_host::PlaybackHostExt;
+    let volumes = app
+        .playback_host()
+        .storage_volumes()
+        .map_err(|e| crate::ipc_error("storage_volumes", e, "could not read storage"))?;
+    Ok(volumes
+        .into_iter()
+        .map(|v| VolumeReply { label: v.label, path: v.path, removable: v.removable })
+        .collect())
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+pub(crate) async fn storage_volumes() -> Result<Vec<serde_json::Value>, String> {
+    Ok(Vec::new())
+}
+
+/// Send the app to the background (Back at Home), rather than finishing it.
+#[cfg(target_os = "android")]
+#[tauri::command]
+pub(crate) async fn move_to_background(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_playback_host::PlaybackHostExt;
+    app.playback_host()
+        .move_to_background()
+        .map_err(|e| crate::ipc_error("move_to_background", e, "could not leave the app"))
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+pub(crate) async fn move_to_background() -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +189,12 @@ mod tests {
             features_init_script(phone),
             r#"window.__PLAYBACK_FEATURES__ = Object.freeze({"mobile":true,"nativeEngine":false,"sidecar":false,"recycle":false,"reveal":false,"clipboardImage":false,"storageVolumes":true});"#
         );
+    }
+
+    #[test]
+    fn desktop_has_no_storage_gate_and_no_volumes() {
+        let access = tauri::async_runtime::block_on(storage_access()).unwrap();
+        assert!(access.granted);
+        assert!(tauri::async_runtime::block_on(storage_volumes()).unwrap().is_empty());
     }
 }

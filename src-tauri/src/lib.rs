@@ -1897,6 +1897,9 @@ pub fn run() {
             let _ = app.emit("open-file", path);
         }
     }));
+    // android-001: the Android host plugin.
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_playback_host::init());
     builder
         .plugin(platform::features_plugin())
         // android-001: resolve the app-private storage roots before any command runs.
@@ -1982,7 +1985,11 @@ pub fn run() {
             player::player_frame_step,
             player::player_set_video_margin_ratio,
             player::player_screenshot,
-            player::test_flags
+            player::test_flags,
+            platform::storage_access,
+            platform::request_storage_access,
+            platform::storage_volumes,
+            platform::move_to_background
         ])
         .run(tauri::generate_context!())
         .expect("error while running Playback");
