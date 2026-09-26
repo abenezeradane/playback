@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui } from "./state.svelte";
+  import { ui, actions } from "./state.svelte";
   import { setSettingsOpen, setHwaccel, setEngine } from "./controller";
 </script>
 
@@ -32,60 +32,64 @@
            (no conversion step) with hardware decode. Turning it off selects
            the WebView compatibility engine (restores picture-in-picture;
            large OBS/Streamlink recordings then need a conversion step). -->
-      <label class="settings__row">
-        <span class="settings__row-text">
-          <span class="settings__row-title">Native playback engine (mpv)</span>
-          <span class="settings__row-desc">The default engine: OBS/Streamlink recordings (fragmented MP4, MPEG-TS, MKV) start instantly with no conversion step. Turn off to use the compatibility engine — restores picture-in-picture, but large recordings need a conversion step before playback. Applies to the next video you open.</span>
-        </span>
-        <input
-          id="engine-toggle"
-          class="ts-setting__input"
-          type="checkbox"
-          checked={ui.enginePref === "native"}
-          disabled={!ui.engineAvailable}
-          onchange={(e) => {
-            void setEngine(e.currentTarget.checked ? "native" : "web");
-            e.currentTarget.blur();
-          }}
-        />
-        <span class="ts-setting__switch" aria-hidden="true"></span>
-      </label>
+      {#if actions.engineSetting}
+        <label class="settings__row">
+          <span class="settings__row-text">
+            <span class="settings__row-title">Native playback engine (mpv)</span>
+            <span class="settings__row-desc">The default engine: OBS/Streamlink recordings (fragmented MP4, MPEG-TS, MKV) start instantly with no conversion step. Turn off to use the compatibility engine — restores picture-in-picture, but large recordings need a conversion step before playback. Applies to the next video you open.</span>
+          </span>
+          <input
+            id="engine-toggle"
+            class="ts-setting__input"
+            type="checkbox"
+            checked={ui.enginePref === "native"}
+            disabled={!ui.engineAvailable}
+            onchange={(e) => {
+              void setEngine(e.currentTarget.checked ? "native" : "web");
+              e.currentTarget.blur();
+            }}
+          />
+          <span class="ts-setting__switch" aria-hidden="true"></span>
+        </label>
 
-      {#if !ui.engineAvailable}
-        <p id="engine-unavailable" class="settings__hint" role="status">
-          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" /></svg>
-          Native engine unavailable (libmpv-2.dll not found) — using the WebView engine.
-        </p>
-      {:else if ui.engineHint}
-        <p id="engine-hint" class="settings__hint" role="status" aria-live="polite">
-          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" /></svg>
-          Applies to the next video you open.
-        </p>
+        {#if !ui.engineAvailable}
+          <p id="engine-unavailable" class="settings__hint" role="status">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" /></svg>
+            Native engine unavailable (libmpv-2.dll not found) — using the WebView engine.
+          </p>
+        {:else if ui.engineHint}
+          <p id="engine-hint" class="settings__hint" role="status" aria-live="polite">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" /></svg>
+            Applies to the next video you open.
+          </p>
+        {/if}
       {/if}
 
-      <label class="settings__row">
-        <span class="settings__row-text">
-          <span class="settings__row-title">Hardware acceleration</span>
-          <span class="settings__row-desc">Use the GPU to decode video for smooth high-resolution playback and low CPU. Turn off if your GPU/driver shows green, black or torn frames.</span>
-        </span>
-        <input
-          id="hwaccel-toggle"
-          class="ts-setting__input"
-          type="checkbox"
-          checked={ui.hwaccel}
-          onchange={(e) => {
-            setHwaccel(e.currentTarget.checked);
-            e.currentTarget.blur();
-          }}
-        />
-        <span class="ts-setting__switch" aria-hidden="true"></span>
-      </label>
+      {#if actions.hwaccelSetting}
+        <label class="settings__row">
+          <span class="settings__row-text">
+            <span class="settings__row-title">Hardware acceleration</span>
+            <span class="settings__row-desc">Use the GPU to decode video for smooth high-resolution playback and low CPU. Turn off if your GPU/driver shows green, black or torn frames.</span>
+          </span>
+          <input
+            id="hwaccel-toggle"
+            class="ts-setting__input"
+            type="checkbox"
+            checked={ui.hwaccel}
+            onchange={(e) => {
+              setHwaccel(e.currentTarget.checked);
+              e.currentTarget.blur();
+            }}
+          />
+          <span class="ts-setting__switch" aria-hidden="true"></span>
+        </label>
 
-      {#if ui.hwaccelRestartHint}
-        <p class="settings__hint" role="status" aria-live="polite">
-          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg>
-          Restart Playback to apply this change.
-        </p>
+        {#if ui.hwaccelRestartHint}
+          <p class="settings__hint" role="status" aria-live="polite">
+            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg>
+            Restart Playback to apply this change.
+          </p>
+        {/if}
       {/if}
     </div>
   </div>
