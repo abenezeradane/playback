@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui, els } from "./state.svelte";
+  import { ui, els, actions } from "./state.svelte";
   import {
     goBack,
     setCutMode,
@@ -42,12 +42,16 @@
         <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2" /><path d="M8 21h8" /><path d="M12 17v4" /><path d="m10 8 5 3-5 3z" /></svg>
         Player view
       </button>
-      <button id="cut-keys" class="iconbtn iconbtn--sm" type="button" title="Keyboard shortcuts (?)" onclick={toggleShortcuts}>
-        <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
-      </button>
-      <button id="cut-fs" class="iconbtn iconbtn--sm" type="button" title="Fullscreen (F)" onclick={() => void doToggleFullscreen()}>
-        <svg class="ic" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></svg>
-      </button>
+      {#if actions.shortcuts}
+        <button id="cut-keys" class="iconbtn iconbtn--sm" type="button" title="Keyboard shortcuts (?)" onclick={toggleShortcuts}>
+          <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
+        </button>
+      {/if}
+      {#if actions.fullscreen}
+        <button id="cut-fs" class="iconbtn iconbtn--sm" type="button" title="Fullscreen (F)" onclick={() => void doToggleFullscreen()}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></svg>
+        </button>
+      {/if}
     </div>
   </header>
 

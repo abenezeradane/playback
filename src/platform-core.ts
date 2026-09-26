@@ -54,7 +54,11 @@ export interface VisibleActions {
   settings: boolean;
   /** The keyboard-shortcuts button and overlay. */
   shortcuts: boolean;
-  /** Home's native pickers: Open file, Gallery, the drop zone hero. */
+  /** The Fullscreen buttons and the F / double-click toggle. A phone's window
+   *  cannot go fullscreen (the Android window backend ignores the request). */
+  fullscreen: boolean;
+  /** The native pickers: Open file, Gallery, the drop zone hero, a playlist's
+   *  Add videos. */
   openDialogs: boolean;
   /** Home's Storage row of volume cards. */
   storageRow: boolean;
@@ -73,6 +77,7 @@ export function visibleActions(f: PlatformFeatures): VisibleActions {
     hwaccelSetting,
     settings: engineSetting || hwaccelSetting,
     shortcuts: !f.mobile,
+    fullscreen: !f.mobile,
     openDialogs: !f.storageVolumes,
     storageRow: f.storageVolumes,
   };

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui } from "./state.svelte";
+  import { ui, actions } from "./state.svelte";
   import { goBack, goHome, openFileDialog } from "./controller";
 </script>
 
@@ -31,7 +31,9 @@
         <p class="liveoff__copy">Live playback is temporarily turned off while we rebuild it. You can still open and watch any recorded video file.</p>
       </div>
       <div class="liveoff__actions">
-        <button id="liveoff-open" class="pill pill--primary" type="button" onclick={() => void openFileDialog()}>Open a video file</button>
+        {#if actions.openDialogs}
+          <button id="liveoff-open" class="pill pill--primary" type="button" onclick={() => void openFileDialog()}>Open a video file</button>
+        {/if}
         <button id="liveoff-home" class="pill pill--ghost" type="button" onclick={goHome}>Back to library</button>
       </div>
       <p class="liveoff__hint">Live playback will return in a future update.</p>

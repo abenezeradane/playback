@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui } from "./state.svelte";
+  import { ui, actions } from "./state.svelte";
   import {
     closePlaylistEditor,
     renamePlaylistName,
@@ -93,13 +93,17 @@
       </div>
 
       <div class="pl-editor__body">
-        <div class="pl-editor__toolbar">
-          <button id="btn-add-videos" class="ts-panel__addbtn" type="button" onclick={() => void addVideosToPlaylist(pl.id)}>
-            <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
-            Add videos
-          </button>
-          <span class="pl-editor__hint">or drag files into the window</span>
-        </div>
+        <!-- android-001: a phone has no picker that fits the path model and no
+             window to drag files into, so it adds from Recent only. -->
+        {#if actions.openDialogs}
+          <div class="pl-editor__toolbar">
+            <button id="btn-add-videos" class="ts-panel__addbtn" type="button" onclick={() => void addVideosToPlaylist(pl.id)}>
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14" /><path d="M5 12h14" /></svg>
+              Add videos
+            </button>
+            <span class="pl-editor__hint">or drag files into the window</span>
+          </div>
+        {/if}
 
         <!-- "Add from Recent" sits above the items list so its rows stay put as the
              list below grows — a stable add zone (also what the smoke drives). -->
@@ -138,7 +142,11 @@
             </li>
           {/each}
           {#if count === 0}
-            <li class="pl-empty-row">No videos yet — add some above, drag files in, or pick from Recent.</li>
+            <li class="pl-empty-row">
+              {actions.openDialogs
+                ? "No videos yet — add some above, drag files in, or pick from Recent."
+                : "No videos yet — pick some from Recent."}
+            </li>
           {/if}
         </ul>
 

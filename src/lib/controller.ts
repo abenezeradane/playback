@@ -455,6 +455,7 @@ async function setFullscreen(on: boolean): Promise<void> {
 }
 
 export async function doToggleFullscreen(): Promise<void> {
+  if (!actions.fullscreen) return; // android-001: a phone's window cannot go fullscreen
   try {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
     const win = getCurrentWindow();
@@ -2915,6 +2916,7 @@ export function addRecentToPlaylist(id: string, path: string): void {
 
 /** Open the native picker (multiple) and append the chosen videos to a playlist. */
 export async function addVideosToPlaylist(id: string): Promise<void> {
+  if (!actions.openDialogs) return; // android-001: the picker's content:// URIs do not fit the path model
   try {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({

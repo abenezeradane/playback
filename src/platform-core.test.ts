@@ -43,6 +43,19 @@ describe("parseFeatures", () => {
   it("returns a fresh object, never the frozen default itself", () => {
     expect(parseFeatures(undefined)).not.toBe(DESKTOP_FEATURES);
   });
+
+  // The exact record Rust's init script hands a phone (pinned by
+  // the_init_script_hands_the_page_a_frozen_camel_case_record in
+  // src-tauri/src/platform.rs). A key added on one side only must fail here,
+  // not silently turn a phone back into a desktop.
+  const RUST_PHONE_RECORD =
+    '{"mobile":true,"nativeEngine":false,"sidecar":false,"recycle":false,"reveal":false,"clipboardImage":false,"storageVolumes":true}';
+
+  it("reads the record Rust injects on a phone as the phone, key for key", () => {
+    const parsed = parseFeatures(JSON.parse(RUST_PHONE_RECORD));
+    expect(parsed).toEqual(PHONE);
+    expect(JSON.stringify(parsed)).toBe(RUST_PHONE_RECORD);
+  });
 });
 
 describe("visibleActions", () => {
@@ -55,6 +68,7 @@ describe("visibleActions", () => {
       hwaccelSetting: true,
       settings: true,
       shortcuts: true,
+      fullscreen: true,
       openDialogs: true,
       storageRow: false,
     });
@@ -69,6 +83,7 @@ describe("visibleActions", () => {
       hwaccelSetting: false,
       settings: false,
       shortcuts: false,
+      fullscreen: false,
       openDialogs: false,
       storageRow: true,
     });
@@ -78,6 +93,7 @@ describe("visibleActions", () => {
     const a = visibleActions({ ...PHONE, nativeEngine: true });
     expect([a.engineSetting, a.hwaccelSetting, a.settings]).toEqual([true, true, true]);
     expect(a.shortcuts).toBe(false);
+    expect(a.fullscreen).toBe(false);
   });
 
   it("keeps hardware acceleration on a desktop without the native engine (it drives WebView2)", () => {

@@ -277,9 +277,11 @@
         <button id="btn-queue" class="iconbtn iconbtn--sm" type="button" title="Queue (Q)" aria-pressed={ui.queueOpen} hidden={ui.queue.length <= 1} onclick={toggleQueue}>
           <svg class="ic" viewBox="0 0 24 24"><line x1="10" x2="21" y1="6" y2="6" /><line x1="10" x2="21" y1="12" y2="12" /><line x1="10" x2="21" y1="18" y2="18" /><path d="M4 6h1v4" /><path d="M4 10h2" /><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1" /></svg>
         </button>
-        <button id="btn-fs" class="iconbtn iconbtn--sm" type="button" title="Fullscreen (F)" onclick={() => void doToggleFullscreen()}>
-          <svg class="ic" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></svg>
-        </button>
+        {#if actions.fullscreen}
+          <button id="btn-fs" class="iconbtn iconbtn--sm" type="button" title="Fullscreen (F)" onclick={() => void doToggleFullscreen()}>
+            <svg class="ic" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3" /><path d="M21 8V5a2 2 0 0 0-2-2h-3" /><path d="M3 16v3a2 2 0 0 0 2 2h3" /><path d="M16 21h3a2 2 0 0 0 2-2v-3" /></svg>
+          </button>
+        {/if}
       </div>
     </div>
   </div>
