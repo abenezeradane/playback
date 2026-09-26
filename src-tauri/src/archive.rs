@@ -18,7 +18,10 @@ use crate::{has_gallery_image_ext, has_queue_video_ext};
 
 /// Archive containers browsed as directories. `.cbz`/`.cbr` are the comic-book
 /// spellings of zip/rar and are byte-identical to them.
+#[cfg(desktop)]
 const ARCHIVE_EXTENSIONS: &[&str] = &["zip", "cbz", "rar", "cbr"];
+#[cfg(mobile)]
+const ARCHIVE_EXTENSIONS: &[&str] = &["zip", "cbz"];
 
 /// True when `path` names an archive this feature can browse. Mirrors
 /// `has_gallery_image_ext` / `has_queue_video_ext` so all three kinds are
@@ -274,6 +277,7 @@ pub(crate) fn archive_mirror_dir(canonical_archive: &Path) -> Result<PathBuf, Ar
 const MAX_ENTRY_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 /// Largest total this will materialize out of ONE archive, so a zip bomb (a
 /// megabyte that expands to terabytes) cannot fill the disk.
+#[cfg(desktop)]
 pub(crate) const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
 /// Streaming copy buffer.
 const COPY_CHUNK: usize = 64 * 1024;
@@ -417,6 +421,7 @@ pub(crate) fn zip_extract_entry(
 /// or wrong password is reported as `Encrypted` rather than folded into a
 /// generic failure, because gallery-004 states that case to the user instead of
 /// "unreadable".
+#[cfg(desktop)]
 fn rar_error(e: unrar::error::UnrarError) -> ArchiveError {
     match e.code {
         unrar::error::Code::MissingPassword | unrar::error::Code::BadPassword => {
@@ -439,6 +444,7 @@ pub(crate) const RAR_COMPLETE_MARKER: &str = ".pb-complete";
 /// with only encrypted CONTENT lists its names just fine and instead marks the
 /// entry via `FileHeader::is_encrypted`. Either way the entry is dropped rather
 /// than shown, matching zip_index's `entry.encrypted()` check.
+#[cfg(desktop)]
 fn rar_index(archive: &Path) -> Result<Vec<String>, ArchiveError> {
     let list = unrar::Archive::new(archive)
         .open_for_listing()
@@ -491,6 +497,7 @@ fn rar_index(archive: &Path) -> Result<Vec<String>, ArchiveError> {
 /// which the per-entry cap already self-cleans but a later entry pushing the
 /// running total over `MAX_ARCHIVE_BYTES` would not) would silently keep
 /// serving whichever pages happened to extract before the abort, forever.
+#[cfg(desktop)]
 fn rar_extract_all(archive: &Path, mirror: &Path) -> Result<(), ArchiveError> {
     match rar_extract_all_pass(archive, mirror) {
         Ok(()) => Ok(()),
@@ -517,6 +524,7 @@ fn rar_extract_all(archive: &Path, mirror: &Path) -> Result<(), ArchiveError> {
 /// bad header, a write failure, either cap — leaves the mirror partially
 /// populated and the marker unwritten by design; `rar_extract_all` above is
 /// the layer that cleans that up.
+#[cfg(desktop)]
 fn rar_extract_all_pass(archive: &Path, mirror: &Path) -> Result<(), ArchiveError> {
     let mut open = unrar::Archive::new(archive)
         .open_for_processing()
@@ -558,6 +566,13 @@ fn rar_extract_all_pass(archive: &Path, mirror: &Path) -> Result<(), ArchiveErro
     std::fs::write(mirror.join(RAR_COMPLETE_MARKER), b"1").map_err(|_| ArchiveError::Unreadable)?;
     Ok(())
 }
+
+// android-001: the UnRAR C++ source does not build under the NDK; RAR/CBR are
+// plain files on a phone until storage parity (sub-project 5).
+#[cfg(mobile)]
+fn rar_index(_archive: &Path) -> Result<Vec<String>, ArchiveError> { Err(ArchiveError::Unreadable) }
+#[cfg(mobile)]
+fn rar_extract_all(_archive: &Path, _mirror: &Path) -> Result<(), ArchiveError> { Err(ArchiveError::Unreadable) }
 
 /// Every file entry in an archive, whichever family it belongs to.
 pub(crate) fn archive_index(archive: &Path) -> Result<Vec<String>, ArchiveError> {

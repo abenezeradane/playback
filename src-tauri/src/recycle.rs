@@ -10,6 +10,7 @@ use std::path::Path;
 /// silent escalation from a recoverable delete to an unrecoverable one would
 /// break exactly what the confirmation promised the user, which is the one
 /// thing a delete button must not do.
+#[cfg(desktop)]
 pub(crate) fn recycle(path: &Path) -> Result<(), String> {
     // tags-004 code review (Finding 2): refused HERE, not only by callers that
     // remember to check first. `recycle_file` (below) already refuses a
@@ -26,6 +27,15 @@ pub(crate) fn recycle(path: &Path) -> Result<(), String> {
         return Err(format!("recycle: refused a directory: {}", path.display()));
     }
     trash::delete(path).map_err(|e| format!("recycle: {e}"))
+}
+
+/// android-001: a phone has no Recycle Bin yet (storage parity is a later
+/// sub-project), and deleting without one would break the one promise this
+/// module makes. So every caller, `recycle_file` and `tag_delete_all` alike,
+/// gets a refusal, through its existing error path.
+#[cfg(mobile)]
+pub(crate) fn recycle(path: &Path) -> Result<(), String> {
+    Err(format!("recycle: {}: {}", crate::platform::NOT_ON_PLATFORM, path.display()))
 }
 
 /// Move one file to the Recycle Bin, on the user's explicit confirmation

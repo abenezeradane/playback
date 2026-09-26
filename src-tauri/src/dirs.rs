@@ -94,7 +94,6 @@ pub(crate) fn cache_root() -> Option<PathBuf> {
 /// `tmp` folder in the app cache on mobile (the OS temp dir is not writable
 /// there).
 #[cfg(desktop)]
-#[allow(dead_code)]
 pub(crate) fn temp_root() -> Option<PathBuf> {
     Some(std::env::temp_dir())
 }

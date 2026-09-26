@@ -29,13 +29,15 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
-use tauri::{Emitter, Manager};
-use tauri_plugin_shell::ShellExt;
+#[cfg(desktop)]
+use tauri::Emitter;
+use tauri::Manager;
 
 mod archive;
 mod dirs;
 mod mp4probe;
 mod mpv;
+mod platform;
 mod player;
 mod recycle;
 mod tags;
@@ -59,6 +61,7 @@ fn first_file_arg(args: &[String]) -> Option<String> {
 /// `AppHandle`, because the preference must be read BEFORE the WebView is created
 /// (the GPU launch flag is fixed at webview-creation time), i.e. before an
 /// `AppHandle` exists.
+#[cfg(any(desktop, test))]
 const APP_IDENTIFIER: &str = "com.playback.player";
 
 /// Chromium browser argument that forces SOFTWARE video decoding (play-010). It
@@ -66,6 +69,7 @@ const APP_IDENTIFIER: &str = "com.playback.player";
 /// play-004 cut-view canvas capture (which depends on the composited video plane —
 /// see the webview2-canvas-video-capture gotcha) keeps working. Applied to the
 /// WebView2 launch only when the user has turned hardware acceleration OFF.
+#[cfg(desktop)]
 const SW_DECODE_FLAG: &str = "--disable-accelerated-video-decode";
 
 /// Canonical directories the WebView is allowed to read from (sec-002). Seeded
@@ -177,6 +181,7 @@ pub(crate) fn read_hwaccel_pref() -> bool {
 /// is returned unchanged — production carries no extra flag. When disabled, the
 /// software-decode flag is appended exactly once (idempotent if already present).
 /// Pure (no env/IO), so the arg composition is unit-testable on its own.
+#[cfg(desktop)]
 fn browser_args_for_hwaccel(existing: &str, hwaccel_enabled: bool) -> String {
     if hwaccel_enabled || existing.split_whitespace().any(|a| a == SW_DECODE_FLAG) {
         return existing.to_string();
@@ -194,6 +199,7 @@ fn browser_args_for_hwaccel(existing: &str, hwaccel_enabled: bool) -> String {
 /// and the flag isn't already there), so the default path leaves the environment —
 /// and any externally-set test flags — exactly as-is. Must be called before
 /// `tauri::Builder::run()`.
+#[cfg(desktop)]
 fn apply_hwaccel_launch_flag() {
     let existing = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
     let updated = browser_args_for_hwaccel(&existing, read_hwaccel_pref());
@@ -455,6 +461,24 @@ fn remux_output_name(canonical_src: &Path, size: u64, mtime_secs: u64) -> String
     format!("pb-ts-{hash:016x}.mp4")
 }
 
+/// The bundled ffmpeg sidecar (play-016 and every native media service built on
+/// it since). Desktop only: a phone cannot spawn a bundled executable, so on
+/// mobile each caller gets the stable NOT_ON_PLATFORM error and takes its
+/// existing failure path (android-001; sub-project 4 of the phone roadmap
+/// replaces it).
+#[cfg(desktop)]
+fn ffmpeg(app: &tauri::AppHandle) -> Result<tauri_plugin_shell::process::Command, String> {
+    use tauri_plugin_shell::ShellExt;
+    app.shell()
+        .sidecar("ffmpeg")
+        .map_err(|_| "ffmpeg sidecar unavailable".to_string())
+}
+
+#[cfg(mobile)]
+fn ffmpeg(_app: &tauri::AppHandle) -> Result<tauri_plugin_shell::process::Command, String> {
+    Err(platform::NOT_ON_PLATFORM.to_string())
+}
+
 /// ffmpeg arguments to remux a transport stream into a fragmentable, seekable MP4
 /// without re-encoding. `-c copy` keeps the H.264/AAC elementary streams as-is (fast,
 /// lossless); `-fflags +genpts` repairs the missing/irregular timestamps common in
@@ -619,7 +643,9 @@ async fn remux_ts(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let cache_dir = std::env::temp_dir().join("playback-ts");
+    let cache_dir = dirs::temp_root()
+        .ok_or_else(|| "could not create temp directory".to_string())?
+        .join("playback-ts");
     fs::create_dir_all(&cache_dir).map_err(|_| "could not create temp directory".to_string())?;
     prune_ts_cache(&cache_dir);
 
@@ -637,10 +663,7 @@ async fn remux_ts(
     }
 
     let args = ffmpeg_remux_args(&src, &out);
-    let sidecar = app
-        .shell()
-        .sidecar("ffmpeg")
-        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+    let sidecar = ffmpeg(&app)?;
     let output = sidecar
         .args(args)
         .output()
@@ -867,10 +890,7 @@ async fn compute_waveform_peaks(
     let bars = clamp_bars(bars);
 
     let args = ffmpeg_waveform_args(&src, WAVE_PCM_RATE);
-    let sidecar = app
-        .shell()
-        .sidecar("ffmpeg")
-        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+    let sidecar = ffmpeg(&app)?;
     // sidecar_raw_output (NOT the plugin's line-oriented output()) — the f32
     // PCM stream was being quietly distorted by injected newline bytes.
     let (code, stdout, _stderr) = sidecar_raw_output(sidecar.args(args))
@@ -976,10 +996,7 @@ async fn extract_video_still(
     let t0 = std::time::Instant::now();
 
     let use_mfra = is_mp4_family(&src);
-    let sidecar = app
-        .shell()
-        .sidecar("ffmpeg")
-        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+    let sidecar = ffmpeg(&app)?;
     // sidecar_raw_output (NOT the plugin's line-oriented output()) — a PNG is
     // binary; injected newline bytes made every multi-chunk cell undecodable.
     let (mut code, mut stdout, mut stderr) =
@@ -994,10 +1011,7 @@ async fn extract_video_still(
     // plays such a file fine. Retry once without the option so it still gets
     // a filmstrip (review finding).
     if code != Some(0) && use_mfra {
-        let retry = app
-            .shell()
-            .sidecar("ffmpeg")
-            .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+        let retry = ffmpeg(&app)?;
         (code, stdout, stderr) =
             sidecar_raw_output(retry.args(ffmpeg_still_args(&src, time, width, height, false)))
                 .await
@@ -1417,10 +1431,7 @@ async fn media_thumbnail(
     };
 
     for (seek, use_mfra) in attempts {
-        let sidecar = app
-            .shell()
-            .sidecar("ffmpeg")
-            .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+        let sidecar = ffmpeg(&app)?;
         let output = sidecar
             .args(ffmpeg_thumb_args(&src, &out, THUMB_MAX_PX, seek, use_mfra))
             .output()
@@ -1527,10 +1538,7 @@ async fn video_duration(
         return Ok(memo.trim().parse::<f64>().ok());
     }
 
-    let sidecar = app
-        .shell()
-        .sidecar("ffmpeg")
-        .map_err(|_| "ffmpeg sidecar unavailable".to_string())?;
+    let sidecar = ffmpeg(&app)?;
     let output = sidecar
         .args([
             "-hide_banner".to_string(),
@@ -1864,28 +1872,38 @@ pub fn run() {
     // play-010: set the WebView2 GPU launch flag from the saved preference BEFORE
     // the webview is created (the flag is fixed at creation time). No-op unless the
     // user has turned hardware acceleration off.
+    #[cfg(desktop)]
     apply_hwaccel_launch_flag();
 
-    tauri::Builder::default()
-        // play-019: run as a SINGLE instance. Without this, double-clicking a video
-        // ("Open with…") while Playback is already open spawned a SECOND process +
-        // window; that second instance wrote the file to the shared localStorage
-        // recents, but the already-open window never re-read it, so the recently-
-        // played list only updated after closing and relaunching. With the plugin,
-        // a second invocation is routed HERE instead of spawning a window: we focus
-        // the existing window and forward the file path to the WebView, which loads
-        // it through the same funnel as every other open — so recents (and the
-        // player) update live. NOTE: must be the FIRST plugin registered.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.unminimize();
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-            if let Some(path) = first_file_arg(&argv) {
-                let _ = app.emit("open-file", path);
-            }
-        }))
+    let builder = tauri::Builder::default();
+    // play-019: run as a SINGLE instance. Without this, double-clicking a video
+    // ("Open with…") while Playback is already open spawned a SECOND process +
+    // window; that second instance wrote the file to the shared localStorage
+    // recents, but the already-open window never re-read it, so the recently-
+    // played list only updated after closing and relaunching. With the plugin,
+    // a second invocation is routed HERE instead of spawning a window: we focus
+    // the existing window and forward the file path to the WebView, which loads
+    // it through the same funnel as every other open — so recents (and the
+    // player) update live. NOTE: must be the FIRST plugin registered.
+    // android-001: desktop only. A phone app is single-instance by construction.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        if let Some(path) = first_file_arg(&argv) {
+            let _ = app.emit("open-file", path);
+        }
+    }));
+    builder
+        // android-001: resolve the app-private storage roots before any command runs.
+        .setup(|_app| {
+            #[cfg(mobile)]
+            dirs::init_mobile(_app.handle());
+            Ok(())
+        })
         .manage(LaunchPath(launch))
         .manage(AllowList::default())
         .manage(watch::GalleryWatch::default())

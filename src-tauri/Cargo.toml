@@ -21,7 +21,6 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
-tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
@@ -30,10 +29,6 @@ base64 = "0.22"
 # and photo archives never use, and this profile is opt-level = "s". An archive
 # using an excluded codec fails with an honest error rather than silently.
 zip = { version = "2", default-features = false, features = ["deflate"] }
-# RAR/CBR. Builds the UnRAR C source with `cc`. Its licence permits use for
-# DECOMPRESSION and forbids reusing the source to build a RAR compressor; this
-# crate only ever decompresses.
-unrar = "0.5"
 # native-001: the embedded-libmpv playback engine. libmpv-2.dll is loaded at
 # RUNTIME (never linked) so a missing DLL degrades to the WebView engine instead
 # of failing process start.
@@ -60,6 +55,26 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # toolchain (dav1d) — so an AVIF still takes the ffmpeg path, as does any file
 # this crate declines to decode.
 image = { version = "0.25.6", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "ico"] }
+# gallery-005: the folder watcher behind a live gallery. On Windows this is
+# ReadDirectoryChangesW. Version 8 is pinned by MAJOR deliberately: 8.2.0
+# declares rust-version 1.77, exactly this crate's 1.77.2 floor, and the MSRV
+# cliff is in major 9 (notify 9 requires 1.88), which a caret cannot reach.
+# Contrast `trash` below, where the floor-breaking release was a PATCH bump and
+# an exact `=` pin was the only defence. Default features are macOS fsevent
+# only — dead weight on a Windows-only app — so they are off, matching how
+# `zip` and `image` are configured for this opt-level = "s" profile.
+# That pin keeps notify ITSELF inside the floor, not the watcher as a whole: its
+# dependency notify-types 2.1.0 declares rust-version 1.85. This is not a new
+# breakage — main already locks image 0.25.10 and time 0.3.49, which need 1.88,
+# so the declared 1.77.2 floor was unmet before this dependency arrived.
+notify = { version = "8", default-features = false }
+
+# android-001: desktop-only. A phone app is single-instance by construction, and
+# `trash` has no Android backend (trash::delete does not exist there), so the
+# phone build refuses deletion in recycle.rs instead. `unrar`'s C++ source does
+# not build under the NDK, so RAR/CBR are plain files on a phone (archive.rs).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
 # img-003: the app's only deletion primitive. Files go to the Windows Recycle
 # Bin, never to fs::remove_file — see recycle.rs for why that is load-bearing.
 # Pinned EXACTLY to 5.2.3 with `=`, not a bare caret requirement: `"5.2.3"`
@@ -73,19 +88,10 @@ image = { version = "0.25.6", default-features = false, features = ["jpeg", "png
 # the default set, which also pulls in `chrono` (used for trash LISTING and
 # RESTORE timestamps, neither of which this app exposes).
 trash = "=5.2.3"
-# gallery-005: the folder watcher behind a live gallery. On Windows this is
-# ReadDirectoryChangesW. Version 8 is pinned by MAJOR deliberately: 8.2.0
-# declares rust-version 1.77, exactly this crate's 1.77.2 floor, and the MSRV
-# cliff is in major 9 (notify 9 requires 1.88), which a caret cannot reach.
-# Contrast `trash` above, where the floor-breaking release was a PATCH bump and
-# an exact `=` pin was the only defence. Default features are macOS fsevent
-# only — dead weight on a Windows-only app — so they are off, matching how
-# `zip` and `image` are configured for this opt-level = "s" profile.
-# That pin keeps notify ITSELF inside the floor, not the watcher as a whole: its
-# dependency notify-types 2.1.0 declares rust-version 1.85. This is not a new
-# breakage — main already locks image 0.25.10 and time 0.3.49, which need 1.88,
-# so the declared 1.77.2 floor was unmet before this dependency arrived.
-notify = { version = "8", default-features = false }
+# RAR/CBR. Builds the UnRAR C source with `cc`. Its licence permits use for
+# DECOMPRESSION and forbids reusing the source to build a RAR compressor; this
+# crate only ever decompresses.
+unrar = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 # Child-window z-order management for the mpv wid embed (push mpv's child HWND

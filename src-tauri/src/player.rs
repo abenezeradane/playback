@@ -196,14 +196,32 @@ fn push_mpv_child_to_bottom(_parent: isize) {}
 // Engine creation + event thread
 // ---------------------------------------------------------------------------
 
+/// The window mpv embeds into (`wid`): the main window's HWND. Windows only.
+/// On Android the video surface is sub-project 2 of the phone roadmap
+/// (android-001); until then the engine is reported unavailable and the web
+/// engine plays everything.
+#[cfg(windows)]
+fn embed_parent(window: &tauri::WebviewWindow) -> Result<isize, String> {
+    Ok(window
+        .hwnd()
+        .map_err(|e| ipc_error("player: hwnd", e, "player error"))?
+        .0 as isize)
+}
+
+#[cfg(not(windows))]
+fn embed_parent(_window: &tauri::WebviewWindow) -> Result<isize, String> {
+    Err(ipc_error(
+        "player: wid",
+        crate::platform::NOT_ON_PLATFORM,
+        crate::platform::NOT_ON_PLATFORM,
+    ))
+}
+
 fn create_player(app: &tauri::AppHandle) -> Result<Player, String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "no main window".to_string())?;
-    let hwnd = window
-        .hwnd()
-        .map_err(|e| ipc_error("player: hwnd", e, "player error"))?
-        .0 as isize;
+    let hwnd = embed_parent(&window)?;
 
     let mpv = Mpv::create().map_err(|e| ipc_error("player: load libmpv", e, "player unavailable"))?;
 
@@ -472,6 +490,11 @@ pub fn shutdown_player(state: &PlayerState) {
 /// Cheap engine probe: can libmpv be loaded? Never creates an mpv core.
 #[tauri::command]
 pub fn player_engine_status() -> serde_json::Value {
+    // android-001: no embedded engine on a phone yet (sub-project 2), so the
+    // controller's existing probe falls back to the web engine.
+    if cfg!(mobile) {
+        return serde_json::json!({ "available": false, "error": "native engine not yet available on Android" });
+    }
     match crate::mpv::ffi::libmpv() {
         Ok(_) => serde_json::json!({ "available": true, "error": null }),
         Err(e) => {
