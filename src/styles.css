@@ -4551,3 +4551,31 @@ button.shortcuts__backdrop {
   font-size: 12px;
   color: var(--mute);
 }
+
+/* android-001: on a touch screen nothing hovers, so every control that is
+   otherwise revealed only on hover is shown at rest. `hover: none` never
+   matches a desktop with a mouse. */
+@media (hover: none) {
+  .pl-card__actions,
+  .ts-list__remove,
+  .ts-list__edit-btn,
+  .gallery-tile:not(.gallery-tile--folder) .gallery-tile__name,
+  .gallery-tile__tag {
+    opacity: 1;
+  }
+}
+
+/* android-001: phone widths (360-412 CSS px). The desktop window's minWidth is
+   640 (tauri.conf.json), so nothing in this block can ever apply on desktop. */
+@media (max-width: 480px) {
+  /* Image viewer (Oracle I finding: image-reset/image-480 bad=btn-img-tag):
+     the floating tools bar's groups (zoom, transport, orient, file) run wider
+     than the screen and it never wraps, so the trailing Tags button lands
+     off-screen. Cap the bar to the viewport and let it wrap instead. */
+  .imgview__controls {
+    max-width: calc(100% - 24px);
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 10px;
+  }
+}
