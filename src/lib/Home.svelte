@@ -13,6 +13,7 @@
     openGalleryForTag,
     openTagIndex,
     openStorageVolume,
+    retryStorageVolumes,
   } from "./controller";
   import { formatTime } from "../player-core";
 
@@ -107,8 +108,13 @@
             </div>
           </div>
           {#if ui.storageError}
-            <div class="recent__empty" role="alert">{ui.storageError}</div>
-          {:else if ui.storageLoading}
+            <div class="recent__empty" role="alert">
+              <span>{ui.storageError}</span>
+              <button id="storage-retry" class="pill pill--ghost pill--sm" type="button" onclick={retryStorageVolumes}>Retry</button>
+            </div>
+          {:else if ui.storageLoading && ui.storageCards.length === 0}
+            <!-- Only before the first cards: a refresh on every return to Home
+                 keeps the cards it already has on screen. -->
             <div class="recent__empty" role="status">Looking for storage…</div>
           {:else if ui.storageCards.length === 0}
             <div class="recent__empty">No storage found on this phone.</div>

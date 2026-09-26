@@ -1,10 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   DESKTOP_FEATURES,
   parseFeatures,
   visibleActions,
   storageCards,
   backAction,
+  withTimeout,
   type PlatformFeatures,
 } from "./platform-core";
 
@@ -131,6 +132,41 @@ describe("storageCards", () => {
 
   it("is empty for no volumes", () => {
     expect(storageCards([])).toEqual([]);
+  });
+});
+
+describe("withTimeout", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("settles with the call's own value when it answers in time", async () => {
+    vi.useFakeTimers();
+    const call = withTimeout(Promise.resolve({ granted: true }), 8000);
+    await expect(call).resolves.toEqual({ granted: true });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("passes the call's own failure through when it fails in time", async () => {
+    vi.useFakeTimers();
+    const call = withTimeout(Promise.reject(new Error("host said no")), 8000);
+    await expect(call).rejects.toThrow("host said no");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("gives up on a call that never answers once the time is up, not before", async () => {
+    vi.useFakeTimers();
+    let settled = false;
+    const call = withTimeout(new Promise<never>(() => {}), 8000);
+    const outcome = call.then(
+      () => "resolved",
+      (e: unknown) => (e instanceof Error ? e.message : String(e)),
+    );
+    void outcome.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(7999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await outcome).toBe("timed out after 8000 ms");
   });
 });
 

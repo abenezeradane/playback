@@ -88,6 +88,7 @@ pub(crate) async fn storage_access(app: tauri::AppHandle) -> Result<AccessReply,
     let access = app
         .playback_host()
         .storage_access()
+        .await
         .map_err(|e| crate::ipc_error("storage_access", e, "could not check storage access"))?;
     Ok(AccessReply { granted: access.granted })
 }
@@ -99,15 +100,16 @@ pub(crate) async fn storage_access() -> Result<AccessReply, String> {
 }
 
 /// Open the system "All files access" page and report the user's choice when
-/// they come back. They may sit there for minutes, and the plugin call blocks
-/// until they return, so it runs off the async workers.
+/// they come back. They may sit there for minutes; the command just awaits the
+/// answer, holding no thread meanwhile.
 #[cfg(target_os = "android")]
 #[tauri::command]
 pub(crate) async fn request_storage_access(app: tauri::AppHandle) -> Result<AccessReply, String> {
     use tauri_plugin_playback_host::PlaybackHostExt;
-    let access = tauri::async_runtime::spawn_blocking(move || app.playback_host().request_storage_access())
+    let access = app
+        .playback_host()
+        .request_storage_access()
         .await
-        .map_err(|e| crate::ipc_error("request_storage_access: join", e, "could not open storage settings"))?
         .map_err(|e| crate::ipc_error("request_storage_access", e, "could not open storage settings"))?;
     Ok(AccessReply { granted: access.granted })
 }
@@ -126,6 +128,7 @@ pub(crate) async fn storage_volumes(app: tauri::AppHandle) -> Result<Vec<VolumeR
     let volumes = app
         .playback_host()
         .storage_volumes()
+        .await
         .map_err(|e| crate::ipc_error("storage_volumes", e, "could not read storage"))?;
     Ok(volumes
         .into_iter()
@@ -146,6 +149,7 @@ pub(crate) async fn move_to_background(app: tauri::AppHandle) -> Result<(), Stri
     use tauri_plugin_playback_host::PlaybackHostExt;
     app.playback_host()
         .move_to_background()
+        .await
         .map_err(|e| crate::ipc_error("move_to_background", e, "could not leave the app"))
 }
 

@@ -28,27 +28,38 @@ struct VolumeList {
 
 pub struct PlaybackHost<R: Runtime>(PluginHandle<R>);
 
+/// Every call awaits the Kotlin side's answer without parking a thread, so a
+/// slow answer (or a user sitting in system Settings) costs no async worker.
 impl<R: Runtime> PlaybackHost<R> {
-    pub fn storage_access(&self) -> Result<StorageAccess, String> {
-        self.0.run_mobile_plugin("storageAccess", ()).map_err(|e| e.to_string())
-    }
-
-    /// Opens the system "All files access" page for this app and returns when
-    /// the user comes back. BLOCKS until then: call it off the async workers
-    /// (spawn_blocking), never on the main thread.
-    pub fn request_storage_access(&self) -> Result<StorageAccess, String> {
-        self.0.run_mobile_plugin("requestStorageAccess", ()).map_err(|e| e.to_string())
-    }
-
-    pub fn storage_volumes(&self) -> Result<Vec<StorageVolume>, String> {
+    pub async fn storage_access(&self) -> Result<StorageAccess, String> {
         self.0
-            .run_mobile_plugin::<VolumeList>("storageVolumes", ())
+            .run_mobile_plugin_async("storageAccess", ())
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Opens the system "All files access" page for this app and resolves when
+    /// the user comes back, which may be minutes later.
+    pub async fn request_storage_access(&self) -> Result<StorageAccess, String> {
+        self.0
+            .run_mobile_plugin_async("requestStorageAccess", ())
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    pub async fn storage_volumes(&self) -> Result<Vec<StorageVolume>, String> {
+        self.0
+            .run_mobile_plugin_async::<VolumeList>("storageVolumes", ())
+            .await
             .map(|list| list.volumes)
             .map_err(|e| e.to_string())
     }
 
-    pub fn move_to_background(&self) -> Result<(), String> {
-        self.0.run_mobile_plugin("moveToBackground", ()).map_err(|e| e.to_string())
+    pub async fn move_to_background(&self) -> Result<(), String> {
+        self.0
+            .run_mobile_plugin_async("moveToBackground", ())
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

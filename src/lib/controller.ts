@@ -152,7 +152,14 @@ import {
   queueIndexAfterRefresh,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
-import { backAction, storageCards, type StorageCard, type StorageVolume } from "../platform-core";
+import {
+  backAction,
+  storageCards,
+  withTimeout,
+  HOST_CALL_TIMEOUT_MS,
+  type StorageCard,
+  type StorageVolume,
+} from "../platform-core";
 
 // ---------------------------------------------------------------------------
 // File-type routing
@@ -7560,20 +7567,25 @@ function wireResize(): void {
 // android-001: the storage gate and Home's Storage row
 // ---------------------------------------------------------------------------
 
-/** Whether All-files access is on. A failed check counts as OFF: it must land
- *  on the gate, never on a Home whose folders silently cannot be read. */
+/** Whether All-files access is on. A failed or unanswered check counts as OFF:
+ *  it must land on the gate (whose button works), never on a blank screen or a
+ *  Home whose folders silently cannot be read. */
 async function storageGranted(): Promise<boolean> {
   try {
-    return (await tauriInvoke<{ granted: boolean }>("storage_access", {})).granted;
+    const call = tauriInvoke<{ granted: boolean }>("storage_access", {});
+    return (await withTimeout(call, HOST_CALL_TIMEOUT_MS)).granted;
   } catch {
     return false;
   }
 }
 
+/** Read the volumes for Home's Storage row. A failed or unanswered read shows
+ *  the row's error line, never an endless "Looking for storage…". */
 async function loadStorageVolumes(): Promise<void> {
   ui.storageLoading = true;
   try {
-    ui.storageCards = storageCards(await tauriInvoke<StorageVolume[]>("storage_volumes", {}));
+    const call = tauriInvoke<StorageVolume[]>("storage_volumes", {});
+    ui.storageCards = storageCards(await withTimeout(call, HOST_CALL_TIMEOUT_MS));
     ui.storageError = "";
   } catch {
     ui.storageCards = [];
@@ -7581,6 +7593,14 @@ async function loadStorageVolumes(): Promise<void> {
   } finally {
     ui.storageLoading = false;
   }
+}
+
+/** The Storage row's Retry: read the volumes again, showing the loading line
+ *  (not the old error) while it runs. */
+export function retryStorageVolumes(): void {
+  if (ui.storageLoading) return;
+  ui.storageError = "";
+  void loadStorageVolumes();
 }
 
 /** Check access and, when it is on, read the volumes for Home's Storage row.

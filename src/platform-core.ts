@@ -83,6 +83,29 @@ export function visibleActions(f: PlatformFeatures): VisibleActions {
   };
 }
 
+/** How long a call to the Android host may take before the page stops waiting
+ *  for it. Only for the quick checks (access, volumes): never for the access
+ *  request, where the user may sit in system Settings for minutes. */
+export const HOST_CALL_TIMEOUT_MS = 8000;
+
+/** Settle as `call` does, or reject once `ms` pass without an answer, so a host
+ *  call that never settles cannot leave a screen waiting forever. */
+export function withTimeout<T>(call: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
+    call.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 /** A storage volume as the Android host reports it. */
 export interface StorageVolume {
   label: string;
