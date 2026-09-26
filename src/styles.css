@@ -4579,3 +4579,22 @@ button.shortcuts__backdrop {
     padding: 6px 10px;
   }
 }
+
+/* android-001: a short touch screen, e.g. a phone in landscape with the soft
+   keyboard up, which leaves little more than 120 CSS px of page. A dialog
+   panel (tags, playlist) taller than that was centred off both edges with its
+   text field out of reach. Here the overlay scrolls instead, and the panel
+   centres only while it fits, so the focused field can be brought into view
+   (with a little room around it, not flush against the keyboard). */
+@media (hover: none) and (max-height: 480px) {
+  .shortcuts {
+    align-items: flex-start;
+    align-items: safe center;
+    overflow-y: auto;
+  }
+
+  input,
+  textarea {
+    scroll-margin-block: 12px;
+  }
+}

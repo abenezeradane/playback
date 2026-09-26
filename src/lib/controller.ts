@@ -7666,9 +7666,21 @@ function onPhoneResume(): void {
   });
 }
 
+/** The host shrinks the page above the soft keyboard, and a phone turned on
+ *  its side with the keyboard up has little page left. Whenever the page
+ *  changes size, bring the text field being typed into (a tag, a playlist
+ *  name, a chapter) back on screen. */
+function keepFocusedFieldInView(): void {
+  const el = document.activeElement;
+  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+    el.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+}
+
 async function initPhone(): Promise<void> {
   if (!ui.features.mobile) return;
   document.addEventListener("visibilitychange", onPhoneResume);
+  window.addEventListener("resize", keepFocusedFieldInView);
   await wireBackButton();
   if (actions.storageRow) await refreshStorage();
 }

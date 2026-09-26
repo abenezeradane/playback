@@ -40,13 +40,17 @@ class PlaybackHostPlugin(private val activity: Activity) : Plugin(activity) {
         // Keep web content out from under the status bar, cutout and gesture
         // bar. The activity draws edge-to-edge, and the WebView's CSS
         // env(safe-area-inset-*) does not reliably report system bars, so the
-        // WebView's container is padded natively instead.
+        // WebView's container is padded natively instead. Edge-to-edge also
+        // means the window no longer shrinks for the soft keyboard, so the
+        // bottom padding follows the keyboard while it is up: a focused text
+        // field (a tag, a playlist name, a chapter) stays above it.
         val container = (webView.parent as? View) ?: webView
         ViewCompat.setOnApplyWindowInsetsListener(container) { view, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
-            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            view.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
             WindowInsetsCompat.CONSUMED
         }
         container.setBackgroundColor(canvas)
