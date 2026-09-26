@@ -1898,6 +1898,7 @@ pub fn run() {
         }
     }));
     builder
+        .plugin(platform::features_plugin())
         // android-001: resolve the app-private storage roots before any command runs.
         .setup(|_app| {
             #[cfg(mobile)]

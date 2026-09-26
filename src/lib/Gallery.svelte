@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui } from "./state.svelte";
+  import { ui, actions } from "./state.svelte";
   import {
     goBack,
     openGalleryItem,
@@ -273,16 +273,18 @@
            prune removes tag ENTRIES, this destroys FILES. Styled as destructive
            and confirmed by a panel, not by a second press: a two-press arm is
            proportionate to un-tagging, not to deleting four hundred files. -->
-      <button
-        id="gallery-delete-tagged"
-        class="glass-btn glass-btn--danger"
-        type="button"
-        title="Delete every file with this tag"
-        aria-label="Delete every file with this tag — moves them to the Recycle Bin"
-        onclick={() => void openTagDeletePanel()}
-      >
-        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
-      </button>
+      {#if actions.delete}
+        <button
+          id="gallery-delete-tagged"
+          class="glass-btn glass-btn--danger"
+          type="button"
+          title="Delete every file with this tag"
+          aria-label="Delete every file with this tag — moves them to the Recycle Bin"
+          onclick={() => void openTagDeletePanel()}
+        >
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
+        </button>
+      {/if}
     {/if}
   </header>
 

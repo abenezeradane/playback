@@ -14,6 +14,7 @@ import { tick } from "svelte";
 import {
   ui,
   els,
+  actions,
   type RecentFile,
   type QueueItem,
   type GalleryItem,
@@ -908,6 +909,7 @@ function onNativeEngineError(message: string): void {
 }
 
 export function setSettingsOpen(open: boolean): void {
+  if (open && !actions.settings) return; // android-001: nothing to set on this platform yet
   ui.settingsOpen = open;
   if (!open) {
     ui.hwaccelRestartHint = false;
@@ -1205,6 +1207,7 @@ export function goHome(): void {
 
 // --- Keyboard shortcuts overlay (frame 05) ---
 export function setShortcutsOpen(open: boolean): void {
+  if (open && !actions.shortcuts) return; // android-001
   ui.shortcutsOpen = open;
 }
 
@@ -4161,6 +4164,7 @@ async function currentImagePixels(): Promise<CanvasImageSource | null> {
  * the same transport `read_stream_chunk` already uses, for the same reason.
  */
 export async function doImageCopy(): Promise<void> {
+  if (!actions.copyImage) return; // android-001: no image clipboard on this platform
   if (!imageMeasured()) return;
   try {
     const src = await currentImagePixels();
@@ -4207,6 +4211,7 @@ export async function doImageCopy(): Promise<void> {
 
 /** Open the containing folder with this photo selected. */
 export async function doImageReveal(): Promise<void> {
+  if (!actions.reveal) return; // android-001
   if (!currentPath) return;
   // gallery-004: a page browsed from inside an archive lives in the thumbnail
   // cache. Reveal the ARCHIVE, which is the file the reader actually has.
@@ -4242,6 +4247,7 @@ function disarmDelete(): void {
  * user's .zip, which is not what this button promises.
  */
 export async function doImageDelete(): Promise<void> {
+  if (!actions.delete) return; // android-001: no Recycle Bin on this platform
   if (!currentPath) return;
   if (currentArchiveOrigin) {
     flashImageAction("A picture inside an archive cannot be deleted.");
@@ -4894,6 +4900,7 @@ export async function pruneMissingFromTag(): Promise<void> {
  * defeat the interlock.
  */
 export async function openTagDeletePanel(): Promise<void> {
+  if (!actions.delete) return; // android-001: no Recycle Bin on this platform
   const tag = ui.galleryTag;
   if (!tag) return;
   ui.tagDeleteError = "";
@@ -5890,6 +5897,7 @@ function handleGalleryKey(e: KeyboardEvent): boolean {
  * not enough when the trigger needs no pointer.
  */
 export async function doGalleryDelete(): Promise<void> {
+  if (!actions.delete) return; // android-001: no Recycle Bin on this platform
   // -1 means no tile has ever been focused (ux-004). Deleting tile 0 on a hunch
   // would destroy something the user never pointed at, in a folder that may hold
   // thousands. This is the same refusal currentTagTarget makes, for a much
@@ -6481,6 +6489,7 @@ function pathLeafOf(inner: string): string {
 
 /** Open the native folder picker (Tauri) and open the chosen folder as a gallery. */
 export async function openFolderDialog(): Promise<void> {
+  if (!actions.openDialogs) return; // android-001: the picker's content:// URIs do not fit the path model
   try {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({ multiple: false, directory: true });
@@ -6944,6 +6953,7 @@ function handleImageKey(e: KeyboardEvent): boolean {
 
 /** Open the native file picker (Tauri) and load the chosen file. */
 export async function openFileDialog(): Promise<void> {
+  if (!actions.openDialogs) return; // android-001: the picker's content:// URIs do not fit the path model
   try {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({

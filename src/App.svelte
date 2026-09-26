@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ui, els } from "./lib/state.svelte";
+  import { ui, els, actions } from "./lib/state.svelte";
   import { init } from "./lib/controller";
   import Home from "./lib/Home.svelte";
   import Player from "./lib/Player.svelte";
@@ -35,7 +35,7 @@
   <ImageView />
   <Gallery />
   <LiveUnavailable />
-  <ShortcutsOverlay />
+  {#if actions.shortcuts}<ShortcutsOverlay />{/if}
   <Settings />
   <PlaylistEditor />
   <TagPopover />

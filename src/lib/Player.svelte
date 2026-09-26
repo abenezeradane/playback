@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui, els } from "./state.svelte";
+  import { ui, els, actions } from "./state.svelte";
   import ChaptersPanel from "./ChaptersPanel.svelte";
   import QueuePanel from "./QueuePanel.svelte";
   import NextPrompt from "./NextPrompt.svelte";
@@ -258,10 +258,12 @@
             <svg class="ic" viewBox="0 0 24 24"><path d="M21 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4" /><rect width="10" height="7" x="12" y="13" rx="2" /></svg>
             <span class="iconbtn__more-label">Picture-in-picture (P)</span>
           </button>
-          <button id="btn-keys" class="iconbtn iconbtn--sm" type="button" title="Keyboard shortcuts (?)" onclick={toggleShortcuts}>
-            <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
-            <span class="iconbtn__more-label">Keyboard shortcuts (?)</span>
-          </button>
+          {#if actions.shortcuts}
+            <button id="btn-keys" class="iconbtn iconbtn--sm" type="button" title="Keyboard shortcuts (?)" onclick={toggleShortcuts}>
+              <svg class="ic" viewBox="0 0 24 24"><rect width="20" height="16" x="2" y="4" rx="2" /><path d="M6 8h.01" /><path d="M10 8h.01" /><path d="M14 8h.01" /><path d="M18 8h.01" /><path d="M8 12h.01" /><path d="M12 12h.01" /><path d="M16 12h.01" /><path d="M7 16h10" /></svg>
+              <span class="iconbtn__more-label">Keyboard shortcuts (?)</span>
+            </button>
+          {/if}
           <button id="btn-more-tag" class="iconbtn iconbtn--sm" type="button" title="Tags (#)" onclick={openTagPopover}>
             <svg class="ic" viewBox="0 0 24 24"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /><circle cx="7.5" cy="7.5" r="1.5" /></svg>
             <span class="iconbtn__more-label">Tags (#)</span>

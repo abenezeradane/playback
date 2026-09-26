@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ui, els } from "./state.svelte";
+  import { ui, els, actions } from "./state.svelte";
   import {
     goBack,
     toggleGifPlay,
@@ -219,12 +219,16 @@
 
     <!-- img-002: actions on the FILE rather than on the view of it. -->
     <div class="imgview__tools imgview__tools--file">
-      <button id="img-copy" class="iconbtn iconbtn--sm" type="button" title="Copy image (C)" aria-label="Copy image" onclick={() => void doImageCopy()}>
-        <svg class="ic" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
-      </button>
-      <button id="img-reveal" class="iconbtn iconbtn--sm" type="button" title="Show in Explorer (E)" aria-label="Show in Explorer" onclick={() => void doImageReveal()}>
-        <svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></svg>
-      </button>
+      {#if actions.copyImage}
+        <button id="img-copy" class="iconbtn iconbtn--sm" type="button" title="Copy image (C)" aria-label="Copy image" onclick={() => void doImageCopy()}>
+          <svg class="ic" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+        </button>
+      {/if}
+      {#if actions.reveal}
+        <button id="img-reveal" class="iconbtn iconbtn--sm" type="button" title="Show in Explorer (E)" aria-label="Show in Explorer" onclick={() => void doImageReveal()}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></svg>
+        </button>
+      {/if}
       <button id="img-info" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgInfoOpen} title="Image info (I)" aria-label="Image info" onclick={() => void doImageInfo()}>
         <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 16v-4" /><circle cx="12" cy="8.2" r="1" /></svg>
       </button>
@@ -235,17 +239,19 @@
            Two presses, and the file goes to the Recycle Bin — see
            doImageDelete for why this is not a dialog. `data-armed` is what
            makes the armed state visible rather than only announced. -->
-      <button
-        id="img-delete"
-        class="iconbtn iconbtn--sm iconbtn--danger"
-        type="button"
-        data-armed={ui.imgDeleteArmed}
-        title={delText.title}
-        aria-label={delText.label}
-        onclick={() => void doImageDelete()}
-      >
-        <svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
-      </button>
+      {#if actions.delete}
+        <button
+          id="img-delete"
+          class="iconbtn iconbtn--sm iconbtn--danger"
+          type="button"
+          data-armed={ui.imgDeleteArmed}
+          title={delText.title}
+          aria-label={delText.label}
+          onclick={() => void doImageDelete()}
+        >
+          <svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
+        </button>
+      {/if}
     </div>
   </div>
 </section>

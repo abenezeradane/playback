@@ -11,6 +11,16 @@
  * scrub surface, the add-timestamp field) — populated via `bind:this` on mount.
  */
 import type { Timestamp, Playlist } from "../player-core";
+import { parseFeatures, visibleActions, type VisibleActions } from "../platform-core";
+
+/** android-001: this build's capabilities, injected by the native side before
+ *  any script ran (see platform.rs). Fixed for the life of the process. */
+const features = parseFeatures(
+  (globalThis as { __PLAYBACK_FEATURES__?: unknown }).__PLAYBACK_FEATURES__,
+);
+
+/** Which controls this build renders. Non-reactive: features never change. */
+export const actions: VisibleActions = visibleActions(features);
 
 /** A recent file (home-screen history), persisted in localStorage. */
 export interface RecentFile {
@@ -105,6 +115,7 @@ export type View = "empty" | "playing" | "image" | "live-unavailable" | "gallery
 export const ui = $state({
   // --- Top-level view ---
   view: "empty" as View,
+  features,
   cutMode: false,
   dragover: false,
   emptyError: "",
