@@ -152,6 +152,7 @@ import {
   queueIndexAfterRefresh,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
+import { storageCards, type StorageCard, type StorageVolume } from "../platform-core";
 
 // ---------------------------------------------------------------------------
 // File-type routing
@@ -1201,6 +1202,7 @@ export function goHome(): void {
   void loadTagBlacklist(); // tags-003: Home's shelf must know about a fully-
   // blacklisted library too — see the matching call in init() below and
   // Home.svelte's `hidden` condition for why.
+  if (actions.storageRow) void refreshStorage(); // android-001: re-check access, re-read volumes
   document.title = "Playback";
   endClose();
 }
@@ -6329,11 +6331,14 @@ async function refreshOpenQueues(dir: string): Promise<void> {
  */
 export async function openGalleryForFolder(
   path: string,
-  opts: { crumbs?: string[] } = {},
+  opts: { crumbs?: string[]; title?: string } = {},
 ): Promise<void> {
   perfMark("gallery.begin", basename(path)); // perf-005
   const token = ++galleryToken;
-  const label = basename(path);
+  // android-001: a storage volume opens under its system label ("Internal shared
+  // storage"), not its basename ("0"). The title lands in ui.galleryFolder and the
+  // crumbs, which galleryNavEntry snapshots, so Back restores it too.
+  const label = opts.title ?? basename(path);
   ui.galleryItems = [];
   ui.galleryListing = [];
   ui.galleryFolder = label;
@@ -7549,6 +7554,90 @@ function wireResize(): void {
  * main.ts boot block: capture element handles, wire global listeners, restore
  * persisted prefs, and do the first render.
  */
+// ---------------------------------------------------------------------------
+// android-001: the storage gate and Home's Storage row
+// ---------------------------------------------------------------------------
+
+/** Whether All-files access is on. A failed check counts as OFF: it must land
+ *  on the gate, never on a Home whose folders silently cannot be read. */
+async function storageGranted(): Promise<boolean> {
+  try {
+    return (await tauriInvoke<{ granted: boolean }>("storage_access", {})).granted;
+  } catch {
+    return false;
+  }
+}
+
+async function loadStorageVolumes(): Promise<void> {
+  ui.storageLoading = true;
+  try {
+    ui.storageCards = storageCards(await tauriInvoke<StorageVolume[]>("storage_volumes", {}));
+    ui.storageError = "";
+  } catch {
+    ui.storageCards = [];
+    ui.storageError = "Could not read this phone's storage.";
+  } finally {
+    ui.storageLoading = false;
+  }
+}
+
+/** Check access and, when it is on, read the volumes for Home's Storage row.
+ *  Lands on the gate when access is off. Only ever acts while Home or the gate
+ *  is showing, so it never yanks a journey out from under the user; the resume
+ *  handler routes Home first. */
+async function refreshStorage(): Promise<void> {
+  const granted = await storageGranted();
+  if (ui.view !== "empty" && ui.view !== "storage-gate") return; // the user moved on meanwhile
+  if (!granted) {
+    ui.view = "storage-gate";
+    ui.storageGateReady = true;
+    return;
+  }
+  if (ui.view === "storage-gate") ui.view = "empty";
+  await loadStorageVolumes();
+}
+
+/** The gate's button: open Android's "All files access" page, and act on what
+ *  the user chose when they come back. */
+export async function requestStorageAccess(): Promise<void> {
+  if (ui.storageGateBusy) return;
+  ui.storageGateBusy = true;
+  try {
+    const { granted } = await tauriInvoke<{ granted: boolean }>("request_storage_access", {});
+    ui.storageGateDenied = !granted;
+    if (granted) await refreshStorage();
+  } catch {
+    ui.storageGateDenied = true;
+  } finally {
+    ui.storageGateBusy = false;
+  }
+}
+
+/** A Storage card: a volume is a fresh journey, like the desktop folder picker. */
+export function openStorageVolume(card: StorageCard): void {
+  resetNav();
+  void openGalleryForFolder(card.path, { title: card.label });
+}
+
+/** Coming back to the app: access may have been revoked (land on the gate) or
+ *  granted outside the app (leave the gate for Home). */
+function onPhoneResume(): void {
+  if (document.visibilityState !== "visible") return;
+  void storageGranted().then((granted) => {
+    if (!granted) {
+      if (ui.view !== "storage-gate") goHome(); // goHome -> refreshStorage -> the gate
+    } else if (ui.view === "storage-gate" || ui.view === "empty") {
+      void refreshStorage();
+    }
+  });
+}
+
+async function initPhone(): Promise<void> {
+  if (!ui.features.mobile) return;
+  document.addEventListener("visibilitychange", onPhoneResume);
+  if (actions.storageRow) await refreshStorage();
+}
+
 export function init(): void {
   video = els.video!;
   cutGen = els.cutGen!;
@@ -7588,6 +7677,7 @@ export function init(): void {
   void loadLaunchFile();
   void wireSecondInstance();
   void wireFolderWatch(); // gallery-005
+  void initPhone(); // android-001: storage gate, Storage row
   renderRecents();
   void loadTagLibrary(); // tags-002: the shelf must be populated on the FIRST
                          // Home paint, not only after a navigation back to it

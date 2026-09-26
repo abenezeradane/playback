@@ -11,7 +11,7 @@
  * scrub surface, the add-timestamp field) — populated via `bind:this` on mount.
  */
 import type { Timestamp, Playlist } from "../player-core";
-import { parseFeatures, visibleActions, type VisibleActions } from "../platform-core";
+import { parseFeatures, visibleActions, type VisibleActions, type StorageCard } from "../platform-core";
 
 /** android-001: this build's capabilities, injected by the native side before
  *  any script ran (see platform.rs). Fixed for the life of the process. */
@@ -110,12 +110,21 @@ export interface TagTarget {
 }
 
 /** The active surface — mirrors the former `#app[data-state]` switch. */
-export type View = "empty" | "playing" | "image" | "live-unavailable" | "gallery";
+export type View = "empty" | "playing" | "image" | "live-unavailable" | "gallery" | "storage-gate";
 
 export const ui = $state({
   // --- Top-level view ---
-  view: "empty" as View,
+  // android-001: a phone starts on the gate's blank canvas until the first
+  // access check answers, so neither Home nor the gate flashes up wrongly.
+  view: (features.storageVolumes ? "storage-gate" : "empty") as View,
   features,
+  // --- android-001: storage gate + Home's Storage row ---
+  storageGateReady: false, // the gate's card shows only once access is known to be off
+  storageGateDenied: false, // the user came back from Settings without granting it
+  storageGateBusy: false,
+  storageLoading: true,
+  storageError: "",
+  storageCards: [] as StorageCard[],
   cutMode: false,
   dragover: false,
   emptyError: "",

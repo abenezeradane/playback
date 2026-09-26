@@ -4410,3 +4410,144 @@ button.shortcuts__backdrop {
   letter-spacing: 0.2px;
   pointer-events: none;
 }
+
+/* ===================== android-001: storage gate + Storage row ===================== */
+.gate {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--canvas);
+}
+
+/* Until the first access check answers, the gate is a blank canvas: neither it
+   nor Home may flash up for a phone that already has access. */
+.gate:not([data-ready="true"]) .gate__card {
+  visibility: hidden;
+}
+
+.gate__card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 420px;
+  padding: 28px 24px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+}
+
+.gate__chip {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  color: var(--ink);
+}
+
+.gate__chip .ic {
+  font-size: 22px;
+}
+
+.gate__title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.gate__body {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--body);
+}
+
+.gate__body--quiet {
+  font-size: 13px;
+  color: var(--mute);
+}
+
+.gate__denied {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--accent-red);
+}
+
+.gate__cta {
+  align-self: stretch;
+  justify-content: center;
+  min-height: 48px;
+}
+
+.storage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.storage__cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.storage-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 64px;
+  padding: 12px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.storage-card:active {
+  background: var(--surface-elevated);
+}
+
+.storage-card__icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: var(--surface-elevated);
+  color: var(--charcoal);
+}
+
+.storage-card__icon .ic {
+  font-size: 20px;
+}
+
+.storage-card__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.storage-card__name {
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storage-card__sub {
+  font-size: 12px;
+  color: var(--mute);
+}

@@ -3,6 +3,7 @@ import {
   DESKTOP_FEATURES,
   parseFeatures,
   visibleActions,
+  storageCards,
   type PlatformFeatures,
 } from "./platform-core";
 
@@ -81,5 +82,37 @@ describe("visibleActions", () => {
   it("keeps hardware acceleration on a desktop without the native engine (it drives WebView2)", () => {
     const a = visibleActions({ ...DESKTOP_FEATURES, nativeEngine: false });
     expect([a.engineSetting, a.hwaccelSetting, a.settings]).toEqual([false, true, true]);
+  });
+});
+
+describe("storageCards", () => {
+  it("puts internal storage first, then removable volumes by name", () => {
+    const cards = storageCards([
+      { label: "USB drive", path: "/storage/AAAA-1111", removable: true },
+      { label: "Internal shared storage", path: "/storage/emulated/0", removable: false },
+      { label: "SD card", path: "/storage/1A2B-3C4D", removable: true },
+    ]);
+    expect(cards.map((c) => c.label)).toEqual(["Internal shared storage", "SD card", "USB drive"]);
+  });
+
+  it("drops a volume with no path and collapses duplicate paths", () => {
+    const cards = storageCards([
+      { label: "Internal shared storage", path: "/storage/emulated/0", removable: false },
+      { label: "Internal again", path: "/storage/emulated/0", removable: false },
+      { label: "Ghost", path: "", removable: true },
+    ]);
+    expect(cards).toEqual([{ label: "Internal shared storage", path: "/storage/emulated/0", removable: false }]);
+  });
+
+  it("gives a blank label a plain name instead of an empty card", () => {
+    const cards = storageCards([
+      { label: "  ", path: "/storage/emulated/0", removable: false },
+      { label: "", path: "/storage/1A2B-3C4D", removable: true },
+    ]);
+    expect(cards.map((c) => c.label)).toEqual(["Internal storage", "Removable storage"]);
+  });
+
+  it("is empty for no volumes", () => {
+    expect(storageCards([])).toEqual([]);
   });
 });

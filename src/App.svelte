@@ -3,6 +3,7 @@
   import { ui, els, actions } from "./lib/state.svelte";
   import { init } from "./lib/controller";
   import Home from "./lib/Home.svelte";
+  import StorageGate from "./lib/StorageGate.svelte";
   import Player from "./lib/Player.svelte";
   import ImageView from "./lib/ImageView.svelte";
   import Gallery from "./lib/Gallery.svelte";
@@ -31,6 +32,7 @@
   data-dragover={ui.dragover}
 >
   <Home />
+  <StorageGate />
   <Player />
   <ImageView />
   <Gallery />

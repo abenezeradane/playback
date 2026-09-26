@@ -77,3 +77,30 @@ export function visibleActions(f: PlatformFeatures): VisibleActions {
     storageRow: f.storageVolumes,
   };
 }
+
+/** A storage volume as the Android host reports it. */
+export interface StorageVolume {
+  label: string;
+  path: string;
+  removable: boolean;
+}
+
+/** One card in Home's Storage row. */
+export type StorageCard = StorageVolume;
+
+/** Home's Storage cards: internal storage first, then removable volumes by
+ *  name. A volume without a path is dropped, duplicate paths collapse to the
+ *  first, and a blank label gets a plain name rather than an empty card. */
+export function storageCards(volumes: readonly StorageVolume[]): StorageCard[] {
+  const seen = new Set<string>();
+  const cards: StorageCard[] = [];
+  for (const v of volumes) {
+    if (!v.path || seen.has(v.path)) continue;
+    seen.add(v.path);
+    const label = v.label.trim() || (v.removable ? "Removable storage" : "Internal storage");
+    cards.push({ label, path: v.path, removable: v.removable });
+  }
+  return cards.sort(
+    (a, b) => Number(a.removable) - Number(b.removable) || a.label.localeCompare(b.label),
+  );
+}

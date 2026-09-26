@@ -12,6 +12,7 @@
     deletePlaylist,
     openGalleryForTag,
     openTagIndex,
+    openStorageVolume,
   } from "./controller";
   import { formatTime } from "../player-core";
 
@@ -93,6 +94,43 @@
 
             <span class="dropzone__formats" aria-hidden="true"><span>MP4</span><span>WEBM</span><span>MKV</span><span>MOV</span><span>AVI</span><span>TS</span><span>JPG</span><span>PNG</span><span>GIF</span></span>
           </div>
+        </section>
+      {:else}
+        <!-- android-001: a phone has no file picker that fits Playback's path
+             model, so Home offers the phone's storage volumes instead. Tapping
+             one opens the existing gallery there. -->
+        <section id="storage" class="storage">
+          <div class="recent__head">
+            <div class="recent__title">
+              <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><line x1="22" x2="2" y1="12" y2="12" /><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" /><line x1="6" x2="6.01" y1="16" y2="16" /><line x1="10" x2="10.01" y1="16" y2="16" /></svg>
+              Storage
+            </div>
+          </div>
+          {#if ui.storageError}
+            <div class="recent__empty" role="alert">{ui.storageError}</div>
+          {:else if ui.storageLoading}
+            <div class="recent__empty" role="status">Looking for storage…</div>
+          {:else if ui.storageCards.length === 0}
+            <div class="recent__empty">No storage found on this phone.</div>
+          {:else}
+            <div class="storage__cards">
+              {#each ui.storageCards as v (v.path)}
+                <button type="button" class="storage-card" data-path={v.path} data-removable={v.removable} onclick={() => openStorageVolume(v)}>
+                  <span class="storage-card__icon" aria-hidden="true">
+                    {#if v.removable}
+                      <svg class="ic" viewBox="0 0 24 24"><path d="M6 22a2 2 0 0 1-2-2V6l4-4h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2Z" /><path d="M8 10V7" /><path d="M12 6v4" /><path d="M16 6v4" /></svg>
+                    {:else}
+                      <svg class="ic" viewBox="0 0 24 24"><rect width="14" height="20" x="5" y="2" rx="2" ry="2" /><path d="M12 18h.01" /></svg>
+                    {/if}
+                  </span>
+                  <span class="storage-card__meta">
+                    <span class="storage-card__name">{v.label}</span>
+                    <span class="storage-card__sub">{v.removable ? "Removable" : "This phone"}</span>
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/if}
         </section>
       {/if}
 
