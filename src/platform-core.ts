@@ -104,3 +104,17 @@ export function storageCards(volumes: readonly StorageVolume[]): StorageCard[] {
     (a, b) => Number(a.removable) - Number(b.removable) || a.label.localeCompare(b.label),
   );
 }
+
+/** What the Android Back gesture does (android-001). */
+export type BackAction = "close-layer" | "step" | "background";
+
+/** Layers (panels, popovers, prompts) close first, in the order Esc closes them
+ *  on desktop. Then Back walks the ux-001 journey. At Home, and on the storage
+ *  gate, which has nowhere to go back to, it sends the app to the background
+ *  rather than finishing it, so coming back is not a cold start. */
+export function backAction(view: string, layerOpen: boolean): BackAction {
+  if (view === "storage-gate") return "background";
+  if (layerOpen) return "close-layer";
+  if (view === "empty") return "background";
+  return "step";
+}

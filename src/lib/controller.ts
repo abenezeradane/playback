@@ -152,7 +152,7 @@ import {
   queueIndexAfterRefresh,
 } from "../player-core";
 import { NativeEngine, type EngineSurface } from "./engine-native";
-import { storageCards, type StorageCard, type StorageVolume } from "../platform-core";
+import { backAction, storageCards, type StorageCard, type StorageVolume } from "../platform-core";
 
 // ---------------------------------------------------------------------------
 // File-type routing
@@ -7647,7 +7647,80 @@ function onPhoneResume(): void {
 async function initPhone(): Promise<void> {
   if (!ui.features.mobile) return;
   document.addEventListener("visibilitychange", onPhoneResume);
+  await wireBackButton();
   if (actions.storageRow) await refreshStorage();
+}
+
+// ---------------------------------------------------------------------------
+// android-001: the Android Back gesture
+// ---------------------------------------------------------------------------
+
+/** Any layer Back should close before it navigates: the set Esc dismisses. */
+function anyLayerOpen(): boolean {
+  return (
+    ui.tagPopoverOpen ||
+    ui.tagDeleteOpen ||
+    ui.shortcutsOpen ||
+    ui.panelOpen ||
+    ui.settingsOpen ||
+    ui.queueOpen ||
+    ui.playlistEditorOpen ||
+    ui.tagIndexOpen ||
+    ui.moreOpen ||
+    ui.nextPromptOpen
+  );
+}
+
+/** Close the topmost layer, in the order Esc closes them: the tag popover and
+ *  the delete panel sit over everything; the side panels next; the Up Next
+ *  prompt last. */
+function closeTopLayer(): void {
+  if (ui.tagPopoverOpen) {
+    closeTagPopover();
+    return;
+  }
+  if (ui.tagDeleteOpen) {
+    closeTagDeletePanel();
+    return;
+  }
+  if (
+    ui.shortcutsOpen ||
+    ui.panelOpen ||
+    ui.settingsOpen ||
+    ui.queueOpen ||
+    ui.playlistEditorOpen ||
+    ui.tagIndexOpen ||
+    ui.moreOpen
+  ) {
+    setShortcutsOpen(false);
+    setSettingsOpen(false);
+    setPanelOpen(false);
+    setQueueOpen(false);
+    setMoreOpen(false);
+    closeTagIndex();
+    closePlaylistEditor();
+    return;
+  }
+  if (ui.nextPromptOpen) closeNextPrompt();
+}
+
+/** One press of the Android Back gesture. */
+export function onBackGesture(): void {
+  const action = backAction(ui.view, anyLayerOpen());
+  perfMark("nav.backGesture", action);
+  if (action === "close-layer") closeTopLayer();
+  else if (action === "step") goBack();
+  else void tauriInvoke("move_to_background", {}).catch(() => {});
+}
+
+/** Registering a listener is what stops Tauri's default (finish the activity). */
+async function wireBackButton(): Promise<void> {
+  try {
+    const { onBackButtonPress } = await import("@tauri-apps/api/app");
+    await onBackButtonPress(() => onBackGesture());
+  } catch {
+    /* Not under Tauri. */
+  }
 }
 
 export function init(): void {

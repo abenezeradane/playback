@@ -4,6 +4,7 @@ import {
   parseFeatures,
   visibleActions,
   storageCards,
+  backAction,
   type PlatformFeatures,
 } from "./platform-core";
 
@@ -114,5 +115,28 @@ describe("storageCards", () => {
 
   it("is empty for no volumes", () => {
     expect(storageCards([])).toEqual([]);
+  });
+});
+
+describe("backAction", () => {
+  it("closes an open layer before anything else, in every view", () => {
+    for (const view of ["empty", "gallery", "image", "playing"]) {
+      expect(backAction(view, true)).toBe("close-layer");
+    }
+  });
+
+  it("steps back through the journey from gallery, photo and player", () => {
+    for (const view of ["gallery", "image", "playing", "live-unavailable"]) {
+      expect(backAction(view, false)).toBe("step");
+    }
+  });
+
+  it("backgrounds the app at Home instead of finishing it", () => {
+    expect(backAction("empty", false)).toBe("background");
+  });
+
+  it("backgrounds from the storage gate, which has nowhere to go back to", () => {
+    expect(backAction("storage-gate", false)).toBe("background");
+    expect(backAction("storage-gate", true)).toBe("background");
   });
 });
