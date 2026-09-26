@@ -1,6 +1,6 @@
 [package]
 name = "playback"
-version = "0.69.0"
+version = "0.70.0"
 description = "A fully featured video player built with Tauri 2.0"
 authors = ["Playback"]
 edition = "2021"
