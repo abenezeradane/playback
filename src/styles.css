@@ -4568,10 +4568,10 @@ button.shortcuts__backdrop {
 /* android-001: phone widths (360-412 CSS px). The desktop window's minWidth is
    640 (tauri.conf.json), so nothing in this block can ever apply on desktop. */
 @media (max-width: 480px) {
-  /* Image viewer (Oracle I finding: image-reset/image-480 bad=btn-img-tag):
-     the floating tools bar's groups (zoom, transport, orient, file) run wider
-     than the screen and it never wraps, so the trailing Tags button lands
-     off-screen. Cap the bar to the viewport and let it wrap instead. */
+  /* Image viewer: at phone widths the floating tools pill pushed the Tags
+     button off-screen. Its groups (zoom, transport, orient, file) run wider
+     than the screen and the bar never wraps, so cap it to the viewport and
+     let it wrap instead. */
   .imgview__controls {
     max-width: calc(100% - 24px);
     flex-wrap: wrap;

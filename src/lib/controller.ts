@@ -7617,7 +7617,7 @@ async function refreshStorage(): Promise<void> {
   }
   if (ui.view === "storage-gate") {
     ui.view = "empty";
-    ui.storageGateDenied = false; // fix round 1 (T6-c): a later gate visit starts clean
+    ui.storageGateDenied = false; // a later gate visit starts clean, with no "denied" line
   }
   await loadStorageVolumes();
 }
@@ -7652,8 +7652,8 @@ function onPhoneResume(): void {
     if (!granted) {
       if (ui.view !== "storage-gate") {
         goHome(); // goHome -> refreshStorage -> the gate, confirming it
-        // fix round 1 (T6-b): goHome() sets ui.view = "empty" synchronously and
-        // only THEN kicks off refreshStorage(), whose first await is an IPC
+        // goHome() sets ui.view = "empty" synchronously and only THEN kicks
+        // off refreshStorage(), whose first await is an IPC
         // round-trip — Svelte can paint Home (with stale Storage cards) in that
         // gap before refreshStorage flips the view back. Set it synchronously
         // here too so the gate wins the render before any paint happens.

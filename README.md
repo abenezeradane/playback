@@ -118,3 +118,28 @@ npm run check                # svelte-check (0 errors / 0 warnings expected)
 npm test                     # vitest suite
 (cd src-tauri && cargo test) # Rust unit tests
 ```
+
+## Android
+
+Playback also builds for Android phones (Android 11 / API 30 and later). On a
+phone it asks once for All-files access, lists the phone's storage (internal
+storage and any SD card) on Home, and opens a folder as the same gallery of
+photos, archives and videos as on desktop, with video played by the web engine.
+Delete, reveal, copy image and the native (mpv) engine are not on Android yet.
+
+The build needs, on top of the prerequisites above:
+
+- the Android SDK and NDK `27.2.12479018`
+- JDK 17
+- the Rust targets: `rustup target add aarch64-linux-android x86_64-linux-android`
+- `ANDROID_HOME` (the SDK), `NDK_HOME` (the NDK) and `JAVA_HOME` (the JDK) set
+- on Windows, Developer Mode turned on (the build creates a symlink)
+
+```bash
+npm run tauri android build -- --apk --target aarch64            # a phone
+npm run tauri android build -- --apk --debug --target x86_64     # an emulator
+```
+
+Release APKs are signed with the key named in `src-tauri/gen/android/keystore.properties`
+(git-ignored), which holds `keyAlias`, `password` and `storeFile`. Without that
+file a release build is left unsigned.
