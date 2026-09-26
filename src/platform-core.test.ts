@@ -6,6 +6,9 @@ import {
   storageCards,
   backAction,
   withTimeout,
+  imageToolPages,
+  imageToolPageFor,
+  tapOnlyRevealsChrome,
   type PlatformFeatures,
 } from "./platform-core";
 
@@ -190,5 +193,66 @@ describe("backAction", () => {
   it("backgrounds from the storage gate, which has nowhere to go back to", () => {
     expect(backAction("storage-gate", false)).toBe("background");
     expect(backAction("storage-gate", true)).toBe("background");
+  });
+});
+
+describe("imageToolPages", () => {
+  it("gives a still picture zoom, then rotate and flip, then info and tags", () => {
+    expect(imageToolPages("static")).toEqual(["zoom", "orient", "file"]);
+  });
+
+  it("puts an animation's playback controls first", () => {
+    expect(imageToolPages("animated")).toEqual(["playback", "zoom", "orient", "file"]);
+  });
+
+  it("has no playback page for a picture the WebView draws itself (a JPEG, a GIF it animates)", () => {
+    expect(imageToolPages("native")).toEqual(["zoom", "orient", "file"]);
+  });
+
+  it("has no pages while loading or after an error, when there is no toolbar", () => {
+    expect(imageToolPages("loading")).toEqual([]);
+    expect(imageToolPages("error")).toEqual([]);
+  });
+});
+
+describe("imageToolPageFor", () => {
+  const STILL = imageToolPages("static");
+  const ANIMATED = imageToolPages("animated");
+
+  it("opens on the first page until one has been chosen", () => {
+    expect(imageToolPageFor(null, STILL)).toBe("zoom");
+    expect(imageToolPageFor(null, ANIMATED)).toBe("playback");
+  });
+
+  it("keeps the chosen page for every picture that has it", () => {
+    expect(imageToolPageFor("orient", STILL)).toBe("orient");
+    expect(imageToolPageFor("orient", ANIMATED)).toBe("orient");
+    expect(imageToolPageFor("file", STILL)).toBe("file");
+  });
+
+  it("falls back to the first page when this picture lacks the chosen one", () => {
+    expect(imageToolPageFor("playback", STILL)).toBe("zoom");
+  });
+
+  it("has no page when there is no toolbar", () => {
+    expect(imageToolPageFor("orient", [])).toBeNull();
+    expect(imageToolPageFor(null, [])).toBeNull();
+  });
+});
+
+describe("tapOnlyRevealsChrome", () => {
+  it("a touch on a picture whose chrome has faded only brings the chrome back", () => {
+    expect(tapOnlyRevealsChrome("touch", true)).toBe(true);
+    expect(tapOnlyRevealsChrome("pen", true)).toBe(true);
+  });
+
+  it("a touch while the chrome is showing does its usual job", () => {
+    expect(tapOnlyRevealsChrome("touch", false)).toBe(false);
+    expect(tapOnlyRevealsChrome("pen", false)).toBe(false);
+  });
+
+  it("a mouse click never does: desktop behaviour is unchanged", () => {
+    expect(tapOnlyRevealsChrome("mouse", true)).toBe(false);
+    expect(tapOnlyRevealsChrome("mouse", false)).toBe(false);
   });
 });

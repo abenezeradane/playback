@@ -2422,6 +2422,13 @@ body {
   padding-right: 4px;
 }
 
+/* android-002: the strip the groups sit in. On desktop it has no box of its
+   own, so the groups stay the bar's flex items exactly as before; a phone
+   gives it one (see the paged toolbar below). */
+.imgview__pages {
+  display: contents;
+}
+
 /* img-001: the bar's three groups, separated by hairlines. */
 .imgview__tools {
   display: flex;
@@ -2876,6 +2883,7 @@ body {
 .home__openfile:focus-visible,
 .recent__clear:focus-visible,
 .imgview__navbtn:focus-visible,
+.imgview__dot:focus-visible,
 .cut__tbtn:focus-visible,
 .cut__play:focus-visible,
 .cut__opt:focus-visible,
@@ -4565,19 +4573,123 @@ button.shortcuts__backdrop {
   }
 }
 
-/* android-001: phone widths (360-412 CSS px). The desktop window's minWidth is
-   640 (tauri.conf.json), so nothing in this block can ever apply on desktop. */
-@media (max-width: 480px) {
-  /* Image viewer: at phone widths the floating tools pill pushed the Tags
-     button off-screen. Its groups (zoom, transport, orient, file) run wider
-     than the screen and the bar never wraps, so cap it to the viewport and
-     let it wrap instead. */
-  .imgview__controls {
-    max-width: calc(100% - 24px);
-    flex-wrap: wrap;
-    gap: 6px;
-    padding: 6px 10px;
-  }
+/* android-002: the image viewer's toolbar on a phone. A phone cannot fit every
+   tool in one row (ten for a still photo, fifteen for an animation), and
+   wrapping them stacked the pill three and four rows deep. Instead the bar
+   stays one row and shows one group at a time: the strip scrolls sideways and
+   native scroll-snap pages it, which runs with no script while the finger
+   moves. `data-paged` comes from the build's features, not the width, so a
+   phone gets the same bar in landscape. The bar's width is fixed so it never
+   resizes from one page to the next. */
+.imgview__controls[data-paged="true"] {
+  bottom: 44px;
+  width: min(calc(100% - 32px), 360px);
+  padding: 4px;
+}
+
+/* img-001 fits the picture inside the chrome, never under it. The paged bar
+   sits higher than the desktop one to leave its dots room, so the viewer's
+   bottom padding grows to clear it: 44 px up, 54 px tall, and a 12 px gap. */
+.imgview:has(> .imgview__controls[data-paged="true"]) .imgview__viewer {
+  padding-bottom: 110px;
+}
+
+.imgview__controls[data-paged="true"] .imgview__pages {
+  /* The groups' offsetLeft is measured from here (controller.ts). */
+  position: relative;
+  display: flex;
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  /* Clip the page sliding in to the pill's round ends. */
+  border-radius: inherit;
+}
+
+/* For a WebView older than `scrollbar-width` (Chromium 121). */
+.imgview__controls[data-paged="true"] .imgview__pages::-webkit-scrollbar {
+  display: none;
+}
+
+.imgview__controls[data-paged="true"] .imgview__tools {
+  flex: 0 0 100%;
+  justify-content: center;
+  gap: 8px;
+  scroll-snap-align: start;
+  /* A fast fling still moves one page, never past one. */
+  scroll-snap-stop: always;
+}
+
+/* Dividers only mean something between groups that share a row. */
+.imgview__controls[data-paged="true"] .imgview__tools + .imgview__tools {
+  padding-left: 0;
+  border-left: 0;
+}
+
+/* An animation's playback controls are its first page. */
+.imgview__controls[data-paged="true"] .imgview__tools--transport {
+  order: -1;
+}
+
+/* Finger-sized: 44 px, where the desktop's are 36. */
+.imgview__controls[data-paged="true"] .iconbtn {
+  width: 44px;
+  height: 44px;
+  font-size: 20px;
+}
+
+.imgview__controls[data-paged="true"] .pill {
+  min-height: 40px;
+}
+
+.imgview__controls[data-paged="true"] .imgview__frameinfo {
+  min-width: 0;
+}
+
+/* One dot per page, on a small pill of their own hung under the bar so they
+   read over a bright photo. Each dot's hit area is larger than the dot. */
+.imgview__dots {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 6px;
+  display: flex;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  background: rgba(13, 13, 13, 0.72);
+}
+
+.imgview__dot {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  cursor: pointer;
+}
+
+.imgview__dot::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--on-dark-mute);
+  opacity: 0.55;
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.imgview__dot[data-on="true"]::before {
+  background: var(--on-dark);
+  opacity: 1;
+  transform: scale(1.3);
 }
 
 /* android-001: a short touch screen, e.g. a phone in landscape with the soft

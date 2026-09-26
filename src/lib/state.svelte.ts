@@ -11,7 +11,13 @@
  * scrub surface, the add-timestamp field) — populated via `bind:this` on mount.
  */
 import type { Timestamp, Playlist } from "../player-core";
-import { parseFeatures, visibleActions, type VisibleActions, type StorageCard } from "../platform-core";
+import {
+  parseFeatures,
+  visibleActions,
+  type VisibleActions,
+  type StorageCard,
+  type ImageToolPage,
+} from "../platform-core";
 
 /** android-001: this build's capabilities, injected by the native side before
  *  any script ran (see platform.rs). Fixed for the life of the process. */
@@ -276,6 +282,9 @@ export const ui = $state({
   // The chrome auto-hide, mirroring the player's `idle` flag: true fades the
   // header + toolbar out and hides the cursor over the picture.
   imgIdle: false,
+  // android-002: the page the phone's paged toolbar is showing, which lights
+  // its dot. Always null on desktop, where the bar shows every group at once.
+  imgToolPage: null as ImageToolPage | null,
 
   // --- Image file actions (img-002) ---
   // The info panel: open state plus the rows it shows. Rows are built rather
@@ -466,6 +475,9 @@ export const els: {
    *  transform on the wrapper moves the canvas and the <img> together. */
   imgViewer?: HTMLDivElement;
   imgSurface?: HTMLDivElement;
+  /** android-002: the strip the toolbar's groups sit in. On a phone it scrolls
+   *  sideways, one group a page; on desktop it has no box of its own. */
+  imgToolStrip?: HTMLDivElement;
   tsAddInput?: HTMLInputElement;
   /** The inline timestamp-edit field — mounts only while a row is being edited (play-017). */
   tsEditInput?: HTMLInputElement;

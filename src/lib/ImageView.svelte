@@ -23,13 +23,32 @@
     doImageInfo,
     openTagPopover,
     doImageDelete,
+    onImageViewPointerDown,
+    syncImageToolPage,
+    showImageToolPage,
+    onImageToolsScrollEnd,
   } from "./controller";
   import { deleteButtonText } from "../player-core";
+  import { imageToolPages, IMAGE_TOOL_PAGE_LABELS } from "../platform-core";
 
   // img-003: the copy lives in player-core because it is unit-tested there —
   // the armed wording is the button's only sign of arming once the flash toast
   // has faded, which is exactly the kind of thing that rots silently.
   const delText = $derived(deleteButtonText(ui.imgDeleteArmed, ui.imgTitle));
+
+  // android-002: a phone pages through the toolbar's groups rather than
+  // showing them all. Fixed for the life of the process, like every feature.
+  const paged = ui.features.mobile;
+  const toolPages = $derived(paged ? imageToolPages(ui.imgMode) : []);
+
+  // A new mode can add or drop the playback page, and a hidden viewer forgets
+  // how far its strip had scrolled, so either puts the strip back on its page.
+  $effect(() => {
+    if (paged && ui.view === "image") {
+      void ui.imgMode;
+      syncImageToolPage();
+    }
+  });
 </script>
 
 <!-- ===================== IMAGE / GIF VIEWER (play-012, gallery-001) ===================== -->
@@ -45,6 +64,7 @@
   hidden={ui.view !== "image"}
   aria-label="Image viewer"
   onpointermove={showImageChrome}
+  onpointerdowncapture={onImageViewPointerDown}
 >
   <!-- Top overlay: back + title — mirrors the normal player's #stage header. -->
   <header class="overlay-top" data-tauri-drag-region>
@@ -170,88 +190,111 @@
 
   <!-- img-001: the tools bar. Always present for a real picture (the transform
        tools apply to every image); the GIF transport in the middle appears only
-       when the image animates, which is what `data-mode` on the section gates. -->
-  <div id="img-controls" class="imgview__controls">
-    <div class="imgview__tools imgview__tools--zoom">
-      <button id="img-zoom-out" class="iconbtn iconbtn--sm" type="button" title="Zoom out (-)" aria-label="Zoom out" onclick={() => doImageZoomStep(-1)}>
-        <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5M8 11h6" /></svg>
-      </button>
-      <button id="img-zoom-level" class="pill pill--ghost pill--sm" type="button" title="Fit to window / actual size (0 / 1)" onclick={() => doImageToggleFit()}>{ui.imgZoomLabel}</button>
-      <button id="img-zoom-in" class="iconbtn iconbtn--sm" type="button" title="Zoom in (+)" aria-label="Zoom in" onclick={() => doImageZoomStep(1)}>
-        <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5M8 11h6M11 8v6" /></svg>
-      </button>
-      <button id="img-fit" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgAtFit} title="Fit to window (0)" aria-label="Fit to window" onclick={() => doImageToggleFit()}>
-        <svg class="ic" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
-      </button>
+       when the image animates, which is what `data-mode` on the section gates.
+       android-002: on a phone (`data-paged`) the strip scrolls sideways, one
+       group a page, with the playback group moved first; on desktop the strip
+       has no box of its own and the groups sit in one row as they always did. -->
+  <div id="img-controls" class="imgview__controls" data-paged={paged}>
+    <div class="imgview__pages" bind:this={els.imgToolStrip} onscrollend={onImageToolsScrollEnd}>
+      <div class="imgview__tools imgview__tools--zoom" data-page="zoom">
+        <button id="img-zoom-out" class="iconbtn iconbtn--sm" type="button" title="Zoom out (-)" aria-label="Zoom out" onclick={() => doImageZoomStep(-1)}>
+          <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5M8 11h6" /></svg>
+        </button>
+        <button id="img-zoom-level" class="pill pill--ghost pill--sm" type="button" title="Fit to window / actual size (0 / 1)" onclick={() => doImageToggleFit()}>{ui.imgZoomLabel}</button>
+        <button id="img-zoom-in" class="iconbtn iconbtn--sm" type="button" title="Zoom in (+)" aria-label="Zoom in" onclick={() => doImageZoomStep(1)}>
+          <svg class="ic" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5M8 11h6M11 8v6" /></svg>
+        </button>
+        <button id="img-fit" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgAtFit} title="Fit to window (0)" aria-label="Fit to window" onclick={() => doImageToggleFit()}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+        </button>
+      </div>
+
+      <!-- Transport (shown only for an animated, frame-decoded image). -->
+      <div class="imgview__tools imgview__tools--transport" data-page="playback">
+        <button id="img-step-back" class="iconbtn iconbtn--sm" type="button" title="Previous frame (,)" onclick={() => stepGifFrame(-1)}>
+          <svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="11 19 2 12 11 5 11 19" /><rect x="13" y="5" width="2.4" height="14" rx="1" /></svg>
+        </button>
+        <button id="img-play" class="iconbtn iconbtn--primary" type="button" data-playing={ui.imgPlaying} title="Play / Pause (Space)" onclick={toggleGifPlay}>
+          <svg class="ic ic--fill ic-play" viewBox="0 0 24 24"><polygon points="7 4 20 12 7 20 7 4" /></svg>
+          <svg class="ic ic--fill ic-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
+        </button>
+        <button id="img-step-fwd" class="iconbtn iconbtn--sm" type="button" title="Next frame (.)" onclick={() => stepGifFrame(1)}>
+          <svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="13 5 22 12 13 19 13 5" /><rect x="8.6" y="5" width="2.4" height="14" rx="1" /></svg>
+        </button>
+        <button id="img-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed ([ / ])" onclick={cycleGifRate}>{ui.imgRateLabel}</button>
+        <span id="img-frameinfo" class="imgview__frameinfo" aria-live="polite">{ui.imgFrameInfo}</span>
+      </div>
+
+      <!-- Rotate + mirror. View-only: nothing here writes to the file on disk. -->
+      <div class="imgview__tools imgview__tools--orient" data-page="orient">
+        <button id="img-rotate-left" class="iconbtn iconbtn--sm" type="button" title="Rotate left (L)" aria-label="Rotate left" onclick={() => doImageRotate(-1)}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 1 3 6.7" /><path d="M3 5v5h5" /></svg>
+        </button>
+        <button id="img-rotate-right" class="iconbtn iconbtn--sm" type="button" title="Rotate right (R)" aria-label="Rotate right" onclick={() => doImageRotate(1)}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 0-3 6.7" /><path d="M21 5v5h-5" /></svg>
+        </button>
+        <button id="img-flip-h" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgFlipH} title="Flip horizontal (H)" aria-label="Flip horizontal" onclick={() => doImageFlip("h")}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="M12 3v18" /><path d="M9 7 4 12l5 5V7Z" /><path d="M15 7l5 5-5 5V7Z" /></svg>
+        </button>
+        <button id="img-flip-v" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgFlipV} title="Flip vertical (V)" aria-label="Flip vertical" onclick={() => doImageFlip("v")}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="M3 12h18" /><path d="M7 9 12 4l5 5H7Z" /><path d="M7 15l5 5 5-5H7Z" /></svg>
+        </button>
+      </div>
+
+      <!-- img-002: actions on the FILE rather than on the view of it. -->
+      <div class="imgview__tools imgview__tools--file" data-page="file">
+        {#if actions.copyImage}
+          <button id="img-copy" class="iconbtn iconbtn--sm" type="button" title="Copy image (C)" aria-label="Copy image" onclick={() => void doImageCopy()}>
+            <svg class="ic" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+          </button>
+        {/if}
+        {#if actions.reveal}
+          <button id="img-reveal" class="iconbtn iconbtn--sm" type="button" title="Show in Explorer (E)" aria-label="Show in Explorer" onclick={() => void doImageReveal()}>
+            <svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></svg>
+          </button>
+        {/if}
+        <button id="img-info" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgInfoOpen} title="Image info (I)" aria-label="Image info" onclick={() => void doImageInfo()}>
+          <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 16v-4" /><circle cx="12" cy="8.2" r="1" /></svg>
+        </button>
+        <button id="btn-img-tag" class="iconbtn iconbtn--sm" type="button" title="Tags (#)" aria-label="Tags" onclick={openTagPopover}>
+          <svg class="ic" viewBox="0 0 24 24"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /><circle cx="7.5" cy="7.5" r="1.5" /></svg>
+        </button>
+        <!-- img-003: the only control in this app that destroys a user's file.
+             Two presses, and the file goes to the Recycle Bin — see
+             doImageDelete for why this is not a dialog. `data-armed` is what
+             makes the armed state visible rather than only announced. -->
+        {#if actions.delete}
+          <button
+            id="img-delete"
+            class="iconbtn iconbtn--sm iconbtn--danger"
+            type="button"
+            data-armed={ui.imgDeleteArmed}
+            title={delText.title}
+            aria-label={delText.label}
+            onclick={() => void doImageDelete()}
+          >
+            <svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
+          </button>
+        {/if}
+      </div>
     </div>
 
-    <!-- Transport (shown only for an animated, frame-decoded image). -->
-    <div class="imgview__tools imgview__tools--transport">
-      <button id="img-step-back" class="iconbtn iconbtn--sm" type="button" title="Previous frame (,)" onclick={() => stepGifFrame(-1)}>
-        <svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="11 19 2 12 11 5 11 19" /><rect x="13" y="5" width="2.4" height="14" rx="1" /></svg>
-      </button>
-      <button id="img-play" class="iconbtn iconbtn--primary" type="button" data-playing={ui.imgPlaying} title="Play / Pause (Space)" onclick={toggleGifPlay}>
-        <svg class="ic ic--fill ic-play" viewBox="0 0 24 24"><polygon points="7 4 20 12 7 20 7 4" /></svg>
-        <svg class="ic ic--fill ic-pause" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1" /><rect x="14" y="4" width="4" height="16" rx="1" /></svg>
-      </button>
-      <button id="img-step-fwd" class="iconbtn iconbtn--sm" type="button" title="Next frame (.)" onclick={() => stepGifFrame(1)}>
-        <svg class="ic ic--fill" viewBox="0 0 24 24"><polygon points="13 5 22 12 13 19 13 5" /><rect x="8.6" y="5" width="2.4" height="14" rx="1" /></svg>
-      </button>
-      <button id="img-rate" class="pill pill--ghost pill--sm" type="button" title="Playback speed ([ / ])" onclick={cycleGifRate}>{ui.imgRateLabel}</button>
-      <span id="img-frameinfo" class="imgview__frameinfo" aria-live="polite">{ui.imgFrameInfo}</span>
-    </div>
-
-    <!-- Rotate + mirror. View-only: nothing here writes to the file on disk. -->
-    <div class="imgview__tools imgview__tools--orient">
-      <button id="img-rotate-left" class="iconbtn iconbtn--sm" type="button" title="Rotate left (L)" aria-label="Rotate left" onclick={() => doImageRotate(-1)}>
-        <svg class="ic" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 1 3 6.7" /><path d="M3 5v5h5" /></svg>
-      </button>
-      <button id="img-rotate-right" class="iconbtn iconbtn--sm" type="button" title="Rotate right (R)" aria-label="Rotate right" onclick={() => doImageRotate(1)}>
-        <svg class="ic" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 0-3 6.7" /><path d="M21 5v5h-5" /></svg>
-      </button>
-      <button id="img-flip-h" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgFlipH} title="Flip horizontal (H)" aria-label="Flip horizontal" onclick={() => doImageFlip("h")}>
-        <svg class="ic" viewBox="0 0 24 24"><path d="M12 3v18" /><path d="M9 7 4 12l5 5V7Z" /><path d="M15 7l5 5-5 5V7Z" /></svg>
-      </button>
-      <button id="img-flip-v" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgFlipV} title="Flip vertical (V)" aria-label="Flip vertical" onclick={() => doImageFlip("v")}>
-        <svg class="ic" viewBox="0 0 24 24"><path d="M3 12h18" /><path d="M7 9 12 4l5 5H7Z" /><path d="M7 15l5 5 5-5H7Z" /></svg>
-      </button>
-    </div>
-
-    <!-- img-002: actions on the FILE rather than on the view of it. -->
-    <div class="imgview__tools imgview__tools--file">
-      {#if actions.copyImage}
-        <button id="img-copy" class="iconbtn iconbtn--sm" type="button" title="Copy image (C)" aria-label="Copy image" onclick={() => void doImageCopy()}>
-          <svg class="ic" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
-        </button>
-      {/if}
-      {#if actions.reveal}
-        <button id="img-reveal" class="iconbtn iconbtn--sm" type="button" title="Show in Explorer (E)" aria-label="Show in Explorer" onclick={() => void doImageReveal()}>
-          <svg class="ic" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /></svg>
-        </button>
-      {/if}
-      <button id="img-info" class="iconbtn iconbtn--sm" type="button" data-on={ui.imgInfoOpen} title="Image info (I)" aria-label="Image info" onclick={() => void doImageInfo()}>
-        <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 16v-4" /><circle cx="12" cy="8.2" r="1" /></svg>
-      </button>
-      <button id="btn-img-tag" class="iconbtn iconbtn--sm" type="button" title="Tags (#)" aria-label="Tags" onclick={openTagPopover}>
-        <svg class="ic" viewBox="0 0 24 24"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z" /><circle cx="7.5" cy="7.5" r="1.5" /></svg>
-      </button>
-      <!-- img-003: the only control in this app that destroys a user's file.
-           Two presses, and the file goes to the Recycle Bin — see
-           doImageDelete for why this is not a dialog. `data-armed` is what
-           makes the armed state visible rather than only announced. -->
-      {#if actions.delete}
-        <button
-          id="img-delete"
-          class="iconbtn iconbtn--sm iconbtn--danger"
-          type="button"
-          data-armed={ui.imgDeleteArmed}
-          title={delText.title}
-          aria-label={delText.label}
-          onclick={() => void doImageDelete()}
-        >
-          <svg class="ic" viewBox="0 0 24 24"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M10 11v6M14 11v6" /></svg>
-        </button>
-      {/if}
-    </div>
+    <!-- android-002: one dot per page. Each is also a button, for anyone who
+         would rather tap than swipe. -->
+    {#if toolPages.length > 1}
+      <div class="imgview__dots" role="group" aria-label="Toolbar pages">
+        {#each toolPages as page (page)}
+          <button
+            class="imgview__dot"
+            type="button"
+            data-page={page}
+            data-on={page === ui.imgToolPage}
+            aria-label={IMAGE_TOOL_PAGE_LABELS[page]}
+            aria-current={page === ui.imgToolPage ? "true" : undefined}
+            onclick={() => showImageToolPage(page)}
+          ></button>
+        {/each}
+      </div>
+    {/if}
   </div>
 </section>

@@ -157,6 +157,10 @@ import {
   storageCards,
   withTimeout,
   HOST_CALL_TIMEOUT_MS,
+  imageToolPages,
+  imageToolPageFor,
+  tapOnlyRevealsChrome,
+  type ImageToolPage,
   type StorageCard,
   type StorageVolume,
 } from "../platform-core";
@@ -4126,6 +4130,90 @@ function cancelImageIdle(): void {
   ui.imgIdle = false;
 }
 
+/** Whether the press under way began with a finger or pen on faded chrome, so
+ *  the click it ends in only brings the chrome back (android-002). Every press
+ *  sets it afresh, so a stale value never outlives the next press. */
+let imgPressRevealsOnly = false;
+
+/** A finger or pen pressing anywhere in the viewer brings the chrome back and
+ *  restarts its countdown. It runs in the capture phase, ahead of the
+ *  picture's own handlers. On a phone nothing moves a pointer between taps, so
+ *  without this a faded toolbar came back only when the photo was dragged. A
+ *  mouse is left to the pointermove listener, as it always was. */
+export function onImageViewPointerDown(e: PointerEvent): void {
+  imgPressRevealsOnly = tapOnlyRevealsChrome(e.pointerType, ui.imgIdle);
+  if (e.pointerType !== "mouse") showImageChrome();
+}
+
+// --- Paged tools on a phone (android-002) -----------------------------------
+//
+// A phone cannot fit every tool in one row, so there the toolbar's groups sit
+// in a strip that scrolls sideways, one group a page. CSS scroll-snap does the
+// paging, so no script runs while a finger swipes; this only keeps the dots
+// honest about which page is showing and which one was last chosen.
+
+/** The page last swiped or tapped to, kept across pictures. */
+let imgToolPageChosen: ImageToolPage | null = null;
+
+/** The group on the strip that is page `page`. */
+function imageToolGroup(strip: HTMLElement, page: ImageToolPage): HTMLElement | null {
+  return strip.querySelector<HTMLElement>(`[data-page="${page}"]`);
+}
+
+/** The page the strip has come to rest on: the shown group whose left edge is
+ *  nearest the scroll offset. A hidden group (a still photo's playback
+ *  controls) has no offsetParent and is not a page. */
+function imageToolPageAtRest(strip: HTMLElement): ImageToolPage | null {
+  let best: ImageToolPage | null = null;
+  let bestDistance = Infinity;
+  for (const group of strip.querySelectorAll<HTMLElement>("[data-page]")) {
+    if (group.offsetParent === null) continue;
+    const distance = Math.abs(group.offsetLeft - strip.scrollLeft);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = group.dataset.page as ImageToolPage;
+    }
+  }
+  return best;
+}
+
+function scrollImageToolsTo(page: ImageToolPage, behavior: ScrollBehavior): void {
+  const strip = els.imgToolStrip;
+  const group = strip ? imageToolGroup(strip, page) : null;
+  if (strip && group) strip.scrollTo({ left: group.offsetLeft, behavior });
+}
+
+/** Put the strip on the page this picture opens on. Runs whenever the pages
+ *  may have changed or the strip lost its offset: a new viewer mode, or the
+ *  viewer shown again, since a hidden element forgets how far it had scrolled. */
+export function syncImageToolPage(): void {
+  if (!ui.features.mobile) return;
+  const page = imageToolPageFor(imgToolPageChosen, imageToolPages(ui.imgMode));
+  ui.imgToolPage = page;
+  if (page) scrollImageToolsTo(page, "instant");
+}
+
+/** A dot was tapped: glide to its page and remember the choice. */
+export function showImageToolPage(page: ImageToolPage): void {
+  imgToolPageChosen = page;
+  ui.imgToolPage = page;
+  showImageChrome();
+  scrollImageToolsTo(page, "smooth");
+}
+
+/** The strip came to rest. A swipe that landed on another page is a choice.
+ *  An instant or dot-driven scroll lands where `ui.imgToolPage` already says,
+ *  so it changes nothing. */
+export function onImageToolsScrollEnd(): void {
+  const strip = els.imgToolStrip;
+  if (!strip) return;
+  showImageChrome();
+  const page = imageToolPageAtRest(strip);
+  if (page === null || page === ui.imgToolPage) return;
+  imgToolPageChosen = page;
+  ui.imgToolPage = page;
+}
+
 // ---------------------------------------------------------------------------
 // Image file actions (img-002)
 //
@@ -7035,6 +7123,11 @@ export function onVideoClick(): void {
 export function onImageClick(e: MouseEvent): void {
   if (imgDragMoved) {
     imgDragMoved = false;
+    return;
+  }
+  // android-002: a tap on faded chrome was only asking for the chrome back.
+  if (imgPressRevealsOnly) {
+    imgPressRevealsOnly = false;
     return;
   }
   if (imageClickTimer !== null) {

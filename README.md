@@ -125,6 +125,9 @@ Playback also builds for Android phones (Android 11 / API 30 and later). On a
 phone it asks once for All-files access, lists the phone's storage (internal
 storage and any SD card) on Home, and opens a folder as the same gallery of
 photos, archives and videos as on desktop, with video played by the web engine.
+The photo viewer's tools sit in a one-row bar that shows one group at a time;
+swipe the bar, or tap a dot under it, to move between zoom, rotate and flip,
+info and tags, and an animated GIF's playback controls.
 Delete, reveal, copy image and the native (mpv) engine are not on Android yet.
 
 The build needs, on top of the prerequisites above:

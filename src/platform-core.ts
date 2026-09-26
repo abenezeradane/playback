@@ -146,3 +146,46 @@ export function backAction(view: string, layerOpen: boolean): BackAction {
   if (view === "empty") return "background";
   return "step";
 }
+
+/** One page of the image viewer's toolbar on a phone (android-002). A phone
+ *  cannot fit every tool in one row, so the bar pages through its groups, one
+ *  group a page. */
+export type ImageToolPage = "playback" | "zoom" | "orient" | "file";
+
+/** What each page's dot is called, for the screen reader. */
+export const IMAGE_TOOL_PAGE_LABELS: Readonly<Record<ImageToolPage, string>> = Object.freeze({
+  playback: "Playback controls",
+  zoom: "Zoom tools",
+  orient: "Rotate and flip",
+  file: "Info and tags",
+});
+
+/** The pages for a picture in this viewer mode, in order. An animation's
+ *  playback controls come first, since they are what a GIF is watched with.
+ *  A still frame has none, and neither has a picture the WebView draws itself
+ *  (`native`: every JPEG, and a GIF it animates on its own). While loading and
+ *  after an error there is no toolbar, so there are no pages. */
+export function imageToolPages(mode: string): ImageToolPage[] {
+  if (mode === "loading" || mode === "error") return [];
+  const still: ImageToolPage[] = ["zoom", "orient", "file"];
+  return mode === "animated" ? ["playback", ...still] : still;
+}
+
+/** The page a picture opens on: the one last chosen, while this picture has
+ *  it, so a run of photos can be turned without swiping back each time. Only a
+ *  choice counts, never a page the bar fell back to, so a GIF still opens on
+ *  its playback controls after a still photo that had none. */
+export function imageToolPageFor(
+  chosen: ImageToolPage | null,
+  pages: readonly ImageToolPage[],
+): ImageToolPage | null {
+  if (chosen !== null && pages.includes(chosen)) return chosen;
+  return pages[0] ?? null;
+}
+
+/** Whether a tap on the picture should only bring the faded chrome back,
+ *  rather than zoom it or pause a GIF (android-002). A mouse never needs this:
+ *  it moves, which brings the chrome back, before it can click. */
+export function tapOnlyRevealsChrome(pointerType: string, chromeHidden: boolean): boolean {
+  return chromeHidden && pointerType !== "mouse";
+}
